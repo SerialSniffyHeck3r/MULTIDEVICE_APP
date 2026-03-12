@@ -23,6 +23,19 @@ static void APP_STATE_ApplyDefaultSettingsUnlocked(void)
     /* ---------------------------------------------------------------------- */
     g_app_state.settings.gps.boot_profile  = APP_GPS_BOOT_PROFILE_MULTI_CONST_10HZ;
     g_app_state.settings.gps.power_profile = APP_GPS_POWER_PROFILE_HIGH_POWER;
+
+    /* ---------------------------------------------------------------------- */
+    /*  시계 기본 정책은                                                       */
+    /*    - timezone : KST(UTC+09:00)                                          */
+    /*    - GPS auto sync : enabled                                             */
+    /*    - GPS periodic time-only sync : 10 min                                */
+    /*  으로 시작한다. 추후 UI/API에서 바꾸더라도 backup register에 따로        */
+    /*  저장되므로 cold boot 기본값은 여기만 유지하면 된다.                    */
+    /* ---------------------------------------------------------------------- */
+    g_app_state.settings.clock.timezone_quarters = APP_CLOCK_TIMEZONE_QUARTERS_DEFAULT;
+    g_app_state.settings.clock.gps_auto_sync_enabled = 1u;
+    g_app_state.settings.clock.gps_sync_interval_minutes = APP_CLOCK_GPS_SYNC_INTERVAL_MIN_DEFAULT;
+    g_app_state.settings.clock.reserved0 = 0u;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -33,6 +46,37 @@ static void APP_STATE_ResetGpsUnlocked(void)
 {
     memset((void *)&g_app_state.gps, 0, sizeof(g_app_state.gps));
     g_app_state.gps.initialized = true;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  내부 유틸: CLOCK 저장소 초기화                                              */
+/* -------------------------------------------------------------------------- */
+static void APP_STATE_ResetClockUnlocked(void)
+{
+    memset((void *)&g_app_state.clock, 0, sizeof(g_app_state.clock));
+
+    /* ---------------------------------------------------------------------- */
+    /*  APP_STATE.clock 는 "RTC에서 실제로 읽은 raw/runtime" 저장소다.          */
+    /*  초기값 단계에서는 settings의 clock 기본 정책을 그대로 반영해 둔다.     */
+    /*  이후 APP_CLOCK_Init()가 backup register를 읽어 최종 runtime 값을 채운다. */
+    /* ---------------------------------------------------------------------- */
+    g_app_state.clock.initialized = false;
+    g_app_state.clock.backup_config_valid = false;
+    g_app_state.clock.rtc_time_valid = false;
+    g_app_state.clock.rtc_read_valid = false;
+    g_app_state.clock.gps_candidate_valid = false;
+    g_app_state.clock.gps_auto_sync_enabled_runtime =
+        (g_app_state.settings.clock.gps_auto_sync_enabled != 0u) ? true : false;
+    g_app_state.clock.gps_last_sync_success = false;
+    g_app_state.clock.gps_last_sync_was_full = false;
+    g_app_state.clock.gps_resolved_seen = false;
+    g_app_state.clock.timezone_config_valid = true;
+
+    g_app_state.clock.timezone_quarters = g_app_state.settings.clock.timezone_quarters;
+    g_app_state.clock.gps_sync_interval_minutes =
+        g_app_state.settings.clock.gps_sync_interval_minutes;
+    g_app_state.clock.last_sync_source = (uint8_t)APP_CLOCK_SYNC_SOURCE_NONE;
+    g_app_state.clock.reserved0 = 0u;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -303,6 +347,7 @@ void APP_STATE_Init(void)
 
     APP_STATE_ApplyDefaultSettingsUnlocked();
     APP_STATE_ResetGpsUnlocked();
+    APP_STATE_ResetClockUnlocked();
     APP_STATE_ResetGy86Unlocked();
     APP_STATE_ResetDs18b20Unlocked();
     APP_STATE_ResetBrightnessUnlocked();
@@ -463,6 +508,24 @@ void APP_STATE_CopySettingsSnapshot(app_settings_t *dst)
     /*  settings는 ISR에서 갱신하지 않는 정적 정책 저장소다.                    */
     /* ---------------------------------------------------------------------- */
     memcpy(dst, (const void *)&g_app_state.settings, sizeof(*dst));
+}
+
+/* -------------------------------------------------------------------------- */
+/*  공개 API: CLOCK 전체 스냅샷 복사                                            */
+/* -------------------------------------------------------------------------- */
+
+void APP_STATE_CopyClockSnapshot(app_clock_state_t *dst)
+{
+    if (dst == 0)
+    {
+        return;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /*  CLOCK slice는 main loop의 APP_CLOCK_Task()에서만 갱신된다.              */
+    /*  따라서 snapshot 복사는 plain memcpy로 충분하다.                        */
+    /* ---------------------------------------------------------------------- */
+    memcpy((void *)dst, (const void *)&g_app_state.clock, sizeof(*dst));
 }
 
 /* -------------------------------------------------------------------------- */

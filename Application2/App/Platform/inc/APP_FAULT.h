@@ -14,7 +14,10 @@
 /*  설계 포인트                                                               */
 /*  - APP_STATE는 부팅 시 memset으로 초기화되므로, '다음 부팅까지 살아 있어야 하는' */
 /*    fault 로그를 APP_STATE에 두지 않는다.                                    */
-/*  - 대신 RTC backup register를 사용해서 리셋 이후에도 유지되게 만든다.        */
+/*  - 이번 교체본에서는 RTC backup register를 더 이상 fault log에 사용하지       */
+/*    않는다.                                                                  */
+/*  - fault log는 BKPSRAM의 app-private 영역에 저장하고, RTC backup register는  */
+/*    시계 metadata 전용으로 비워 둔다.                                        */
 /*  - fault handler에서는 가능한 한 짧고 단순하게:                             */
 /*      1) 레지스터 스냅샷 기록                                                */
 /*      2) NVIC_SystemReset()                                                  */
@@ -48,7 +51,13 @@ typedef enum
 /* -------------------------------------------------------------------------- */
 /*  persistent log 구조체                                                      */
 /*                                                                            */
-/*  이 구조체는 RTC backup register 20개 x 32bit = 총 80바이트에 정확히 맞춘다.  */
+/*  이 구조체는 32bit word 20개 = 총 80바이트로 유지한다.                      */
+/*                                                                            */
+/*  이유                                                                       */
+/*  - word 단위 memcpy/write 가 단순해진다.                                    */
+/*  - BKPSRAM 내부 app-private 슬롯에 그대로 덤프하기 쉽다.                    */
+/*  - 기존 RTC BKP register 기반 구현과도 size가 같아 로그 해석 구조를          */
+/*    갈아엎지 않아도 된다.                                                    */
 /*                                                                            */
 /*  header     : magic + version + fault type                                  */
 /*  cfsr~shcsr : Cortex-M system fault status 계열 레지스터                    */

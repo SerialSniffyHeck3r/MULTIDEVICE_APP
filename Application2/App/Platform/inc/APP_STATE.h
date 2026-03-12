@@ -63,10 +63,134 @@ typedef struct
     app_gps_power_profile_t power_profile;
 } app_gps_settings_t;
 
+#ifndef APP_CLOCK_TIMEZONE_QUARTERS_MIN
+#define APP_CLOCK_TIMEZONE_QUARTERS_MIN   (-48)
+#endif
+
+#ifndef APP_CLOCK_TIMEZONE_QUARTERS_MAX
+#define APP_CLOCK_TIMEZONE_QUARTERS_MAX   (56)
+#endif
+
+#ifndef APP_CLOCK_TIMEZONE_QUARTERS_DEFAULT
+#define APP_CLOCK_TIMEZONE_QUARTERS_DEFAULT  (36)
+#endif
+
+#ifndef APP_CLOCK_GPS_SYNC_INTERVAL_MIN_DEFAULT
+#define APP_CLOCK_GPS_SYNC_INTERVAL_MIN_DEFAULT  (10u)
+#endif
+
 typedef struct
 {
-    app_gps_settings_t gps;
+    int8_t  timezone_quarters;          /* UTC offset / 15 min 단위. 한국 기본값 +36 */
+    uint8_t gps_auto_sync_enabled;      /* GPS 자동 동기화 사용 여부                 */
+    uint8_t gps_sync_interval_minutes;  /* GPS time-only 주기. 현재 기본 10분        */
+    uint8_t reserved0;                  /* 정렬/향후 확장용                           */
+} app_clock_settings_t;
+
+typedef struct
+{
+    app_gps_settings_t   gps;
+    app_clock_settings_t clock;
 } app_settings_t;
+
+/* -------------------------------------------------------------------------- */
+/*  RTC / CLOCK 공개 상태                                                      */
+/*                                                                            */
+/*  철학                                                                       */
+/*  - 하드웨어 RTC는 UTC 기준으로만 유지한다.                                  */
+/*  - timezone 적용/요일 계산/로컬 시간 전개는 APP 계층에서 수행한다.          */
+/*  - UI는 이 저장소의 valid 플래그를 보고 시간을 그릴지 "--:--"를 그릴지      */
+/*    결정할 수 있다.                                                          */
+/*                                                                            */
+/*  backup domain 사용 규칙                                                    */
+/*  - RTC date/time register : 실제 시계 자체                                  */
+/*  - RTC backup register   : clock 전용 magic / config / validity metadata    */
+/*  - BKPSRAM               : RTC와 무관한 다른 persistent 용도(APP_FAULT 등)  */
+/* -------------------------------------------------------------------------- */
+
+typedef enum
+{
+    APP_CLOCK_SYNC_SOURCE_NONE           = 0u,
+    APP_CLOCK_SYNC_SOURCE_BOOT_DEFAULT   = 1u,
+    APP_CLOCK_SYNC_SOURCE_MANUAL         = 2u,
+    APP_CLOCK_SYNC_SOURCE_GPS_FULL       = 3u,
+    APP_CLOCK_SYNC_SOURCE_GPS_PERIODIC   = 4u,
+    APP_CLOCK_SYNC_SOURCE_EXTERNAL_STUB  = 5u
+} app_clock_sync_source_t;
+
+typedef struct
+{
+    uint16_t year;                       /* 4-digit year                              */
+    uint8_t  month;                      /* 1..12                                     */
+    uint8_t  day;                        /* 1..31                                     */
+    uint8_t  hour;                       /* 0..23                                     */
+    uint8_t  min;                        /* 0..59                                     */
+    uint8_t  sec;                        /* 0..59                                     */
+    uint8_t  weekday;                    /* 1..7, Monday=1                            */
+} app_clock_calendar_t;
+
+typedef struct
+{
+    uint8_t  hours;                      /* HAL_RTC_GetTime 결과 raw hour             */
+    uint8_t  minutes;                    /* HAL_RTC_GetTime 결과 raw minute           */
+    uint8_t  seconds;                    /* HAL_RTC_GetTime 결과 raw second           */
+    uint8_t  time_format;                /* HAL raw time format                       */
+    uint32_t sub_seconds;                /* HAL raw subsecond                         */
+    uint32_t second_fraction;            /* HAL raw second fraction                   */
+    uint32_t daylight_saving;            /* HAL raw daylight saving field             */
+    uint32_t store_operation;            /* HAL raw store operation field             */
+} app_clock_rtc_time_raw_t;
+
+typedef struct
+{
+    uint8_t week_day;                    /* HAL_RTC_GetDate 결과 raw weekday          */
+    uint8_t month;                       /* HAL_RTC_GetDate 결과 raw month            */
+    uint8_t date;                        /* HAL_RTC_GetDate 결과 raw day-of-month     */
+    uint8_t year_2digit;                 /* HAL_RTC_GetDate 결과 raw year(00..99)     */
+} app_clock_rtc_date_raw_t;
+
+typedef struct
+{
+    bool     initialized;                /* APP_CLOCK_Init 완료 여부                  */
+    bool     backup_config_valid;        /* RTC backup register config magic 유효     */
+    bool     rtc_time_valid;             /* 현재 RTC 값이 신뢰 가능한가               */
+    bool     rtc_read_valid;             /* 마지막 HAL read 결과가 유효했는가         */
+    bool     gps_candidate_valid;        /* 현재 GPS time/date가 sync 후보인가        */
+    bool     gps_auto_sync_enabled_runtime; /* runtime에 반영된 auto-sync 상태        */
+    bool     gps_last_sync_success;      /* 마지막 GPS sync 성공 여부                 */
+    bool     gps_last_sync_was_full;     /* 마지막 GPS sync가 full date/time였는가    */
+    bool     gps_resolved_seen;          /* 이번 부팅에서 GPS fully resolved 관측 여부 */
+    bool     timezone_config_valid;      /* timezone 값 범위가 유효한가               */
+
+    int8_t   timezone_quarters;          /* UTC offset / 15 min 단위                  */
+    uint8_t  gps_sync_interval_minutes;  /* periodic GPS sync 주기                    */
+    uint8_t  last_sync_source;           /* app_clock_sync_source_t raw               */
+    uint8_t  reserved0;                  /* 정렬/향후 확장용                           */
+
+    uint32_t last_hw_read_ms;            /* 마지막 RTC 하드웨어 read 시각             */
+    uint32_t last_hw_set_ms;             /* 마지막 RTC 하드웨어 write 시각            */
+    uint32_t last_validity_change_ms;    /* valid 플래그 최종 변경 시각               */
+    uint32_t last_gps_sync_ms;           /* 마지막 GPS sync 완료 시각                 */
+    uint32_t next_gps_sync_due_ms;       /* 다음 GPS periodic sync 예정 시각          */
+
+    uint32_t gps_full_sync_count;        /* GPS full sync 누적 횟수                   */
+    uint32_t gps_periodic_sync_count;    /* GPS time-only sync 누적 횟수              */
+    uint32_t manual_set_count;           /* 수동 설정 누적 횟수                       */
+    uint32_t invalid_read_count;         /* invalid RTC read 관측 횟수                */
+    uint32_t rtc_read_count;             /* RTC read 성공 누적 횟수                   */
+    uint32_t rtc_write_count;            /* RTC write 성공 누적 횟수                  */
+    uint32_t rtc_error_count;            /* HAL RTC read/write 실패 누적 횟수         */
+    uint32_t backup_write_count;         /* RTC backup config write 누적 횟수         */
+    uint32_t backup_read_count;          /* RTC backup config read 누적 횟수          */
+    uint32_t last_hal_status;            /* 마지막 HAL_RTC_* 반환값 raw               */
+
+    app_clock_rtc_time_raw_t rtc_time_raw; /* 마지막 RTC raw time snapshot            */
+    app_clock_rtc_date_raw_t rtc_date_raw; /* 마지막 RTC raw date snapshot            */
+
+    app_clock_calendar_t utc;            /* 하드웨어 RTC에서 읽은 UTC 시간            */
+    app_clock_calendar_t local;          /* timezone 적용 후 local 시간               */
+    app_clock_calendar_t last_gps_utc;   /* 마지막으로 채택한 GPS UTC 시간            */
+} app_clock_state_t;
 
 /* -------------------------------------------------------------------------- */
 /*  UBX raw payload structures                                                 */
@@ -1030,6 +1154,7 @@ typedef struct
     app_bluetooth_state_t  bluetooth;   /* Bluetooth bring-up / 무선 시리얼 저장소   */
     app_debug_uart_state_t debug_uart;  /* 유선 DEBUG UART 상태 저장소               */
     app_sd_state_t         sd;          /* SD / FATFS / hotplug 공개 상태 저장소     */
+    app_clock_state_t      clock;     /* RTC / timezone / GPS sync 상태 저장소     */
 
     /* 다른 센서/서브시스템도 계속 여기에 추가하면 된다. */
     /* 예: battery, storage, ui, logger ... */
@@ -1120,6 +1245,7 @@ void APP_STATE_CopyAudioSnapshot(app_audio_state_t *dst);
 void APP_STATE_CopyBluetoothSnapshot(app_bluetooth_state_t *dst);
 void APP_STATE_CopyDebugUartSnapshot(app_debug_uart_state_t *dst);
 void APP_STATE_CopySdSnapshot(app_sd_state_t *dst);
+void APP_STATE_CopyClockSnapshot(app_clock_state_t *dst);
 
 void APP_STATE_CopySettingsSnapshot(app_settings_t *dst);
 

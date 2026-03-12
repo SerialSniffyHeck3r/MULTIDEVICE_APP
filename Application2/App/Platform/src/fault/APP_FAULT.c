@@ -6,8 +6,8 @@
 /* -------------------------------------------------------------------------- */
 /*  compile-time sanity check                                                  */
 /*                                                                            */
-/*  RTC backup register는 총 20개 x 32bit 이므로, persistent log 구조체도        */
-/*  정확히 80바이트여야 한다.                                                  */
+/*  persistent fault log는 BKPSRAM app-private 슬롯에 20 word 단위로 저장한다. */
+/*  따라서 구조체 크기도 정확히 80바이트여야 한다.                            */
 /* -------------------------------------------------------------------------- */
 
 typedef char app_fault_log_size_must_be_80_bytes[
@@ -20,6 +20,7 @@ typedef char app_fault_log_size_must_be_80_bytes[
 #define APP_FAULT_MAGIC                    0xFA17u
 #define APP_FAULT_VERSION                  0x01u
 #define APP_FAULT_WORD_COUNT               20u
+#define APP_FAULT_BKPSRAM_OFFSET_BYTES     256u
 
 #ifndef APP_FAULT_DEFAULT_SHOW_MS
 #define APP_FAULT_DEFAULT_SHOW_MS          10000u
@@ -52,6 +53,9 @@ typedef char app_fault_log_size_must_be_80_bytes[
 
 #define APP_FAULT_EXC_RETURN_EXTENDED_FRAME_MASK 0x10u
 #define APP_FAULT_EXTENDED_FRAME_WORDS          18u
+
+typedef char app_fault_bkpsram_offset_must_be_word_aligned[
+    ((APP_FAULT_BKPSRAM_OFFSET_BYTES % sizeof(uint32_t)) == 0u) ? 1 : -1];
 
 /* -------------------------------------------------------------------------- */
 /*  내부 타입                                                                  */
@@ -103,53 +107,79 @@ static const app_fault_reason_map_t s_app_fault_reason_table[] =
 /*  backup domain access helpers                                               */
 /*                                                                            */
 /*  중요한 점                                                                 */
-/*  - fault context에서는 HAL/RTC init 상태를 믿지 않는다.                      */
-/*  - 그래서 hrtc 핸들이나 HAL_RTCEx_BKUPWrite()를 쓰지 않고,                   */
-/*    최소한의 레지스터 접근만 직접 수행한다.                                  */
+/*  - 이번 구현에서는 RTC backup register를 전혀 사용하지 않는다.              */
+/*  - 대신 BKPSRAM의 app-private 영역에 fault log를 저장한다.                  */
+/*  - fault context에서는 HAL init 상태를 믿지 않으므로,                        */
+/*    HAL API 대신 최소한의 레지스터 접근으로 clock/regulator만 직접 올린다.   */
+/*  - BKPSRAM retention은 VBAT와 backup regulator 상태에 의존하므로,            */
+/*    write/read 전에 backup regulator enable과 ready를 한 번 확인한다.        */
 /* -------------------------------------------------------------------------- */
 
 static void app_fault_prepare_backup_domain(void)
 {
-    /* PWR 인터페이스 클럭을 켠다. backup domain write enable(DBP) 설정에는
-     * PWR peripheral clock가 필요하다. */
+    uint32_t wait_count;
+
+    /* ---------------------------------------------------------------------- */
+    /*  PWR peripheral clock는 DBP/BRE 제어에 필요하다.                        */
+    /* ---------------------------------------------------------------------- */
     RCC->APB1ENR |= RCC_APB1ENR_PWREN;
     (void)RCC->APB1ENR;
 
-    /* backup domain write unlock */
+    /* ---------------------------------------------------------------------- */
+    /*  backup domain write unlock                                             */
+    /* ---------------------------------------------------------------------- */
     PWR->CR |= PWR_CR_DBP;
     (void)PWR->CR;
 
-#if defined(RCC_BDCR_RTCEN)
-    /* RTC register bank 접근 안정성을 위해 RTCEN bit도 올려둔다.
-     * 이미 켜져 있으면 그대로 유지되고, 켜져 있지 않더라도 가능한 범위에서
-     * backup register 접근 확률을 높여준다. */
-    RCC->BDCR |= RCC_BDCR_RTCEN;
-    (void)RCC->BDCR;
+#if defined(RCC_AHB1ENR_BKPSRAMEN)
+    /* ---------------------------------------------------------------------- */
+    /*  BKPSRAM AHB clock enable                                               */
+    /* ---------------------------------------------------------------------- */
+    RCC->AHB1ENR |= RCC_AHB1ENR_BKPSRAMEN;
+    (void)RCC->AHB1ENR;
+#endif
+
+#if defined(PWR_CSR_BRE)
+    /* ---------------------------------------------------------------------- */
+    /*  backup regulator enable                                                */
+    /*                                                                        */
+    /*  VDD가 꺼지고 VBAT만 남아 있을 때도 BKPSRAM retention이 유지되려면        */
+    /*  이 regulator가 켜져 있어야 한다.                                      */
+    /* ---------------------------------------------------------------------- */
+    PWR->CSR |= PWR_CSR_BRE;
+    (void)PWR->CSR;
+#endif
+
+#if defined(PWR_CSR_BRR)
+    /* ---------------------------------------------------------------------- */
+    /*  ready bit는 무한 대기하지 않고 bounded loop로 본다.                     */
+    /*  fault path에서 영원히 멈추는 것보다, 최악의 경우 retention만 포기하고    */
+    /*  reset으로 넘어가는 편이 낫다.                                         */
+    /* ---------------------------------------------------------------------- */
+    wait_count = 100000u;
+    while (((PWR->CSR & PWR_CSR_BRR) == 0u) && (wait_count > 0u))
+    {
+        wait_count--;
+    }
 #endif
 
     __DSB();
     __ISB();
 }
 
-static void app_fault_rtc_write_protection_disable(void)
-{
-    /* STM32 RTC write protection unlock sequence */
-    RTC->WPR = 0xCAu;
-    RTC->WPR = 0x53u;
-}
-
-static void app_fault_rtc_write_protection_enable(void)
-{
-    /* 어떤 값이든 protection 재활성화에 쓰일 수 있지만,
-     * ST 예제와 HAL 스타일에 맞춰 0xFF를 넣는다. */
-    RTC->WPR = 0xFFu;
-}
-
 static volatile uint32_t *app_fault_backup_word_array(void)
 {
-    /* RTC backup register는 BKP0R부터 32bit 간격으로 연속 배치되어 있다.
-     * 구조체를 word 단위로 그대로 저장/복원하기 쉽게 배열처럼 취급한다. */
-    return (volatile uint32_t *)&RTC->BKP0R;
+    /* ---------------------------------------------------------------------- */
+    /*  BKPSRAM 첫 구간은 boot shared/control block이 쓸 수 있으므로             */
+    /*  app fault log는 0x100 오프셋 이후의 app-private 영역에 둔다.            */
+    /*                                                                        */
+    /*  현재 로그 크기                                                         */
+    /*    20 word x 4 byte = 80 byte                                           */
+    /*                                                                        */
+    /*  현재 로그 사용 범위                                                    */
+    /*    BKPSRAM_BASE + 0x100 ~ +0x14F                                        */
+    /* ---------------------------------------------------------------------- */
+    return (volatile uint32_t *)(BKPSRAM_BASE + APP_FAULT_BKPSRAM_OFFSET_BYTES);
 }
 
 static void app_fault_backup_write_words(const uint32_t *src_words, uint32_t word_count)
@@ -157,7 +187,7 @@ static void app_fault_backup_write_words(const uint32_t *src_words, uint32_t wor
     volatile uint32_t *dst_words;
     uint32_t i;
 
-    if (src_words == 0u)
+    if (src_words == 0)
     {
         return;
     }
@@ -168,16 +198,12 @@ static void app_fault_backup_write_words(const uint32_t *src_words, uint32_t wor
     }
 
     app_fault_prepare_backup_domain();
-    app_fault_rtc_write_protection_disable();
-
     dst_words = app_fault_backup_word_array();
 
     for (i = 0u; i < word_count; i++)
     {
         dst_words[i] = src_words[i];
     }
-
-    app_fault_rtc_write_protection_enable();
 
     __DSB();
     __ISB();
@@ -188,7 +214,7 @@ static void app_fault_backup_read_words(uint32_t *dst_words, uint32_t word_count
     volatile uint32_t *src_words;
     uint32_t i;
 
-    if (dst_words == 0u)
+    if (dst_words == 0)
     {
         return;
     }
@@ -199,7 +225,6 @@ static void app_fault_backup_read_words(uint32_t *dst_words, uint32_t word_count
     }
 
     app_fault_prepare_backup_domain();
-
     src_words = app_fault_backup_word_array();
 
     for (i = 0u; i < word_count; i++)
@@ -238,7 +263,7 @@ static bool app_fault_log_is_valid(const app_fault_log_t *log)
 {
     app_fault_type_t type;
 
-    if (log == 0u)
+    if (log == 0)
     {
         return false;
     }
@@ -268,7 +293,7 @@ static bool app_fault_log_is_valid(const app_fault_log_t *log)
 
 bool APP_FAULT_ReadPersistentLog(app_fault_log_t *out_log)
 {
-    if (out_log == 0u)
+    if (out_log == 0)
     {
         return false;
     }
@@ -303,7 +328,7 @@ static const uint32_t *app_fault_get_basic_exception_frame(const uint32_t *raw_s
     /* Cortex-M4F에서는 FPU extended frame가 붙을 수 있다.
      * EXC_RETURN bit[4] == 0 이면 extended frame가 존재한다.
      * 이 경우 basic frame(r0~xPSR)은 그 뒤쪽 18워드 위치에 있다. */
-    if (raw_stack_frame == 0u)
+    if (raw_stack_frame == 0)
     {
         return 0u;
     }
@@ -320,7 +345,7 @@ static void app_fault_fill_common_registers(app_fault_log_t *log,
                                             app_fault_type_t type,
                                             uint32_t exc_return)
 {
-    if (log == 0u)
+    if (log == 0)
     {
         return;
     }
@@ -351,7 +376,7 @@ static void app_fault_fill_common_registers(app_fault_log_t *log,
 static void app_fault_fill_stacked_frame(app_fault_log_t *log,
                                          const uint32_t *basic_frame)
 {
-    if ((log == 0u) || (basic_frame == 0u))
+    if ((log == 0) || (basic_frame == 0))
     {
         return;
     }
@@ -413,7 +438,7 @@ void APP_FAULT_RecordSoftware(app_fault_type_t type, uint32_t pc_hint)
 
 static void app_fault_request_system_reset(void)
 {
-    /* backup register write가 실제로 peripheral 쪽으로 밀려나가도록 barrier를 준다. */
+    /* BKPSRAM write가 실제 메모리/버스 쪽으로 밀려나가도록 barrier를 준다. */
     __DSB();
     __ISB();
 
@@ -500,7 +525,7 @@ static const char *app_fault_get_title(app_fault_type_t type)
 
 static void app_fault_summary_clear(app_fault_summary_block_t *block)
 {
-    if (block == 0u)
+    if (block == 0)
     {
         return;
     }
@@ -512,7 +537,7 @@ static void app_fault_summary_push(app_fault_summary_block_t *block, const char 
 {
     size_t copy_len;
 
-    if ((block == 0u) || (text == 0u))
+    if ((block == 0) || (text == 0))
     {
         return;
     }
@@ -541,7 +566,7 @@ static void app_fault_build_summary(const app_fault_log_t *log,
     uint32_t hfsr;
     uint32_t i;
 
-    if ((log == 0u) || (summary == 0u))
+    if ((log == 0) || (summary == 0))
     {
         return;
     }
@@ -663,7 +688,7 @@ static void app_fault_draw_centered_title(u8g2_t *u8g2, const char *title)
     uint16_t title_width;
     uint16_t x;
 
-    if ((u8g2 == 0u) || (title == 0u))
+    if ((u8g2 == 0) || (title == 0))
     {
         return;
     }
@@ -688,7 +713,7 @@ static void app_fault_draw_summary(u8g2_t *u8g2, const app_fault_summary_block_t
 {
     uint8_t i;
 
-    if ((u8g2 == 0u) || (summary == 0u))
+    if ((u8g2 == 0) || (summary == 0))
     {
         return;
     }
@@ -714,7 +739,7 @@ static void app_fault_draw_reg_pair(u8g2_t *u8g2,
     char line[48];
     uint8_t y;
 
-    if ((u8g2 == 0u) || (left_name == 0u) || (right_name == 0u))
+    if ((u8g2 == 0) || (left_name == 0) || (right_name == 0))
     {
         return;
     }
@@ -740,7 +765,7 @@ static void app_fault_draw_single_reg(u8g2_t *u8g2,
     char line[24];
     uint8_t y;
 
-    if ((u8g2 == 0u) || (name == 0u))
+    if ((u8g2 == 0) || (name == 0))
     {
         return;
     }
@@ -758,7 +783,7 @@ static void app_fault_draw_single_reg(u8g2_t *u8g2,
 
 static void app_fault_draw_register_block(u8g2_t *u8g2, const app_fault_log_t *log)
 {
-    if ((u8g2 == 0u) || (log == 0u))
+    if ((u8g2 == 0) || (log == 0))
     {
         return;
     }
@@ -784,7 +809,7 @@ static void app_fault_draw_progress_bar(u8g2_t *u8g2,
 {
     uint32_t fill_w;
 
-    if ((u8g2 == 0u) || (total_ms == 0u))
+    if ((u8g2 == 0) || (total_ms == 0u))
     {
         return;
     }
@@ -822,7 +847,7 @@ static void app_fault_draw_screen(u8g2_t *u8g2,
     app_fault_summary_block_t summary;
     app_fault_type_t type;
 
-    if ((u8g2 == 0u) || (log == 0u))
+    if ((u8g2 == 0) || (log == 0))
     {
         return;
     }
@@ -860,7 +885,7 @@ void APP_FAULT_BootCheckAndShow(u8g2_t *u8g2, uint32_t show_ms)
     uint32_t elapsed_ms;
 
     /* u8g2 핸들이 없으면 아무 것도 할 수 없다. */
-    if (u8g2 == 0u)
+    if (u8g2 == 0)
     {
         return;
     }
