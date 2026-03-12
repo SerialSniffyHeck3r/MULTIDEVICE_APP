@@ -79,7 +79,7 @@
 
 #include "FW_AppGuard.h"
 
-
+#include "ui_engine.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -117,9 +117,11 @@ void SystemClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+#if 0   /* legacy debug UI moved to Application2/App/Display_UI/Debug */
+
+
   static void GPS_FormatSpeedLine(char *line,
-                                  size_t line_size,
-                                  const app_gps_ui_snapshot_t *gps)
+
   {
       uint32_t speed_mmps_abs;
       uint32_t speed_kmh_x10;
@@ -2462,7 +2464,7 @@ void SystemClock_Config(void);
       u8g2_DrawStr(u8g2, x, 12u, event_text);
   }
 
-
+#endif  /* legacy debug UI moved to Application2/App/Display_UI/Debug */
 
 
   /* -------------------------------------------------------------------------- */
@@ -2584,6 +2586,7 @@ void SystemClock_Config(void);
     if (htim->Instance == TIM7)
     {
       U8G2_UC1608_FrameTickFromISR();
+      UI_Engine_OnFrameTickFromISR();
     }
   }
 
@@ -2668,7 +2671,16 @@ int main(void)
   /* ------------------------------------------------------------------------ */
 
   Button_Init();
-  g_last_button_pressed_mask = Button_GetPressedMask();
+
+  /* ------------------------------------------------------------------------ */
+  /*  새 UI 엔진 초기화                                                        */
+  /*                                                                          */
+  /*  - 버튼 초기화가 끝난 뒤 현재 눌림 마스크를 안전하게 읽을 수 있다.         */
+  /*  - 여기서는 엔진의 내부 상태/하단바/토스트/팝업/legacy debug state를      */
+  /*    초기화만 하고, 실제 LCD draw는 아직 하지 않는다.                       */
+  /* ------------------------------------------------------------------------ */
+  UI_Engine_Init();
+
 
   /* ------------------------------------------------------------------------ */
   /*  CubeMX가 MSP init에서 priority를 다시 생성하더라도                       */
@@ -2703,6 +2715,14 @@ int main(void)
    * --------------------------------------------------------------------*/
   APP_FAULT_BootCheckAndShow(U8G2_UC1608_GetHandle(), 10000u);
   FW_AppGuard_Kick();
+
+  /* ---------------------------------------------------------------------- */
+  /*  새 UI 엔진의 부트 로고를 지금 시점에 한 번 그린다.                      */
+  /*                                                                        */
+  /*  이후 나머지 센서/통신/스토리지 init가 진행되는 동안                     */
+  /*  마지막으로 그려진 이 부트 로고가 화면에 남아 있게 된다.                 */
+  /* ---------------------------------------------------------------------- */
+  UI_Engine_EarlyBootDraw();
 
   /* Display가 준비된 뒤, 나머지 런타임 init를 진행한다. */
   Init_Ublox_M10(); // NEO-M10 GPS Initialization
@@ -2777,8 +2797,7 @@ int main(void)
   /* -------------------------------------------------------------------- */
   /*  첫 화면은 다음 frame token을 잡는 즉시 바로 한 번 그리게 한다.         */
   /* -------------------------------------------------------------------- */
-  APP_RequestUiRedraw();
-
+  UI_Engine_RequestRedraw();
 
 
 
@@ -2794,7 +2813,6 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
       uint32_t now_ms;
-      uint32_t pressed_mask;
 
       now_ms = HAL_GetTick();
       FW_AppGuard_Kick();
@@ -2815,9 +2833,6 @@ int main(void)
 
       /* ------------------------------------------------------------------ */
       /*  RTC / timezone / GPS sync policy service                           */
-      /*                                                                    */
-      /*  GPS parser가 방금 갱신한 fix/date/time snapshot을 읽어               */
-      /*  full sync / periodic time-only sync / validity 관리까지 맡는다.    */
       /* ------------------------------------------------------------------ */
       APP_CLOCK_Task(now_ms);
 
@@ -2846,91 +2861,17 @@ int main(void)
       APP_SD_Task(now_ms);
 
       /* ------------------------------------------------------------------ */
-      /*  버튼 debounce / long-press 판정 + event queue 소비                  */
+      /*  버튼 debounce / long-press 판정                                     */
+      /*                                                                        */
+      /*  실제 event 소비와 UI 화면 전환, 하단바 press invert,                 */
+      /*  popup/toast, legacy debug dispatch는 이제 UI 엔진이 맡는다.          */
       /* ------------------------------------------------------------------ */
       Button_Task(now_ms);
-      APP_HandleButtonEvents();
 
       /* ------------------------------------------------------------------ */
-      /*  overlay에 표시하는 "현재 눌린 버튼 마스크" 가 바뀌면                 */
-      /*  다음 frame token에서 즉시 다시 그릴 수 있게 만든다.                  */
+      /*  새 UI 엔진 task                                                     */
       /* ------------------------------------------------------------------ */
-      pressed_mask = Button_GetPressedMask();
-      if (pressed_mask != g_last_button_pressed_mask)
-      {
-          g_last_button_pressed_mask = pressed_mask;
-          APP_RequestUiRedraw();
-      }
-
-      /* ------------------------------------------------------------------ */
-      /*  실제 화면 redraw는 여전히 frame token을 잡았을 때만 수행한다.        */
-      /*                                                                        */
-      /*  다만 이제는 token이 왔다고 무조건 다시 그리지 않고,                   */
-      /*  page별 최소 갱신 주기 또는 force redraw 조건을 만족할 때만           */
-      /*  snapshot copy + draw + SPI commit을 수행한다.                        */
-      /* ------------------------------------------------------------------ */
-      if (U8G2_UC1608_TryAcquireFrameToken() != 0u)
-      {
-          if ((g_ui_force_redraw == 0u) &&
-              ((uint32_t)(now_ms - g_last_ui_draw_ms) < APP_GetUiMinRefreshMs(g_ui_page)))
-          {
-              continue;
-          }
-
-          {
-              u8g2_t *u8g2 = U8G2_UC1608_GetHandle();
-
-              g_last_ui_draw_ms = now_ms;
-              g_ui_force_redraw = 0u;
-
-              u8g2_ClearBuffer(u8g2);
-
-              if (g_ui_page == APP_UI_PAGE_SENSOR)
-              {
-                  APP_STATE_CopySensorDebugSnapshot(&g_sensor_snapshot);
-                  APP_DrawSensorDebugPage(u8g2, &g_sensor_snapshot, now_ms);
-              }
-              else if (g_ui_page == APP_UI_PAGE_BRIGHTNESS)
-              {
-                  APP_STATE_CopyBrightnessSnapshot(&g_brightness_snapshot);
-                  APP_DrawBrightnessDebugPage(u8g2, &g_brightness_snapshot, now_ms);
-              }
-              else if (g_ui_page == APP_UI_PAGE_SD)
-              {
-                  APP_STATE_CopySdSnapshot(&g_sd_snapshot);
-                  APP_DrawSdDebugPage(u8g2, &g_sd_snapshot, now_ms);
-              }
-              else if (g_ui_page == APP_UI_PAGE_BLUETOOTH)
-              {
-                  APP_STATE_CopyBluetoothSnapshot(&g_bluetooth_snapshot);
-                  APP_DrawBluetoothDebugPage(u8g2, &g_bluetooth_snapshot, now_ms);
-              }
-              else if (g_ui_page == APP_UI_PAGE_AUDIO)
-              {
-                  APP_STATE_CopyAudioSnapshot(&g_audio_snapshot);
-                  APP_DrawAudioDebugPage(u8g2, &g_audio_snapshot, now_ms);
-              }
-              else if (g_ui_page == APP_UI_PAGE_SPI_FLASH)
-              {
-                  SPI_Flash_CopySnapshot(&g_spi_flash_snapshot);
-                  APP_DrawSpiFlashDebugPage(u8g2, &g_spi_flash_snapshot);
-              }
-              else if (g_ui_page == APP_UI_PAGE_CLOCK)
-              {
-                  APP_STATE_CopyClockSnapshot(&g_clock_snapshot);
-                  APP_DrawClockDebugPage(u8g2, &g_clock_snapshot, now_ms);
-              }
-              else
-              {
-                  APP_STATE_CopyGpsUiSnapshot(&g_gps_snapshot);
-                  APP_STATE_CopySettingsSnapshot(&g_settings_snapshot);
-                  GPS_DrawDebugPage(u8g2, &g_gps_snapshot, &g_settings_snapshot, now_ms);
-              }
-
-              APP_DrawButtonOverlay(u8g2);
-              U8G2_UC1608_CommitBuffer();
-          }
-      }
+      UI_Engine_Task(now_ms);
 
   }
 
@@ -3037,7 +2978,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
   }
 
   now_ms = HAL_GetTick();
-  APP_HandleBoardPageButtonIrq(now_ms);
+  UI_Engine_OnBoardDebugButtonIrq(now_ms);
 }
 
 /* USER CODE END 4 */
