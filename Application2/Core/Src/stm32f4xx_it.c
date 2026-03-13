@@ -54,6 +54,32 @@
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+
+/* -------------------------------------------------------------------------- */
+/*  Cube가 생성하는 기본 fault handler 심볼을 다른 이름으로 바꾼다.             */
+/*                                                                            */
+/*  목적                                                                      */
+/*  - 이 파일 아래쪽에 생성된 일반 C handler 정의와                            */
+/*    APP_FAULT_VECTORS.c의 진짜 naked handler 정의가                          */
+/*    이름 충돌 없이 동시에 존재하게 만든다.                                   */
+/*                                                                            */
+/*  결과                                                                      */
+/*  - startup vector가 찾는 진짜 이름                                          */
+/*      NMI_Handler / HardFault_Handler / MemManage_Handler /                  */
+/*      BusFault_Handler / UsageFault_Handler                                  */
+/*    은 APP_FAULT_VECTORS.c가 담당한다.                                       */
+/*  - Cube가 생성한 기존 함수들은                                              */
+/*    아래 alias 이름으로 바뀌어 링크만 조용히 통과한다.                       */
+/*                                                                            */
+/*  이 블록은 USER CODE 0 안에 있으므로                                        */
+/*  Cube 재생성 후에도 다시 붙여 넣기 쉽다.                                    */
+/* -------------------------------------------------------------------------- */
+#define NMI_Handler         CubeMX_NMI_Handler_Unused
+#define HardFault_Handler   CubeMX_HardFault_Handler_Unused
+#define MemManage_Handler   CubeMX_MemManage_Handler_Unused
+#define BusFault_Handler    CubeMX_BusFault_Handler_Unused
+#define UsageFault_Handler  CubeMX_UsageFault_Handler_Unused
+
 /* --------------------------------------------------------------------------
  *  Cortex-M fault handler는 "정확한 예외 스택 프레임"을 받아야 하므로
  *  naked wrapper로 구현한다.

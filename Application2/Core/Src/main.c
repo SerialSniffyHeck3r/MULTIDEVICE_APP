@@ -75,7 +75,7 @@
 #include "Audio_Presets.h"
 #include "Audio_App.h"
 
-
+#include "APP_FAULT_DIAG.h"
 
 #include "FW_AppGuard.h"
 
@@ -2715,6 +2715,19 @@ int main(void)
    *  를 보여준 뒤 로그를 지운다.
    * --------------------------------------------------------------------*/
   APP_FAULT_BootCheckAndShow(U8G2_UC1608_GetHandle(), 10000u);
+
+  /* -------------------------------------------------------------------- */
+  /*  bring-up용 fault 진단 모드를 여기서 한 번 켠다.                     */
+  /*                                                                      */
+  /*  이 블록은                                                            */
+  /*    1) MemManage / BusFault / UsageFault enable                       */
+  /*    2) 옵션에 따라 write buffer disable                               */
+  /*  를 수행해서                                                          */
+  /*  다음번 fault가 다시 나더라도                                         */
+  /*  현재보다 훨씬 의미 있는 예외 정보(EXRET / PC / LR)를 남기게 한다.   */
+  /* -------------------------------------------------------------------- */
+  APP_FAULT_DIAG_EnableBringupMode();
+
   FW_AppGuard_Kick();
 
   /* ---------------------------------------------------------------------- */
@@ -2813,67 +2826,73 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-      uint32_t now_ms;
+	  uint32_t now_ms;
 
-      now_ms = HAL_GetTick();
-      FW_AppGuard_Kick();
+	        now_ms = HAL_GetTick();
+	        FW_AppGuard_Kick();
 
-      /* ------------------------------------------------------------------ */
-      /*  오디오는 이 시스템에서 deadline이 가장 빡빡한 축에 속하므로           */
-      /*  가능한 한 loop의 앞쪽에서 먼저 producer refill을 수행한다.           */
-      /*                                                                    */
-      /*  이제 실제 deadline은 DMA ISR이 맡고,                                 */
-      /*  여기서는 software FIFO를 high watermark 근처까지 다시 채우는         */
-      /*  producer 역할만 한다.                                               */
-      /* ------------------------------------------------------------------ */
-      Audio_Driver_Task(now_ms);
-      Audio_App_Task(now_ms);
+	        /* ------------------------------------------------------------------ */
+	        /*  SD hotplug / mount / unmount / FAT 메타데이터 갱신                 */
+	        /*                                                                    */
+	        /*  이번 안정화에서는 APP_SD_Task를 Audio_Driver_Task보다 앞에 둔다.   */
+	        /*                                                                    */
+	        /*  이유                                                               */
+	        /*  - DET edge가 방금 들어온 경우                                       */
+	        /*    APP_SD가 먼저 debounce / stable change / teardown을 정리해야     */
+	        /*    오디오가 stale SD 세션을 다시 건드릴 확률이 더 낮아진다.          */
+	        /* ------------------------------------------------------------------ */
+	        APP_SD_Task(now_ms);
 
-      /* GPS parser / state maintenance */
-      Ublox_GPS_Task(now_ms);
+	        /* ------------------------------------------------------------------ */
+	        /*  오디오는 이 시스템에서 deadline이 가장 빡빡한 축에 속하므로           */
+	        /*  가능한 한 loop의 앞쪽에서 producer refill을 수행한다.               */
+	        /*                                                                    */
+	        /*  이제 실제 deadline은 DMA ISR이 맡고,                                 */
+	        /*  여기서는 software FIFO를 high watermark 근처까지 다시 채우는         */
+	        /*  producer 역할만 한다.                                               */
+	        /* ------------------------------------------------------------------ */
+	        Audio_Driver_Task(now_ms);
+	        Audio_App_Task(now_ms);
 
-      /* ------------------------------------------------------------------ */
-      /*  RTC / timezone / GPS sync policy service                           */
-      /* ------------------------------------------------------------------ */
-      APP_CLOCK_Task(now_ms);
+	        /* GPS parser / state maintenance */
+	        Ublox_GPS_Task(now_ms);
 
-      /* ------------------------------------------------------------------ */
-      /*  Bluetooth classic SPP bring-up / line parser / echo / auto ping    */
-      /* ------------------------------------------------------------------ */
-      Bluetooth_Task(now_ms);
+	        /* ------------------------------------------------------------------ */
+	        /*  RTC / timezone / GPS sync policy service                           */
+	        /* ------------------------------------------------------------------ */
+	        APP_CLOCK_Task(now_ms);
 
-      /* ------------------------------------------------------------------ */
-      /*  DEBUG UART 로그 큐도 main loop에서 가볍게 한 번 더 kick 해서         */
-      /*  HAL busy/error 후 멈춘 TX를 복구한다.                                */
-      /* ------------------------------------------------------------------ */
-      DEBUG_UART_Task(now_ms);
+	        /* ------------------------------------------------------------------ */
+	        /*  Bluetooth classic SPP bring-up / line parser / echo / auto ping    */
+	        /* ------------------------------------------------------------------ */
+	        Bluetooth_Task(now_ms);
 
-      /* 새 센서 드라이버들 */
-      GY86_IMU_Task(now_ms);
-      DS18B20_DRIVER_Task(now_ms);
-      Brightness_Sensor_Task(now_ms);
+	        /* ------------------------------------------------------------------ */
+	        /*  DEBUG UART 로그 큐도 main loop에서 가볍게 한 번 더 kick 해서         */
+	        /*  HAL busy/error 후 멈춘 TX를 복구한다.                                */
+	        /* ------------------------------------------------------------------ */
+	        DEBUG_UART_Task(now_ms);
 
-      /* SPI flash는 상태 머신 기반이라 loop마다 한 번씩만 진전시킨다. */
-      SPI_Flash_Task(now_ms);
+	        /* 새 센서 드라이버들 */
+	        GY86_IMU_Task(now_ms);
+	        DS18B20_DRIVER_Task(now_ms);
+	        Brightness_Sensor_Task(now_ms);
 
-      /* ------------------------------------------------------------------ */
-      /*  SD hotplug / mount / unmount / FAT 메타데이터 갱신                 */
-      /* ------------------------------------------------------------------ */
-      APP_SD_Task(now_ms);
+	        /* SPI flash는 상태 머신 기반이라 loop마다 한 번씩만 진전시킨다. */
+	        SPI_Flash_Task(now_ms);
 
-      /* ------------------------------------------------------------------ */
-      /*  버튼 debounce / long-press 판정                                     */
-      /*                                                                        */
-      /*  실제 event 소비와 UI 화면 전환, 하단바 press invert,                 */
-      /*  popup/toast, legacy debug dispatch는 이제 UI 엔진이 맡는다.          */
-      /* ------------------------------------------------------------------ */
-      Button_Task(now_ms);
+	        /* ------------------------------------------------------------------ */
+	        /*  버튼 debounce / long-press 판정                                     */
+	        /*                                                                    */
+	        /*  실제 event 소비와 UI 화면 전환, 하단바 press invert,                 */
+	        /*  popup/toast, legacy debug dispatch는 이제 UI 엔진이 맡는다.          */
+	        /* ------------------------------------------------------------------ */
+	        Button_Task(now_ms);
 
-      /* ------------------------------------------------------------------ */
-      /*  새 UI 엔진 task                                                     */
-      /* ------------------------------------------------------------------ */
-      UI_Engine_Task(now_ms);
-
+	        /* ------------------------------------------------------------------ */
+	        /*  새 UI 엔진 task                                                     */
+	        /* ------------------------------------------------------------------ */
+	        UI_Engine_Task(now_ms);
   }
 
 
