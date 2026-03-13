@@ -5,6 +5,21 @@
 #include <stdio.h>
 #include <string.h>
 
+
+/* -------------------------------------------------------------------------- */
+/* bring-up option                                                            */
+/*                                                                            */
+/* 현재 브링업 단계에서는 RTC가 아직 GPS/full registration 없이도             */
+/* 화면에 시계를 보여 줘야 하므로, 부팅 직후 valid 플래그를 강제로           */
+/* true 로 올리는 옵션을 기본 켜 둔다.                                       */
+/*                                                                            */
+/* 추후 양산/정식 빌드에서 원래 정책으로 되돌리고 싶으면                     */
+/* 이 값을 0u 로 바꾸면 된다.                                                */
+/* -------------------------------------------------------------------------- */
+#ifndef APP_CLOCK_FORCE_VALID_AT_BOOT
+#define APP_CLOCK_FORCE_VALID_AT_BOOT 1u
+#endif
+
 /* -------------------------------------------------------------------------- */
 /*  RTC backup register layout                                                */
 /*                                                                            */
@@ -919,13 +934,40 @@ void APP_CLOCK_Init(uint32_t now_ms)
     app_clock_refresh_runtime_snapshot_unlocked(now_ms);
 
     /* ---------------------------------------------------------------------- */
-    /*  backup config에 valid=false가 저장되어 있었다면                         */
-    /*  RTC는 읽히더라도 UI가 신뢰 시간으로 쓰지 않도록 그대로 유지한다.        */
-    /* ---------------------------------------------------------------------- */
-    if (g_app_state.clock.rtc_time_valid == false)
-    {
+      /* bring-up 강제 valid 정책                                               */
+      /*                                                                        */
+      /* 현재 단계의 요구사항은 "부팅 시 시계를 항상 보이게" 하는 것이다.         */
+      /* 따라서 valid=false 상태로 올라왔더라도,                                 */
+      /* - RTC read 자체가 실패했으면 baseline 시각을 한 번 더 써 주고           */
+      /* - 그 다음 valid 플래그를 강제로 true 로 올린다.                         */
+      /*                                                                        */
+      /* 이렇게 하면 status bar 쪽에서는 "--- -- --:--" 대신                    */
+      /* 최소한 baseline 또는 현재 RTC 값을 표시할 수 있다.                      */
+      /* ---------------------------------------------------------------------- */
+    #if (APP_CLOCK_FORCE_VALID_AT_BOOT != 0u)
+      if (g_app_state.clock.rtc_read_valid == false)
+      {
+        app_clock_write_invalid_baseline_unlocked(now_ms);
+        app_clock_refresh_runtime_snapshot_unlocked(now_ms);
+      }
+
+      if (g_app_state.clock.rtc_time_valid == false)
+      {
+        app_clock_set_rtc_validity_unlocked(true, now_ms);
+        app_clock_refresh_runtime_snapshot_unlocked(now_ms);
+      }
+    #else
+      /* ---------------------------------------------------------------------- */
+      /* 원래 정책 유지 모드                                                    */
+      /*                                                                        */
+      /* backup config에 valid=false가 저장되어 있었다면                         */
+      /* RTC는 읽히더라도 UI가 신뢰 시간으로 쓰지 않도록 그대로 유지한다.        */
+      /* ---------------------------------------------------------------------- */
+      if (g_app_state.clock.rtc_time_valid == false)
+      {
         g_app_state.clock.last_validity_change_ms = now_ms;
-    }
+      }
+    #endif
 }
 
 /* -------------------------------------------------------------------------- */

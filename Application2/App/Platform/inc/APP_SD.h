@@ -30,6 +30,26 @@ void APP_SD_Init(void);
 void APP_SD_Task(uint32_t now_ms);
 void APP_SD_OnDetectExti(void);
 
+/* -------------------------------------------------------------------------- */
+/*  공개 API: "지금 이 순간" FatFs 접근이 안전한가                              */
+/*                                                                            */
+/*  이 함수는 APP_STATE.sd의 공개 스냅샷만 보지 않고,                           */
+/*  APP_SD 내부 runtime mailbox + raw DET 핀 상태까지 함께 확인한다.           */
+/*                                                                            */
+/*  따라서 Audio_Driver처럼 "APP_SD_Task()보다 먼저 도는 task"도              */
+/*  SD remove edge 직후를 더 빨리 감지해서                                     */
+/*  새 f_open/f_read/f_opendir 호출을 보수적으로 막을 수 있다.                 */
+/*                                                                            */
+/*  반환 규칙                                                                  */
+/*  - true  : raw detect = present, debounce 진행 중 아님,                     */
+/*            stable present = true, initialized = true, mounted = true        */
+/*  - false : 위 조건 중 하나라도 깨진 상태                                    */
+/*                                                                            */
+/*  즉, 이 함수는 "조금이라도 애매하면 막는다" 쪽으로 설계된                   */
+/*  bring-up 안전 게이트다.                                                    */
+/* -------------------------------------------------------------------------- */
+bool APP_SD_IsFsAccessAllowedNow(void);
+
 #ifdef __cplusplus
 }
 #endif

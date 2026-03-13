@@ -5,11 +5,27 @@
 
 /* -------------------------------------------------------------------------- */
 /*  Font / geometry                                                            */
+/*                                                                            */
+/*  상단바의 세로 위치는 절대 고정이다.                                        */
+/*  - 모든 아이콘의 Y는 기존과 완전히 동일하게 0                              */
+/*  - 모든 텍스트의 baseline Y도 기존과 완전히 동일하게 7                     */
+/*                                                                            */
+/*  이번 수정에서 바뀌는 것은 "세 개의 왼쪽 아이콘의 X" 뿐이다.                */
+/*  그리고 그마저도 record / bluetooth / SD 세 요소만 재배치한다.             */
+/*  나머지 GPS, 온도, 시간 그룹의 X/Y는 기존 좌표를 1픽셀도 건드리지 않는다.  */
+/*                                                                            */
+/*  배치 계산                                                                  */
+/*  - record 아이콘 : x = 0, width = 7  -> 점유 범위 0..6                     */
+/*  - SD 아이콘     : 기존 45에서 정확히 5px 왼쪽으로 이동 -> x = 40          */
+/*  - Bluetooth     : record 끝(7)과 SD 시작(40) 사이 중앙 배치                */
+/*                   gap = 40 - 7 = 33                                         */
+/*                   BT width = 7, 남는 여백 = 26, 좌우 균등 여백 = 13         */
+/*                   따라서 BT x = 7 + 13 = 20                                */
 /* -------------------------------------------------------------------------- */
 #define UI_STATUSBAR_FONT             u8g2_font_6x12_mf
 #define UI_STATUSBAR_X_RECORD_ICON    0
-#define UI_STATUSBAR_X_BT_ICON        12
-#define UI_STATUSBAR_X_SD_ICON        45
+#define UI_STATUSBAR_X_BT_ICON        20
+#define UI_STATUSBAR_X_SD_ICON        40
 #define UI_STATUSBAR_X_GPS_GROUP      80
 #define UI_STATUSBAR_X_TEMP           138
 #define UI_STATUSBAR_X_TIME           168
@@ -308,6 +324,11 @@ void UI_StatusBar_Draw(u8g2_t *u8g2,
 
     /* ---------------------------------------------------------------------- */
     /*  1) REC / STOP / PAUSE 아이콘                                            */
+    /*                                                                            */
+    /*  여기서는 7x7 상태 아이콘만 그린다.                                       */
+    /*  문자열 "REC" 는 의도적으로 그리지 않는다.                               */
+    /*  따라서 아이콘 오른쪽에 rec 텍스트가 새로 찍히는 일은 이 파일 기준으로   */
+    /*  발생하지 않는다.                                                        */
     /* ---------------------------------------------------------------------- */
     switch (model->record_state)
     {
@@ -378,7 +399,11 @@ void UI_StatusBar_Draw(u8g2_t *u8g2,
     }
 
     /* ---------------------------------------------------------------------- */
-    /*  3) SD icon, absolute X = original 40 + 5px                             */
+    /*  3) SD icon                                                              */
+    /*                                                                            */
+    /*  SD 아이콘은 사용자의 요구대로 절대 좌표 x = 40 에 고정한다.             */
+    /*  이 값은 기존 x = 45 에서 정확히 5px 왼쪽으로 옮긴 결과다.               */
+    /*  Y는 status bar 아이콘 공통 규칙에 따라 기존과 동일하게 0을 유지한다.    */
     /* ---------------------------------------------------------------------- */
     sd_bmp = ui_statusbar_get_sd_icon(model, &sd_visible);
     if ((sd_visible != false) && (sd_bmp != 0))

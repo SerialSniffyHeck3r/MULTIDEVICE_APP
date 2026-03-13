@@ -1092,12 +1092,15 @@
       uint8_t y;
       uint32_t age_ms;
       uint32_t voice_index;
+      const app_sd_state_t *sd;
       char line[96];
 
       if ((u8g2 == 0) || (audio == 0))
       {
           return;
       }
+
+      sd = (const app_sd_state_t *)&g_app_state.sd;
 
       age_ms = (audio->last_update_ms == 0u) ?
                0u :
@@ -1165,9 +1168,24 @@
                (unsigned)audio->last_block_clipped);
       APP_DrawTextLine(u8g2, &y, line);
 
-      snprintf(line, sizeof(line), "SIL:%lu BPM:%lu",
-               (unsigned long)audio->silence_injected_sample_count,
-               (unsigned long)audio->sequence_bpm);
+      /* ------------------------------------------------------------------ */
+      /*  이 줄은 오디오 페이지 한가운데에 찍히는 "SD 생존 상태 요약 줄" 이다. */
+      /*                                                                    */
+      /*  위치                                                               */
+      /*  - 화면 좌측 상단에서 시작하는 text stack 중                        */
+      /*    WAV 메타데이터 직전 구간 한 줄을 차지한다.                       */
+      /*                                                                    */
+      /*  목적                                                               */
+      /*  - B6로 root WAV를 재생하는 동안                                     */
+      /*    mounted / stable / raw / debounce 상태를 같은 페이지에서          */
+      /*    즉시 같이 보게 해서                                               */
+      /*    hot-remove와 오디오 abort의 상관관계를 바로 관찰하게 한다.        */
+      /* ------------------------------------------------------------------ */
+      snprintf(line, sizeof(line), "SD M:%u ST:%u R:%u DB:%u",
+               sd->mounted ? 1u : 0u,
+               sd->detect_stable_present ? 1u : 0u,
+               sd->detect_raw_present ? 1u : 0u,
+               sd->detect_debounce_pending ? 1u : 0u);
       APP_DrawTextLine(u8g2, &y, line);
 
       snprintf(line, sizeof(line), "NAME:%s",

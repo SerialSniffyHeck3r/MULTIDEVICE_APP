@@ -2,6 +2,7 @@
 
 #include "fatfs.h"
 #include "bsp_driver_sd.h"
+#include "Audio_Driver.h"
 
 #include <string.h>
 
@@ -135,6 +136,53 @@ static uint8_t APP_SD_ReadDetectRawPresent(void)
     return (BSP_SD_IsDetected() == SD_PRESENT) ? 1u : 0u;
 }
 
+/* -------------------------------------------------------------------------- */
+/*  공개 API: "지금 이 순간" FatFs 접근 가능 여부                               */
+/*                                                                            */
+/*  이 함수는 main loop의 APP_SD_Task()가 아직 돌기 전이라도                    */
+/*    - raw DET 핀 상태                                                        */
+/*    - detect debounce pending 여부                                           */
+/*    - 가장 최근에 확정된 stable present 상태                                  */
+/*    - initialized / mounted 공개 상태                                         */
+/*  를 함께 보고 판단한다.                                                     */
+/*                                                                            */
+/*  따라서 Audio_Driver 같은 소비자는                                          */
+/*  SD remove edge 직후에 APP_STATE가 완전히 반영되기 전이라도                  */
+/*  "더 이상의 새 FatFs 접근은 금지" 라는 보수적 결정을 내릴 수 있다.         */
+/*                                                                            */
+/*  bring-up 단계에서는                                                          */
+/*  false positive(조금 일찍 막는 것)보다                                      */
+/*  false negative(빼졌는데 계속 읽는 것)가 훨씬 위험하므로                      */
+/*  조건을 일부러 엄격하게 잡는다.                                             */
+/* -------------------------------------------------------------------------- */
+bool APP_SD_IsFsAccessAllowedNow(void)
+{
+    const app_sd_state_t *sd;
+
+    sd = (const app_sd_state_t *)&g_app_state.sd;
+
+    if (APP_SD_ReadDetectRawPresent() == 0u)
+    {
+        return false;
+    }
+
+    if (s_app_sd_rt.detect_debounce_pending != 0u)
+    {
+        return false;
+    }
+
+    if (s_app_sd_rt.stable_present == 0u)
+    {
+        return false;
+    }
+
+    if ((sd->initialized == false) || (sd->mounted == false))
+    {
+        return false;
+    }
+
+    return true;
+}
 
 /* -------------------------------------------------------------------------- */
 /*  runtime -> APP_STATE detect 관측치 반영 helper                              */
@@ -441,6 +489,27 @@ static void APP_SD_ReadFatMetadata(app_sd_state_t *sd)
 }
 
 /* -------------------------------------------------------------------------- */
+/*  mount / unmount 전 storage client 정리 helper                               */
+/*                                                                            */
+/*  현재 이 프로젝트에서 SD를 직접 길게 잡고 있는 대표 소비자는                  */
+/*  Audio_Driver의 WAV streaming 경로다.                                       */
+/*                                                                            */
+/*  따라서 APP_SD가 f_mount(NULL) / HAL_SD_DeInit()를 호출하기 전에             */
+/*  먼저 오디오 쪽에 "지금부터 SD 세션이 내려간다" 를 알려서                    */
+/*    - WAV runtime 비활성화                                                   */
+/*    - software FIFO에 남은 SD 기반 tail 제거                                  */
+/*    - 이후 새 f_read/f_open 차단                                             */
+/*  가 먼저 끝나도록 만든다.                                                   */
+/*                                                                            */
+/*  나중에 사진 뷰어, 로그 리더, 설정 파일 로더 등                               */
+/*  다른 SD 소비자가 늘어나면 이 함수에 정리 호출을 추가하면 된다.             */
+/* -------------------------------------------------------------------------- */
+static void APP_SD_StopStorageClientsBeforeTearDown(void)
+{
+    Audio_Driver_OnSdWillUnmount();
+}
+
+/* -------------------------------------------------------------------------- */
 /*  mount / unmount helper                                                      */
 /* -------------------------------------------------------------------------- */
 
@@ -473,7 +542,18 @@ static void APP_SD_Unmount(uint32_t now_ms)
     had_live_volume = ((sd->mounted == true) || (sd->initialized == true)) ? 1u : 0u;
 
     /* ---------------------------------------------------------------------- */
-    /*  파일시스템과 HAL peripheral을 둘 다 내린다.                             */
+    /*  파일시스템과 HAL peripheral을 둘 다 내리기 전에                         */
+    /*  먼저 SD 볼륨을 쓰고 있던 상위 소비자들을 정리한다.                       */
+    /*                                                                        */
+    /*  이 순서를 지키지 않으면                                                 */
+    /*    1) Audio_Driver는 아직 FIL을 들고 있고                                */
+    /*    2) APP_SD는 이미 HAL_SD_DeInit()를 해 버려서                          */
+    /*    3) 다음 f_read/f_close가 bus fault로 이어질 수 있다.                  */
+    /* ---------------------------------------------------------------------- */
+    APP_SD_StopStorageClientsBeforeTearDown();
+
+    /* ---------------------------------------------------------------------- */
+    /*  그 다음 실제 파일시스템과 HAL peripheral을 내린다.                      */
     /*                                                                        */
     /*  hot-remove 이후 다음 재삽입 때                                         */
     /*  stale state 없이 다시 BSP_SD_Init() / f_mount() 를 타게 하려는 목적이다. */
@@ -500,17 +580,28 @@ static void APP_SD_AttemptMount(uint32_t now_ms)
     sd = (app_sd_state_t *)&g_app_state.sd;
 
     /* ---------------------------------------------------------------------- */
-    /*  mount는 항상 "정리 -> HAL init -> card info -> f_mount -> FAT query"    */
-    /*  순서로 새로 시도한다.                                                   */
+    /*  mount는 항상 "소비자 정리 -> 정리 -> HAL init -> card info -> f_mount   */
+    /*  -> FAT query" 순서로 새로 시도한다.                                     */
     /*                                                                        */
     /*  이전 세션의 반쯤 열린 상태를 최대한 끊고 시작하기 위해                  */
-    /*  f_mount(NULL) / HAL_SD_DeInit() 를 먼저 넣는다.                        */
+    /*  f_mount(NULL) / HAL_SD_DeInit() 를 먼저 넣지만,                          */
+    /*  그보다 더 먼저 상위 소비자에게 SD 세션 종료를 통보해야 한다.             */
     /* ---------------------------------------------------------------------- */
     sd->mount_attempt_count++;
     sd->last_mount_attempt_ms = now_ms;
     sd->last_mount_fresult     = APP_SD_FRESULT_INVALID;
     sd->last_getfree_fresult   = APP_SD_FRESULT_INVALID;
     sd->last_root_scan_fresult = APP_SD_FRESULT_INVALID;
+
+    /* ---------------------------------------------------------------------- */
+    /*  이전 세션에서 WAV streaming 같은 SD 소비자가 살아 있었다면               */
+    /*  mount 재시도 전에 반드시 끊는다.                                        */
+    /*                                                                        */
+    /*  특히 카드가 막 빠졌다가 다시 들어오는 hotplug 구간에서는                */
+    /*  "오디오는 예전 FIL을 계속 들고 있고, APP_SD는 버스를 재초기화" 하는    */
+    /*  꼬임을 여기서 먼저 차단해야 한다.                                       */
+    /* ---------------------------------------------------------------------- */
+    APP_SD_StopStorageClientsBeforeTearDown();
 
     (void)f_mount(0, SDPath, 0u);
     (void)HAL_SD_DeInit(&hsd);

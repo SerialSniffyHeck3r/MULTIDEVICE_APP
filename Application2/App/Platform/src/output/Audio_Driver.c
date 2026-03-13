@@ -1,4 +1,5 @@
 #include "Audio_Driver.h"
+#include "APP_SD.h"
 
 #include <ctype.h>
 #include <math.h>
@@ -50,6 +51,14 @@
 #endif
 
 #define AUDIO_SW_FIFO_MASK (AUDIO_SW_FIFO_SAMPLES - 1u)
+
+#ifndef AUDIO_WAV_IO_STAGE_CHUNK_BYTES
+#define AUDIO_WAV_IO_STAGE_CHUNK_BYTES 1024u
+#endif
+
+typedef char audio_wav_io_stage_chunk_must_be_word_multiple[
+    ((AUDIO_WAV_IO_STAGE_CHUNK_BYTES != 0u) &&
+     ((AUDIO_WAV_IO_STAGE_CHUNK_BYTES % 4u) == 0u)) ? 1 : -1];
 
 /* -------------------------------------------------------------------------- */
 /*  외부 CubeMX handle                                                         */
@@ -179,12 +188,99 @@ typedef struct
 static audio_driver_runtime_t s_audio_rt;
 
 /* -------------------------------------------------------------------------- */
+/*  WAV I/O stage buffer                                                      */
+/*                                                                            */
+/*  배경                                                                      */
+/*  - FatFs는 long read에서 file data의 가운데 구간을                          */
+/*    application buffer로 direct transfer 할 수 있다.                        */
+/*  - 이때 application buffer가 구조체 내부 offset 지점이거나                  */
+/*    f_read 호출 시점의 파일 offset과 정렬 궁합이 나쁘면                     */
+/*    하부 storage driver/HAL 구현에 따라 문제가 드러날 수 있다.              */
+/*                                                                            */
+/*  방어 전략                                                                 */
+/*  - SD/FatFs에서 올라오는 raw bytes는                                        */
+/*    이 고정 4-byte aligned stage buffer로 먼저 받는다.                      */
+/*  - 그 다음 Audio runtime의 read_buffer로 memcpy 한다.                      */
+/*                                                                            */
+/*  이렇게 하면                                                               */
+/*  - wav->read_buffer 안의 임의 offset 위치에                                 */
+/*    f_read가 직접 쓰지 않게 되고                                             */
+/*  - 브링업 단계에서 BusFault 재현률을 크게 낮출 수 있다.                    */
+/* -------------------------------------------------------------------------- */
+static uint32_t s_audio_wav_io_stage_words[AUDIO_WAV_IO_STAGE_CHUNK_BYTES / 4u];
+
+/* -------------------------------------------------------------------------- */
 /*  forward declaration                                                         */
 /*                                                                            */
 /*  FIFO service helper가 아래의 silence fill helper를 먼저 쓰므로              */
 /*  정적 prototype를 여기에서 한 번 선언해 둔다.                               */
 /* -------------------------------------------------------------------------- */
 static void Audio_Driver_FillBufferWithSilence(uint16_t *dst, uint32_t sample_count);
+
+/* -------------------------------------------------------------------------- */
+/*  내부 유틸: 매우 짧은 임계 구역 진입/이탈                                   */
+/*                                                                            */
+/*  목적                                                                      */
+/*  - software FIFO index와 DMA buffer는 ISR consumer와 공유된다.             */
+/*  - 그래서 reset/prime처럼 "SPSC 정상 경로가 아닌 강제 재정렬" 작업은       */
+/*    짧게 IRQ를 막고 원자적으로 끝내는 것이 안전하다.                         */
+/*                                                                            */
+/*  주의                                                                      */
+/*  - SD/FatFs/HAL close 같은 느린 동작은 절대 이 임계 구역 안에 넣지 않는다. */
+/*  - 여기서는 memcpy, index reset, DMA silence fill 같은                     */
+/*    매우 짧은 메모리 작업만 수행한다.                                       */
+/* -------------------------------------------------------------------------- */
+static uint32_t Audio_Driver_EnterCriticalSection(void)
+{
+    uint32_t primask;
+
+    primask = __get_PRIMASK();
+    __disable_irq();
+    __DMB();
+    return primask;
+}
+
+static void Audio_Driver_ExitCriticalSection(uint32_t primask)
+{
+    __DMB();
+
+    if ((primask & 0x1u) == 0u)
+    {
+        __enable_irq();
+    }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  내부 유틸: WAV read buffer 상태 sanity check                               */
+/*                                                                            */
+/*  브링업 단계에서는                                                           */
+/*  - read_index > read_valid                                                 */
+/*  - read_valid > read_buffer capacity                                       */
+/*  같은 내부 상태 붕괴를 조용히 넘기면                                        */
+/*  다음 memmove/offset 계산에서 바로 메모리 손상으로 번질 수 있다.           */
+/*                                                                            */
+/*  따라서 decode 직전/직후의 핵심 지점마다                                    */
+/*  이 helper로 최소한의 방어선을 친다.                                       */
+/* -------------------------------------------------------------------------- */
+static uint8_t Audio_Driver_IsWavBufferStateSane(const audio_wav_runtime_t *wav)
+{
+    if (wav == 0)
+    {
+        return 0u;
+    }
+
+    if (wav->read_valid > (uint32_t)sizeof(wav->read_buffer))
+    {
+        return 0u;
+    }
+
+    if (wav->read_index > wav->read_valid)
+    {
+        return 0u;
+    }
+
+    return 1u;
+}
 
 /* -------------------------------------------------------------------------- */
 /*  내부 유틸: 문자열 복사                                                     */
@@ -213,6 +309,69 @@ static void Audio_Driver_CopyTextSafe(char *dst, size_t dst_size, const char *sr
 
     memcpy(dst, src, copy_len);
     dst[copy_len] = '\0';
+}
+
+/* -------------------------------------------------------------------------- */
+/*  내부 유틸: FatFs FIL best-effort close                                      */
+/*                                                                            */
+/*  hot-remove 시점에는 이미 DET 핀이 떨어져 있거나                              */
+/*  APP_SD가 막 mount 해제를 시작하는 중일 수 있다.                             */
+/*                                                                            */
+/*  그런 상태에서 무조건 f_close()를 한 번 더 밀어 넣으면                       */
+/*  "닫는 행위 자체"가 다시 SD 버스를 건드리면서                               */
+/*  더 큰 bus fault를 만들 수 있다.                                            */
+/*                                                                            */
+/*  따라서 이 helper는                                                         */
+/*    - APP_SD가 지금 FatFs 접근을 허용하는가                                   */
+/*  를 먼저 보고, 정말 안전할 때만 f_close()를 수행한다.                       */
+/*                                                                            */
+/*  안전하지 않으면                                                             */
+/*  파일 객체 메모리만 버리고 상위 runtime을 무효화한다.                        */
+/*  bring-up 단계에서는 이 보수적 정책이 훨씬 안전하다.                         */
+/* -------------------------------------------------------------------------- */
+static void Audio_Driver_CloseFileObjectIfFsSafe(FIL *file_handle)
+{
+    if (file_handle == 0)
+    {
+        return;
+    }
+
+    if (APP_SD_IsFsAccessAllowedNow() == false)
+    {
+        return;
+    }
+
+    (void)f_close(file_handle);
+}
+
+/* -------------------------------------------------------------------------- */
+/*  내부 유틸: APP_STATE 쪽 WAV 공개 필드 초기화                                */
+/*                                                                            */
+/*  runtime 구조체를 memset 하더라도                                            */
+/*  디버그 화면이 보는 공개 저장소는 별도이므로                                  */
+/*  이 helper에서 함께 내려 줘야 한다.                                          */
+/* -------------------------------------------------------------------------- */
+static void Audio_Driver_ClearPublishedWavState(void)
+{
+    ((app_audio_state_t *)&g_app_state.audio)->wav_active = false;
+    ((app_audio_state_t *)&g_app_state.audio)->wav_native_rate_active = false;
+    ((app_audio_state_t *)&g_app_state.audio)->wav_source_sample_rate_hz = 0u;
+    ((app_audio_state_t *)&g_app_state.audio)->wav_source_data_bytes_remaining = 0u;
+    ((app_audio_state_t *)&g_app_state.audio)->wav_source_channels = 0u;
+    ((app_audio_state_t *)&g_app_state.audio)->wav_source_bits_per_sample = 0u;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  내부 유틸: WAV runtime 구조체를 강제로 무효화                               */
+/*                                                                            */
+/*  이 helper는 FATFS close를 포함하지 않는다.                                  */
+/*  즉, storage 세션이 이미 불안정해진 상황에서도                                */
+/*  "메모리 안의 오디오 runtime만 즉시 끊는" 용도로 안전하게 쓸 수 있다.      */
+/* -------------------------------------------------------------------------- */
+static void Audio_Driver_ResetWavRuntimeState(void)
+{
+    memset(&s_audio_rt.wav, 0, sizeof(s_audio_rt.wav));
+    Audio_Driver_ClearPublishedWavState();
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1189,17 +1348,10 @@ static void Audio_Driver_WavClose(void)
 {
     if (s_audio_rt.wav.active != 0u)
     {
-        (void)f_close(&s_audio_rt.wav.file);
+        Audio_Driver_CloseFileObjectIfFsSafe(&s_audio_rt.wav.file);
     }
 
-    memset(&s_audio_rt.wav, 0, sizeof(s_audio_rt.wav));
-
-    ((app_audio_state_t *)&g_app_state.audio)->wav_active = false;
-    ((app_audio_state_t *)&g_app_state.audio)->wav_native_rate_active = false;
-    ((app_audio_state_t *)&g_app_state.audio)->wav_source_sample_rate_hz = 0u;
-    ((app_audio_state_t *)&g_app_state.audio)->wav_source_data_bytes_remaining = 0u;
-    ((app_audio_state_t *)&g_app_state.audio)->wav_source_channels = 0u;
-    ((app_audio_state_t *)&g_app_state.audio)->wav_source_bits_per_sample = 0u;
+    Audio_Driver_ResetWavRuntimeState();
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1220,6 +1372,7 @@ static void Audio_Driver_ClearSequence(void)
 static void Audio_Driver_StopContentInternal(void)
 {
     app_audio_state_t *audio;
+    uint32_t primask;
 
     audio = (app_audio_state_t *)&g_app_state.audio;
 
@@ -1231,10 +1384,19 @@ static void Audio_Driver_StopContentInternal(void)
     /*  content stop은 "앞으로 더 만들 오디오" 뿐 아니라                       */
     /*  이미 만들어 둔 FIFO tail도 함께 버리는 의미다.                          */
     /*                                                                        */
-    /*  즉, stop 직후에는 곧바로 silence만 나가야 하므로                         */
-    /*  software FIFO도 여기서 함께 비운다.                                    */
+    /*  여기서 특히 중요한 점                                                   */
+    /*  - FIFO index reset                                                     */
+    /*  - DMA half/full buffer silence overwrite                               */
+    /*  는 ISR consumer와 공유되는 transport 상태 재정렬이라는 점이다.         */
+    /*                                                                        */
+    /*  따라서 SD/FATFS close 같은 느린 동작은 IRQ-on 상태에서 끝내고,         */
+    /*  진짜 공유 메모리 재정렬 구간만 아주 짧게 임계 구역으로 감싼다.          */
     /* ---------------------------------------------------------------------- */
+    primask = Audio_Driver_EnterCriticalSection();
     Audio_Driver_FifoReset();
+    Audio_Driver_FillBufferWithSilence(s_audio_rt.dma_buffer, AUDIO_DMA_BUFFER_SAMPLES);
+    Audio_Driver_ExitCriticalSection(primask);
+
     Audio_Driver_PublishFifoTelemetry();
 
     audio->content_active         = false;
@@ -1722,12 +1884,37 @@ static uint8_t Audio_Driver_WavEnsureBufferedBytes(audio_wav_runtime_t *wav,
     uint32_t buffered_bytes;
     uint32_t unread_file_bytes;
     uint32_t bytes_to_read;
+    uint8_t *io_stage_buffer;
     FRESULT fr;
 
     if (wav == 0)
     {
         return 0u;
     }
+
+    if (required_bytes > (uint32_t)sizeof(wav->read_buffer))
+    {
+        return 0u;
+    }
+
+    if (Audio_Driver_IsWavBufferStateSane(wav) == 0u)
+    {
+        return 0u;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /*  SD detect가 조금이라도 흔들리면                                         */
+    /*  이 시점부터는 새로운 f_read()를 절대 시작하지 않는다.                   */
+    /*                                                                        */
+    /*  여기서 false를 반환하면 상위 decode/render 경로가                       */
+    /*  WAV source를 종료시키고 silence 쪽으로 넘어간다.                        */
+    /* ---------------------------------------------------------------------- */
+    if (APP_SD_IsFsAccessAllowedNow() == false)
+    {
+        return 0u;
+    }
+
+    io_stage_buffer = (uint8_t *)s_audio_wav_io_stage_words;
 
     buffered_bytes = wav->read_valid - wav->read_index;
     if (buffered_bytes >= required_bytes)
@@ -1754,29 +1941,68 @@ static uint8_t Audio_Driver_WavEnsureBufferedBytes(audio_wav_runtime_t *wav,
         unread_file_bytes = 0u;
     }
 
-    if (unread_file_bytes == 0u)
+    while ((buffered_bytes < required_bytes) && (unread_file_bytes > 0u))
     {
-        return (wav->read_valid >= required_bytes) ? 1u : 0u;
+        /* ------------------------------------------------------------------ */
+        /*  중요한 방어 포인트                                                  */
+        /*  - f_read의 direct transfer 대상은                                   */
+        /*    wav->read_buffer 내부 offset이 아니라                              */
+        /*    고정 4-byte aligned stage buffer로 제한한다.                       */
+        /*  - 그 다음 memcpy로 runtime buffer tail에 append 한다.               */
+        /*                                                                    */
+        /*  이렇게 하면 rapid monkey test 중에도                                 */
+        /*  구조체 내부 offset 주소 / 파일 offset 정렬 문제를                    */
+        /*  하부 storage driver에 직접 노출하지 않게 된다.                      */
+        /* ------------------------------------------------------------------ */
+        bytes_to_read = (uint32_t)sizeof(wav->read_buffer) - wav->read_valid;
+        if (bytes_to_read > unread_file_bytes)
+        {
+            bytes_to_read = unread_file_bytes;
+        }
+        if (bytes_to_read > AUDIO_WAV_IO_STAGE_CHUNK_BYTES)
+        {
+            bytes_to_read = AUDIO_WAV_IO_STAGE_CHUNK_BYTES;
+        }
+        if (bytes_to_read == 0u)
+        {
+            break;
+        }
+
+        if (APP_SD_IsFsAccessAllowedNow() == false)
+        {
+            return 0u;
+        }
+
+        bytes_read = 0u;
+        fr = f_read(&wav->file,
+                    io_stage_buffer,
+                    bytes_to_read,
+                    &bytes_read);
+        if ((fr != FR_OK) || (bytes_read == 0u))
+        {
+            return 0u;
+        }
+
+        memcpy(&wav->read_buffer[wav->read_valid], io_stage_buffer, bytes_read);
+        wav->read_valid += bytes_read;
+        buffered_bytes += bytes_read;
+
+        if (bytes_read >= unread_file_bytes)
+        {
+            unread_file_bytes = 0u;
+        }
+        else
+        {
+            unread_file_bytes -= bytes_read;
+        }
+
+        if (bytes_read < bytes_to_read)
+        {
+            break;
+        }
     }
 
-    bytes_to_read = (uint32_t)sizeof(wav->read_buffer) - wav->read_valid;
-    if (bytes_to_read > unread_file_bytes)
-    {
-        bytes_to_read = unread_file_bytes;
-    }
-
-    bytes_read = 0u;
-    fr = f_read(&wav->file,
-                &wav->read_buffer[wav->read_valid],
-                bytes_to_read,
-                &bytes_read);
-    if ((fr != FR_OK) || (bytes_read == 0u))
-    {
-        return 0u;
-    }
-
-    wav->read_valid += bytes_read;
-    return ((wav->read_valid - wav->read_index) >= required_bytes) ? 1u : 0u;
+    return (buffered_bytes >= required_bytes) ? 1u : 0u;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1812,6 +2038,22 @@ static uint8_t Audio_Driver_WavReadNextSourceSample(audio_wav_runtime_t *wav,
     }
 
     if (Audio_Driver_WavEnsureBufferedBytes(wav, frame_bytes) == 0u)
+    {
+        return 0u;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /*  ensure helper가 성공했더라도                                            */
+    /*  브링업 단계에서는 decode 직전 범위를 한 번 더 검증한다.                */
+    /*                                                                        */
+    /*  이 재검증은                                                             */
+    /*  - read_index/read_valid 내부 상태 붕괴                                 */
+    /*  - frame_bytes 대비 부족한 버퍼                                          */
+    /*  를 조기에 잘라서 offset 기반 메모리 접근이                              */
+    /*  외부로 번지지 않게 하는 마지막 방어선이다.                             */
+    /* ---------------------------------------------------------------------- */
+    if ((Audio_Driver_IsWavBufferStateSane(wav) == 0u) ||
+        ((wav->read_index + frame_bytes) > wav->read_valid))
     {
         return 0u;
     }
@@ -2066,6 +2308,19 @@ static HAL_StatusTypeDef Audio_Driver_OpenWaveFileInternal(const char *full_path
         return HAL_ERROR;
     }
 
+    /* ---------------------------------------------------------------------- */
+    /*  open 직전에도 SD 세션이 아직 안전한지 다시 확인한다.                    */
+    /*                                                                        */
+    /*  버튼 몽키 테스트 중에는                                                 */
+    /*  "B6를 누른 직후 DET가 흔들리는" 타이밍이 충분히 나올 수 있으므로        */
+    /*  mounted 플래그 하나만 믿지 않고                                         */
+    /*  APP_SD의 보수적 게이트를 다시 통과해야만 f_open()으로 진입한다.         */
+    /* ---------------------------------------------------------------------- */
+    if (APP_SD_IsFsAccessAllowedNow() == false)
+    {
+        return HAL_ERROR;
+    }
+
     Audio_Driver_StopContentInternal();
     memset(&s_audio_rt.wav, 0, sizeof(s_audio_rt.wav));
 
@@ -2079,14 +2334,16 @@ static HAL_StatusTypeDef Audio_Driver_OpenWaveFileInternal(const char *full_path
     fr = f_read(&s_audio_rt.wav.file, riff_header, sizeof(riff_header), &bytes_read);
     if ((fr != FR_OK) || (bytes_read != sizeof(riff_header)))
     {
-        (void)f_close(&s_audio_rt.wav.file);
+        Audio_Driver_CloseFileObjectIfFsSafe(&s_audio_rt.wav.file);
+        Audio_Driver_ResetWavRuntimeState();
         return HAL_ERROR;
     }
 
     if ((memcmp(&riff_header[0], "RIFF", 4u) != 0) ||
         (memcmp(&riff_header[8], "WAVE", 4u) != 0))
     {
-        (void)f_close(&s_audio_rt.wav.file);
+        Audio_Driver_CloseFileObjectIfFsSafe(&s_audio_rt.wav.file);
+        Audio_Driver_ResetWavRuntimeState();
         return HAL_ERROR;
     }
 
@@ -2161,7 +2418,8 @@ static HAL_StatusTypeDef Audio_Driver_OpenWaveFileInternal(const char *full_path
 
     if ((audio_format == 0u) || (data_chunk_offset == 0u))
     {
-        (void)f_close(&s_audio_rt.wav.file);
+        Audio_Driver_CloseFileObjectIfFsSafe(&s_audio_rt.wav.file);
+        Audio_Driver_ResetWavRuntimeState();
         return HAL_ERROR;
     }
 
@@ -2174,7 +2432,8 @@ static HAL_StatusTypeDef Audio_Driver_OpenWaveFileInternal(const char *full_path
         ((s_audio_rt.wav.bits_per_sample % 8u) != 0u) ||
         (s_audio_rt.wav.source_sample_rate_hz == 0u))
     {
-        (void)f_close(&s_audio_rt.wav.file);
+        Audio_Driver_CloseFileObjectIfFsSafe(&s_audio_rt.wav.file);
+        Audio_Driver_ResetWavRuntimeState();
         return HAL_ERROR;
     }
 
@@ -2188,7 +2447,8 @@ static HAL_StatusTypeDef Audio_Driver_OpenWaveFileInternal(const char *full_path
 
     if (s_audio_rt.wav.block_align < block_align)
     {
-        (void)f_close(&s_audio_rt.wav.file);
+        Audio_Driver_CloseFileObjectIfFsSafe(&s_audio_rt.wav.file);
+        Audio_Driver_ResetWavRuntimeState();
         return HAL_ERROR;
     }
 
@@ -2199,13 +2459,15 @@ static HAL_StatusTypeDef Audio_Driver_OpenWaveFileInternal(const char *full_path
     output_sample_rate_hz = Audio_Driver_ClampOutputSampleRate(s_audio_rt.wav.source_sample_rate_hz);
     if (Audio_Driver_ApplyOutputSampleRate(output_sample_rate_hz) != HAL_OK)
     {
-        (void)f_close(&s_audio_rt.wav.file);
+        Audio_Driver_CloseFileObjectIfFsSafe(&s_audio_rt.wav.file);
+        Audio_Driver_ResetWavRuntimeState();
         return HAL_ERROR;
     }
 
     if (f_lseek(&s_audio_rt.wav.file, s_audio_rt.wav.data_start_offset) != FR_OK)
     {
-        (void)f_close(&s_audio_rt.wav.file);
+        Audio_Driver_CloseFileObjectIfFsSafe(&s_audio_rt.wav.file);
+        Audio_Driver_ResetWavRuntimeState();
         return HAL_ERROR;
     }
 
@@ -2473,10 +2735,14 @@ static void Audio_Driver_PrimeWholeBuffer(uint32_t now_ms)
                                         target_level_samples,
                                         max_blocks);
 
-    __disable_irq();
-    Audio_Driver_ServiceDmaHalfFromFifo(0u);
-    Audio_Driver_ServiceDmaHalfFromFifo(AUDIO_DMA_BUFFER_SAMPLES / 2u);
-    __enable_irq();
+    {
+        uint32_t primask;
+
+        primask = Audio_Driver_EnterCriticalSection();
+        Audio_Driver_ServiceDmaHalfFromFifo(0u);
+        Audio_Driver_ServiceDmaHalfFromFifo(AUDIO_DMA_BUFFER_SAMPLES / 2u);
+        Audio_Driver_ExitCriticalSection(primask);
+    }
 
     Audio_Driver_UpdatePipelineFlags(now_ms);
 }
@@ -2595,10 +2861,19 @@ void Audio_Driver_Init(void)
     audio->output_resolution_bits = AUDIO_DAC_OUTPUT_BITS;
 
     /* ---------------------------------------------------------------------- */
-    /*  첫 버퍼는 silence로 확실히 채워서                                      */
-    /*  부팅 직후 임의 전압이 나오지 않게 한다.                                 */
+    /*  transport start 직후에는 DMA가 이미 돌 수 있으므로                       */
+    /*  초기 silence 재기록도 짧은 임계 구역 안에서 마무리한다.                 */
+    /*                                                                        */
+    /*  StartTransport 단계에서 이미 silence prime 을 해 두었지만,             */
+    /*  부팅 직후의 첫 사용자 접근 전까지 한 번 더 명시적으로 정렬한다.         */
     /* ---------------------------------------------------------------------- */
-    Audio_Driver_FillBufferWithSilence(s_audio_rt.dma_buffer, AUDIO_DMA_BUFFER_SAMPLES);
+    {
+        uint32_t primask;
+
+        primask = Audio_Driver_EnterCriticalSection();
+        Audio_Driver_FillBufferWithSilence(s_audio_rt.dma_buffer, AUDIO_DMA_BUFFER_SAMPLES);
+        Audio_Driver_ExitCriticalSection(primask);
+    }
     Audio_Driver_PublishFifoTelemetry();
     Audio_Driver_PublishAllVoiceSnapshots();
 }
@@ -2742,13 +3017,29 @@ HAL_StatusTypeDef Audio_Driver_PlayWaveFilePath(const char *path)
         return HAL_ERROR;
     }
 
+    /* ---------------------------------------------------------------------- */
+    /*  path 문자열이 멀쩡해 보여도                                             */
+    /*  SD 세션 자체가 remove/debounce 중이면                                   */
+    /*  지금은 절대 f_open 단계로 들어가면 안 된다.                             */
+    /* ---------------------------------------------------------------------- */
+    if (APP_SD_IsFsAccessAllowedNow() == false)
+    {
+        return HAL_ERROR;
+    }
+
     if ((strchr(path, ':') != 0) || (path[0] == '/'))
     {
         Audio_Driver_CopyTextSafe(full_path, sizeof(full_path), path);
     }
     else
     {
-        snprintf(full_path, sizeof(full_path), "%s/%s", SDPath, path);
+        int written;
+
+        written = snprintf(full_path, sizeof(full_path), "%s/%s", SDPath, path);
+        if ((written < 0) || ((size_t)written >= sizeof(full_path)))
+        {
+            return HAL_ERROR;
+        }
     }
 
     if (Audio_Driver_OpenWaveFileInternal(full_path) != HAL_OK)
@@ -2775,7 +3066,16 @@ HAL_StatusTypeDef Audio_Driver_PlayAnyWaveFromSd(void)
         return HAL_ERROR;
     }
 
-    if (((const app_sd_state_t *)&g_app_state.sd)->mounted == false)
+    /* ---------------------------------------------------------------------- */
+    /*  mounted=true 하나만으로는 충분하지 않다.                                 */
+    /*                                                                        */
+    /*  remove edge 직후에는                                                    */
+    /*    - mounted 플래그는 아직 true 인데                                    */
+    /*    - raw DET / debounce 상태는 이미 unsafe                               */
+    /*  일 수 있으므로, APP_SD의 보수적 게이트를 통과해야만                     */
+    /*  root directory scan을 시작한다.                                         */
+    /* ---------------------------------------------------------------------- */
+    if (APP_SD_IsFsAccessAllowedNow() == false)
     {
         return HAL_ERROR;
     }
@@ -2788,6 +3088,16 @@ HAL_StatusTypeDef Audio_Driver_PlayAnyWaveFromSd(void)
 
     for (;;)
     {
+        /* ------------------------------------------------------------------ */
+        /*  directory scan 도중에 DET가 흔들리면                                 */
+        /*  다음 f_readdir() 호출부터는 즉시 중단한다.                           */
+        /* ------------------------------------------------------------------ */
+        if (APP_SD_IsFsAccessAllowedNow() == false)
+        {
+            (void)f_closedir(&dir);
+            return HAL_ERROR;
+        }
+
         fr = f_readdir(&dir, &info);
         if (fr != FR_OK)
         {
@@ -2813,7 +3123,17 @@ HAL_StatusTypeDef Audio_Driver_PlayAnyWaveFromSd(void)
             continue;
         }
 
-        snprintf(full_path, sizeof(full_path), "%s/%s", SDPath, info.fname);
+        {
+            int written;
+
+            written = snprintf(full_path, sizeof(full_path), "%s/%s", SDPath, info.fname);
+            if ((written < 0) || ((size_t)written >= sizeof(full_path)))
+            {
+                (void)f_closedir(&dir);
+                return HAL_ERROR;
+            }
+        }
+
         (void)f_closedir(&dir);
         return Audio_Driver_PlayWaveFilePath(full_path);
     }
@@ -2824,10 +3144,78 @@ HAL_StatusTypeDef Audio_Driver_PlayAnyWaveFromSd(void)
 /* -------------------------------------------------------------------------- */
 void Audio_Driver_Stop(void)
 {
+    /* ---------------------------------------------------------------------- */
+    /*  StopContentInternal 에서 이미                                           */
+    /*  - WAV close                                                            */
+    /*  - voice/sequence clear                                                 */
+    /*  - FIFO reset                                                           */
+    /*  - DMA buffer silence overwrite                                         */
+    /*  를 임계 구역 포함으로 수행한다.                                         */
+    /*                                                                        */
+    /*  public Stop에서는 동일 동작을 다시 무방비로 반복하지 않고              */
+    /*  상태 플래그/telemetry 정리만 후속으로 수행한다.                         */
+    /* ---------------------------------------------------------------------- */
     Audio_Driver_StopContentInternal();
-    Audio_Driver_FillBufferWithSilence(s_audio_rt.dma_buffer, AUDIO_DMA_BUFFER_SAMPLES);
     ((app_audio_state_t *)&g_app_state.audio)->last_block_clipped = 0u;
     Audio_Driver_PublishFifoTelemetry();
+}
+
+/* -------------------------------------------------------------------------- */
+/*  공개 API: SD 세션 종료 사전 통보                                           */
+/*                                                                            */
+/*  이 함수는 APP_SD가 실제로 unmount/deinit을 수행하기 직전에 호출된다.        */
+/*                                                                            */
+/*  처리 순서                                                                  */
+/*  1) WAV source를 즉시 비활성화한다.                                         */
+/*  2) software FIFO를 비워 "이미 만들어 둔 SD tail" 도 버린다.                */
+/*  3) DMA buffer를 silence로 덮어 다음 half callback부터 안전하게 나가게 한다. */
+/*  4) sequence/tone 같은 비-SD source가 남아 있으면                            */
+/*     다음 main loop에서 다시 FIFO를 채워 재생을 이어 갈 수 있게 둔다.        */
+/*                                                                            */
+/*  즉, hot-remove 상황에서                                                     */
+/*  "SD만 잘라내고 오디오 파이프라인 전체는 살려 두는" 보수적 방어막이다.      */
+/* -------------------------------------------------------------------------- */
+void Audio_Driver_OnSdWillUnmount(void)
+{
+    uint32_t now_ms;
+
+    if (((const app_audio_state_t *)&g_app_state.audio)->initialized == false)
+    {
+        return;
+    }
+
+    if (s_audio_rt.wav.active == 0u)
+    {
+        return;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /*  먼저 WAV runtime을 비활성화해서                                         */
+    /*  이후 경로에서 새로운 f_read/f_close를 다시 시도하지 않게 만든다.        */
+    /*                                                                        */
+    /*  WavClose 내부는 APP_SD 게이트를 보고                                    */
+    /*  안전할 때만 f_close()를 수행한다.                                        */
+    /* ---------------------------------------------------------------------- */
+    Audio_Driver_WavClose();
+
+    /* ---------------------------------------------------------------------- */
+    /*  software FIFO와 DMA 버퍼는 ISR consumer와 공유되므로                    */
+    /*  아주 짧은 구간만 IRQ를 막고 한 번에 silence 상태로 맞춘다.              */
+    /*                                                                        */
+    /*  여기서는 SD/FATFS 같은 느린 작업을 절대 IRQ-off 안에 넣지 않는다.      */
+    /* ---------------------------------------------------------------------- */
+    {
+        uint32_t primask;
+
+        primask = Audio_Driver_EnterCriticalSection();
+        Audio_Driver_FifoReset();
+        Audio_Driver_FillBufferWithSilence(s_audio_rt.dma_buffer, AUDIO_DMA_BUFFER_SAMPLES);
+        Audio_Driver_ExitCriticalSection(primask);
+    }
+
+    ((app_audio_state_t *)&g_app_state.audio)->last_block_clipped = 0u;
+    now_ms = HAL_GetTick();
+    Audio_Driver_UpdatePipelineFlags(now_ms);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -2866,6 +3254,20 @@ void Audio_Driver_Task(uint32_t now_ms)
     if (((const app_audio_state_t *)&g_app_state.audio)->initialized == false)
     {
         return;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /*  Audio_Driver_Task가 APP_SD_Task보다 먼저 실행되는 loop라도               */
+    /*  DET edge 직후를 여기서 먼저 감지해서                                    */
+    /*  SD 기반 WAV 스트림을 즉시 잘라낼 수 있어야 한다.                        */
+    /*                                                                        */
+    /*  이 check는 raw DET + debounce runtime을 직접 보는                       */
+    /*  APP_SD_IsFsAccessAllowedNow()를 사용하므로                              */
+    /*  공개 APP_STATE 반영보다 한 박자 빨리 반응할 수 있다.                    */
+    /* ---------------------------------------------------------------------- */
+    if ((s_audio_rt.wav.active != 0u) && (APP_SD_IsFsAccessAllowedNow() == false))
+    {
+        Audio_Driver_OnSdWillUnmount();
     }
 
     /* ---------------------------------------------------------------------- */

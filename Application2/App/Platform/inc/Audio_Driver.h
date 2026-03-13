@@ -246,6 +246,29 @@ void Audio_Driver_Task(uint32_t now_ms);
 /* 현재 재생 중인 content를 정지하고 silence로 되돌린다. */
 void Audio_Driver_Stop(void);
 
+/* -------------------------------------------------------------------------- */
+/*  공개 API: SD 세션 종료 사전 통보                                           */
+/*                                                                            */
+/*  이 함수는 APP_SD가 f_mount(NULL) / HAL_SD_DeInit()를 하기 직전에 호출한다.  */
+/*                                                                            */
+/*  목적                                                                       */
+/*  - WAV streaming이 열어 둔 FIL을 더 이상 사용하지 않게 만든다.               */
+/*  - software FIFO 안에 남아 있던 SD 기반 샘플 tail을 버린다.                  */
+/*  - 다음 main loop에서 새로운 f_read가 다시 들어가지 않도록                   */
+/*    WAV runtime을 즉시 비활성화한다.                                          */
+/*                                                                            */
+/*  중요한 점                                                                  */
+/*  - 이 함수는 "SD 의존 경로만" 끊는다.                                       */
+/*  - sequence/tone 같은 RAM/연산 기반 소리는                                  */
+/*    필요하다면 다음 loop에서 다시 살아서 재생될 수 있다.                     */
+/*                                                                            */
+/*  즉, hot-remove 상황에서                                                     */
+/*  '오디오 전체를 무조건 영구 정지' 하는 것이 아니라                           */
+/*  'SD 기반 스트림을 안전하게 잘라내고 버스 teardown과 충돌하지 않게'          */
+/*  만드는 안전 훅이다.                                                         */
+/* -------------------------------------------------------------------------- */
+void Audio_Driver_OnSdWillUnmount(void);
+
 /* 현재 실제로 tone/sequence/WAV/FIFO tail 중 무엇이든 남아 있는가를 반환한다. */
 bool Audio_Driver_IsBusy(void);
 
