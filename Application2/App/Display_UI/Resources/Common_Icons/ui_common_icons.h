@@ -9,7 +9,7 @@ extern "C" {
 #endif
 
 /* -------------------------------------------------------------------------- */
-/*  Status bar icon geometry                                                   */
+/*  Fixed icon geometry                                                        */
 /* -------------------------------------------------------------------------- */
 #define ICON5_W   5
 #define ICON5_H   7
@@ -27,9 +27,9 @@ extern "C" {
 #define ICON8_H   8
 
 /* -------------------------------------------------------------------------- */
-/*  Status bar icons                                                           */
+/*  Existing status bar icons                                                  */
 /*                                                                            */
-/*  업로드된 icons.c의 이름과 픽셀 규격을 가능한 한 그대로 유지한다.           */
+/*  사용자가 올린 icons.c의 기존 아이콘은 이름과 픽셀 규격을 그대로 유지한다. */
 /* -------------------------------------------------------------------------- */
 extern const uint8_t icon_gps_main_bits[ICON7_H];
 extern const uint8_t icon_gps_rx_7_bits[ICON7_H];
@@ -54,19 +54,12 @@ extern const uint8_t icon_stop_bits[ICON7_H];
 extern const uint8_t icon_pause_bits[ICON7_H];
 extern const uint8_t blank_7x7[ICON7_H];
 
-extern const uint8_t icon_antenna_shape[ICON7_H];
+extern const uint8_t icon_antenna_shape[ICON5_H];
 extern const uint8_t icon_degrees[ICON7_H];
-
-/* -------------------------------------------------------------------------- */
-/*  Newly added status bar icons                                               */
-/*                                                                            */
-/*  사용자가 추가 요청한 Bluetooth 아이콘과 그 옆의 7x7 보조 아이콘이다.        */
-/* -------------------------------------------------------------------------- */
 extern const uint8_t icon_bluetooth_bits[ICON7_H];
-extern const uint8_t icon_bt_aux_bits[ICON7_H];
 
 /* -------------------------------------------------------------------------- */
-/*  Bottom bar 4-pixel-high XBM icons                                          */
+/*  Bottom bar 4-pixel-high arrows                                             */
 /* -------------------------------------------------------------------------- */
 extern const uint8_t icon_arrow_right_7x4[ICON7X4_H];
 extern const uint8_t icon_arrow_left_7x4[ICON7X4_H];
@@ -74,12 +67,23 @@ extern const uint8_t icon_arrow_up_7x4[ICON7X4_H];
 extern const uint8_t icon_arrow_down_7x4[ICON7X4_H];
 
 /* -------------------------------------------------------------------------- */
-/*  Cute test icons                                                            */
+/*  Cute icon examples                                                         */
 /* -------------------------------------------------------------------------- */
 extern const uint8_t icon_cute_cat_8x8[ICON8_H];
 extern const uint8_t icon_cute_heart_8x8[ICON8_H];
 extern const uint8_t icon_cute_star_8x8[ICON8_H];
 extern const uint8_t icon_cute_bike_8x8[ICON8_H];
+
+/* -------------------------------------------------------------------------- */
+/*  UI message icons                                                           */
+/*                                                                            */
+/*  토스트/팝업 테스트에서 바로 쓸 수 있도록 "형태가 보이는" 아이콘을 따로 둔다. */
+/* -------------------------------------------------------------------------- */
+extern const uint8_t icon_ui_info_8x8[ICON8_H];
+extern const uint8_t icon_ui_warn_8x8[ICON8_H];
+extern const uint8_t icon_ui_ok_8x8[ICON8_H];
+extern const uint8_t icon_ui_bell_8x8[ICON8_H];
+extern const uint8_t icon_ui_folder_8x8[ICON8_H];
 
 #ifdef __cplusplus
 }

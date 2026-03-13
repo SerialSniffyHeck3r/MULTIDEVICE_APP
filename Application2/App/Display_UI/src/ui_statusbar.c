@@ -4,6 +4,19 @@
 #include <stdio.h>
 
 /* -------------------------------------------------------------------------- */
+/*  Font / geometry                                                            */
+/* -------------------------------------------------------------------------- */
+#define UI_STATUSBAR_FONT             u8g2_font_6x12_mf
+#define UI_STATUSBAR_X_RECORD_ICON    0
+#define UI_STATUSBAR_X_BT_ICON        12
+#define UI_STATUSBAR_X_SD_ICON        45
+#define UI_STATUSBAR_X_GPS_GROUP      80
+#define UI_STATUSBAR_X_TEMP           138
+#define UI_STATUSBAR_X_TIME           168
+#define UI_STATUSBAR_Y_ICON           0
+#define UI_STATUSBAR_Y_TEXT           7
+
+/* -------------------------------------------------------------------------- */
 /*  Cold temperature warning policy                                            */
 /* -------------------------------------------------------------------------- */
 #define TEMP_COLD_WARN_ON_C            4
@@ -11,23 +24,6 @@
 #define TEMP_COLD_WARN_ON_X100         (TEMP_COLD_WARN_ON_C * 100)
 #define TEMP_COLD_WARN_OFF_X100        (TEMP_COLD_WARN_OFF_C * 100)
 #define TEMP_COLD_WARN_BLINK_MS        (10u * 1000u)
-
-/* -------------------------------------------------------------------------- */
-/*  Absolute X positions                                                       */
-/*                                                                            */
-/*  사용자가 요청한 대로 "상대 위치 보정" 로직을 없애고,                        */
-/*  status bar의 기준 X를 절대 좌표로 고정한다.                                */
-/* -------------------------------------------------------------------------- */
-#define UI_STATUSBAR_X_RECORD_ICON     0
-#define UI_STATUSBAR_X_BT_ICON         12
-#define UI_STATUSBAR_X_BT_AUX_ICON     21
-#define UI_STATUSBAR_X_SD_ICON         45
-#define UI_STATUSBAR_X_GPS_GROUP       80
-#define UI_STATUSBAR_X_TEMP            138
-#define UI_STATUSBAR_X_TIME            168
-
-#define UI_STATUSBAR_Y_ICON            0
-#define UI_STATUSBAR_Y_TEXT            7
 
 typedef enum
 {
@@ -40,6 +36,59 @@ static temp_cold_state_t s_temp_cold_state = TEMP_COLD_STATE_NORMAL;
 static uint32_t          s_temp_cold_start_ms = 0u;
 static int16_t           s_temp_box_x = 0;
 static int16_t           s_temp_box_w = 0;
+static uint8_t           s_reserved_height_cache = 0u;
+
+/* -------------------------------------------------------------------------- */
+/*  Height helper                                                              */
+/*                                                                            */
+/*  상단바 명목 높이는 7px 그대로 유지한다.                                    */
+/*  다만 6x12 폰트 descender 때문에 실제 점유 영역은 더 아래까지 내려오므로,     */
+/*  본문 뷰포트가 그 영역과 싸우지 않게 font metric 기준으로 한 번 계산한다.    */
+/* -------------------------------------------------------------------------- */
+uint8_t UI_StatusBar_GetReservedHeight(u8g2_t *u8g2)
+{
+    int16_t reserved;
+    int16_t descent;
+    int16_t icon_bottom;
+    int16_t text_bottom;
+
+    if (s_reserved_height_cache != 0u)
+    {
+        return s_reserved_height_cache;
+    }
+
+    reserved = UI_STATUSBAR_H;
+
+    icon_bottom = (int16_t)(UI_STATUSBAR_Y_ICON + ICON11_H);
+    if (icon_bottom > reserved)
+    {
+        reserved = icon_bottom;
+    }
+
+    if (u8g2 != 0)
+    {
+        u8g2_SetFont(u8g2, UI_STATUSBAR_FONT);
+        descent = (int16_t)u8g2_GetDescent(u8g2);
+        if (descent < 0)
+        {
+            descent = (int16_t)(-descent);
+        }
+
+        text_bottom = (int16_t)(UI_STATUSBAR_Y_TEXT + descent);
+        if (text_bottom > reserved)
+        {
+            reserved = text_bottom;
+        }
+    }
+
+    if (reserved < UI_STATUSBAR_H)
+    {
+        reserved = UI_STATUSBAR_H;
+    }
+
+    s_reserved_height_cache = (uint8_t)reserved;
+    return s_reserved_height_cache;
+}
 
 /* -------------------------------------------------------------------------- */
 /*  HDOP quality helper                                                        */
@@ -73,11 +122,6 @@ static int ui_statusbar_gps_quality_from_hdop(uint16_t pdop_x100, uint8_t gps_fi
 
 /* -------------------------------------------------------------------------- */
 /*  Temperature cold warning state machine                                     */
-/*                                                                            */
-/*  업로드된 프로토타입의 동작을 그대로 유지한다.                               */
-/*  - 4도 이하로 내려가면 10초 동안 2Hz blink                                   */
-/*  - 그 뒤에는 항상 inverted 유지                                              */
-/*  - 6도 이상 올라가면 경고 해제                                               */
 /* -------------------------------------------------------------------------- */
 static void ui_statusbar_update_temp_cold_warning(const ui_statusbar_model_t *model,
                                                   uint32_t now_ms)
@@ -140,6 +184,7 @@ static void ui_statusbar_update_temp_cold_warning(const ui_statusbar_model_t *mo
 static void ui_statusbar_draw_temp_cold_overlay(u8g2_t *u8g2)
 {
     bool do_xor = false;
+    uint8_t box_h;
 
     if ((u8g2 == 0) || (s_temp_box_w <= 0))
     {
@@ -169,39 +214,41 @@ static void ui_statusbar_draw_temp_cold_overlay(u8g2_t *u8g2)
         return;
     }
 
+    box_h = UI_StatusBar_GetReservedHeight(u8g2);
+
     u8g2_SetDrawColor(u8g2, 2);
-    u8g2_DrawBox(u8g2, (u8g2_uint_t)s_temp_box_x, 0u, (u8g2_uint_t)s_temp_box_w, UI_STATUSBAR_H);
+    u8g2_DrawBox(u8g2,
+                 (u8g2_uint_t)s_temp_box_x,
+                 0u,
+                 (u8g2_uint_t)s_temp_box_w,
+                 (u8g2_uint_t)box_h);
     u8g2_SetDrawColor(u8g2, 1);
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Clock weekday text                                                         */
+/*  Weekday text                                                               */
 /*                                                                            */
-/*  현재 프로젝트의 APP_CLOCK weekday는 1..7, Monday=1 규칙이므로               */
-/*  그 형식에 맞게 약어를 변환한다.                                             */
+/*  업로드된 기존 statusbar.c 로직을 그대로 따라간다.                          */
+/*  - 0 = SUN                                                                  */
+/*  - 6 = SAT                                                                  */
 /* -------------------------------------------------------------------------- */
 static const char *ui_statusbar_weekday_text(uint8_t weekday)
 {
-    switch (weekday)
+    static const char *dow_table[7] =
     {
-    case 1u: return "MON";
-    case 2u: return "TUE";
-    case 3u: return "WED";
-    case 4u: return "THU";
-    case 5u: return "FRI";
-    case 6u: return "SAT";
-    case 7u: return "SUN";
-    default: return "---";
+        "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"
+    };
+
+    if (weekday <= 6u)
+    {
+        return dow_table[weekday];
     }
+
+    return "---";
 }
 
 /* -------------------------------------------------------------------------- */
 /*  SD state to icon selection                                                 */
-/*                                                                            */
-/*  프로토타입의 0/1/2 상태를 현재 APP_STATE의 최소 조건으로 복원한다.          */
-/*  - inserted && mounted      -> normal                                         */
-/*  - !inserted                -> not present                                    */
-/*  - inserted but not mounted -> error                                          */
 /* -------------------------------------------------------------------------- */
 static const uint8_t *ui_statusbar_get_sd_icon(const ui_statusbar_model_t *model,
                                                bool *visible)
@@ -257,12 +304,10 @@ void UI_StatusBar_Draw(u8g2_t *u8g2,
     }
 
     u8g2_SetDrawColor(u8g2, 1);
-    u8g2_SetFont(u8g2, u8g2_font_6x12_mf);
+    u8g2_SetFont(u8g2, UI_STATUSBAR_FONT);
 
     /* ---------------------------------------------------------------------- */
-    /*  1) Recording icon only                                                 */
-    /*                                                                        */
-    /*  REC text는 제거하고 아이콘만 유지한다.                                  */
+    /*  1) REC / STOP / PAUSE 아이콘                                            */
     /* ---------------------------------------------------------------------- */
     switch (model->record_state)
     {
@@ -308,7 +353,9 @@ void UI_StatusBar_Draw(u8g2_t *u8g2,
     }
 
     /* ---------------------------------------------------------------------- */
-    /*  2) Bluetooth stub icons                                                */
+    /*  2) Bluetooth icon only                                                 */
+    /*                                                                            */
+    /*  이전 패키지의 정체불명 보조 아이콘은 제거했다.                           */
     /* ---------------------------------------------------------------------- */
     if (model->bluetooth_stub_state != UI_BT_STUB_OFF)
     {
@@ -327,16 +374,6 @@ void UI_StatusBar_Draw(u8g2_t *u8g2,
                          ICON7_W,
                          ICON7_H,
                          icon_bluetooth_bits);
-
-            if (model->bluetooth_aux_visible != 0u)
-            {
-                u8g2_DrawXBM(u8g2,
-                             UI_STATUSBAR_X_BT_AUX_ICON,
-                             UI_STATUSBAR_Y_ICON,
-                             ICON7_W,
-                             ICON7_H,
-                             icon_bt_aux_bits);
-            }
         }
     }
 
@@ -365,11 +402,14 @@ void UI_StatusBar_Draw(u8g2_t *u8g2,
 
     x = UI_STATUSBAR_X_GPS_GROUP;
 
-    /* 4-1) GPS main icon */
-    u8g2_DrawXBM(u8g2, (u8g2_uint_t)x, UI_STATUSBAR_Y_ICON, ICON7_W, ICON7_H, icon_gps_main_bits);
+    u8g2_DrawXBM(u8g2,
+                 (u8g2_uint_t)x,
+                 UI_STATUSBAR_Y_ICON,
+                 ICON7_W,
+                 ICON7_H,
+                 icon_gps_main_bits);
     x += ICON7_W + 2;
 
-    /* 4-2) FIX icon */
     if ((gps_fix_ok == false) || (gps_fix_type == 0u))
     {
         if (SlowToggle2Hz != false)
@@ -420,7 +460,6 @@ void UI_StatusBar_Draw(u8g2_t *u8g2,
     }
     x += ICON11_W + 2;
 
-    /* 4-3) satellite count */
     if ((model->gps_fix.valid == false) &&
         (gps_fix_type == 0u) &&
         (num_sv_visible == 0u) &&
@@ -448,7 +487,6 @@ void UI_StatusBar_Draw(u8g2_t *u8g2,
     u8g2_DrawStr(u8g2, (u8g2_uint_t)x, UI_STATUSBAR_Y_TEXT, sat_buf);
     x += (int)u8g2_GetStrWidth(u8g2, sat_buf);
 
-    /* 4-4) antenna + RX level */
     x += 2;
     u8g2_DrawXBM(u8g2, (u8g2_uint_t)x, UI_STATUSBAR_Y_ICON, ICON5_W, ICON5_H, icon_antenna_shape);
     x += ICON5_W + 1;
@@ -506,7 +544,7 @@ void UI_StatusBar_Draw(u8g2_t *u8g2,
     u8g2_DrawXBM(u8g2, (u8g2_uint_t)x, UI_STATUSBAR_Y_ICON, ICON7_W, ICON7_H, rx_bmp);
 
     /* ---------------------------------------------------------------------- */
-    /*  5) Temperature string, absolute X                                      */
+    /*  5) Temperature string                                                  */
     /* ---------------------------------------------------------------------- */
     if (((model->temp_status_flags & APP_DS18B20_STATUS_VALID) == 0u) ||
         (model->temp_c_x100 == APP_DS18B20_TEMP_INVALID))
@@ -603,20 +641,22 @@ void UI_StatusBar_Draw(u8g2_t *u8g2,
     }
 
     /* ---------------------------------------------------------------------- */
-    /*  6) Time string, absolute X                                             */
+    /*  6) Time string                                                         */
+    /*                                                                            */
+    /*  시계 소스는 기존 상태바 구현과 동일하게 g_app_state.time 계열을 사용한다. */
     /* ---------------------------------------------------------------------- */
-    if ((model->clock_valid != false) &&
-        (model->clock_year >= 1980u) && (model->clock_year <= 2099u) &&
-        (model->clock_month >= 1u) && (model->clock_month <= 12u) &&
-        (model->clock_day >= 1u) && (model->clock_day <= 31u))
+    if ((model->time_valid != false) &&
+        (model->time_year >= 1980u) && (model->time_year <= 2099u) &&
+        (model->time_month >= 1u) && (model->time_month <= 12u) &&
+        (model->time_day >= 1u) && (model->time_day <= 31u))
     {
         snprintf(time_str,
                  sizeof(time_str),
                  "%s %02u %02u:%02u",
-                 ui_statusbar_weekday_text(model->clock_weekday),
-                 (unsigned)model->clock_day,
-                 (unsigned)model->clock_hour,
-                 (unsigned)model->clock_minute);
+                 ui_statusbar_weekday_text(model->time_weekday),
+                 (unsigned)model->time_day,
+                 (unsigned)model->time_hour,
+                 (unsigned)model->time_minute);
     }
     else
     {

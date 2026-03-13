@@ -83,13 +83,6 @@ bool UI_Popup_IsVisible(void)
     return s_popup.active;
 }
 
-/* -------------------------------------------------------------------------- */
-/*  Popup draw                                                                  */
-/*                                                                            */
-/*  버그 수정 포인트                                                            */
-/*  - 오른쪽 텍스트 1행이 앞으로 튀어나오던 문제를 피하기 위해                   */
-/*    text_x를 한 번 계산한 뒤 line1/line2 모두 동일한 기준점으로 출력한다.      */
-/* -------------------------------------------------------------------------- */
 void UI_Popup_Draw(u8g2_t *u8g2)
 {
     int16_t x0;
@@ -109,6 +102,13 @@ void UI_Popup_Draw(u8g2_t *u8g2)
     x0 = (int16_t)((UI_LCD_W - UI_POPUP_W) / 2);
     y0 = (int16_t)((UI_LCD_H - UI_POPUP_BOX_H) / 2);
 
+    /* ---------------------------------------------------------------------- */
+    /*  팝업은 body 전체를 먼저 white로 지워서 반드시 불투명하게 만든다.         */
+    /*  그 위에 black frame / title band / icon frame / text를 올린다.         */
+    /* ---------------------------------------------------------------------- */
+    u8g2_SetDrawColor(u8g2, 0);
+    u8g2_DrawBox(u8g2, (u8g2_uint_t)x0, (u8g2_uint_t)y0, UI_POPUP_W, UI_POPUP_BOX_H);
+
     u8g2_SetDrawColor(u8g2, 1);
     u8g2_DrawFrame(u8g2, (u8g2_uint_t)x0, (u8g2_uint_t)y0, UI_POPUP_W, UI_POPUP_BOX_H);
     u8g2_DrawBox(u8g2, (u8g2_uint_t)x0, (u8g2_uint_t)y0, UI_POPUP_W, UI_POPUP_TITLE_H);
@@ -123,15 +123,15 @@ void UI_Popup_Draw(u8g2_t *u8g2)
     if ((s_popup.icon != 0) && (s_popup.icon_w > 0u) && (s_popup.icon_h > 0u))
     {
         icon_area_w = 36;
-        icon_x = (int16_t)(x0 + 8);
-        icon_y = (int16_t)(y0 + UI_POPUP_TITLE_H + 4);
+        u8g2_DrawFrame(u8g2,
+                       (u8g2_uint_t)(x0 + 4),
+                       (u8g2_uint_t)(y0 + UI_POPUP_TITLE_H + 2),
+                       30u,
+                       30u);
 
-        if (s_popup.icon_h < 24u)
-        {
-            icon_y += (int16_t)((24u - s_popup.icon_h) / 2u);
-        }
+        icon_x = (int16_t)(x0 + 4 + ((30 - s_popup.icon_w) / 2));
+        icon_y = (int16_t)(y0 + UI_POPUP_TITLE_H + 2 + ((30 - s_popup.icon_h) / 2));
 
-        u8g2_DrawFrame(u8g2, (u8g2_uint_t)(x0 + 4), (u8g2_uint_t)(y0 + UI_POPUP_TITLE_H + 2), 30u, 30u);
         u8g2_DrawXBM(u8g2,
                      (u8g2_uint_t)icon_x,
                      (u8g2_uint_t)icon_y,
@@ -140,12 +140,16 @@ void UI_Popup_Draw(u8g2_t *u8g2)
                      s_popup.icon);
     }
 
-    /* 이 x 하나를 오른쪽 텍스트 전체의 공통 시작점으로 사용한다. */
+    /* ---------------------------------------------------------------------- */
+    /*  오른쪽 텍스트는 line1 / line2 모두 완전히 같은 시작 x를 사용한다.        */
+    /*  이전 패키지에서 발생했던 1행만 앞으로 튀는 버그를 여기서 차단한다.       */
+    /* ---------------------------------------------------------------------- */
     text_x = (int16_t)(x0 + 8 + icon_area_w);
     line1_y = (int16_t)(y0 + 22);
     line2_y = (int16_t)(y0 + 34);
 
     u8g2_SetFont(u8g2, u8g2_font_5x7_tr);
+    u8g2_SetDrawColor(u8g2, 1);
     u8g2_DrawStr(u8g2, (u8g2_uint_t)text_x, (u8g2_uint_t)line1_y, s_popup.line1);
     u8g2_DrawStr(u8g2, (u8g2_uint_t)text_x, (u8g2_uint_t)line2_y, s_popup.line2);
 }

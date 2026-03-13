@@ -1,66 +1,133 @@
-#include "../inc/ui_engine.h"
+#include "ui_engine.h"
 
-#include "../inc/ui_types.h"
-#include "../inc/ui_statusbar.h"
-#include "../inc/ui_bottombar.h"
-#include "../inc/ui_popup.h"
-#include "../inc/ui_toast.h"
-#include "../inc/ui_boot.h"
-#include "../inc/ui_screen_test.h"
-#include "../Resources/Common_Icons/ui_common_icons.h"
-#include "../Debug/ui_debug_legacy.h"
-
-#include "../../Platform/inc/APP_STATE.h"
-#include "../../Platform/inc/button.h"
-#include "../../../Core/Inc/u8g2_uc1608_stm32.h"
+#include "ui_types.h"
+#include "ui_statusbar.h"
+#include "ui_bottombar.h"
+#include "ui_popup.h"
+#include "ui_toast.h"
+#include "ui_boot.h"
+#include "ui_screen_test.h"
+#include "ui_common_icons.h"
+#include "ui_debug_legacy.h"
+#include "APP_STATE.h"
+#include "button.h"
+#include "u8g2_uc1608_stm32.h"
 
 #include <string.h>
 
+/*
+ * UI_TOAST_POPUP_USAGE.txt
+========================
+
+1) 토스트를 아이콘과 함께 띄우는 방법
+-------------------------------------
+아래 코드를 그대로 사용하면 된다.
+
+UI_Toast_Show("BT CONNECTED",
+              icon_ui_info_8x8,
+              ICON8_W,
+              ICON8_H,
+              now_ms,
+              UI_TOAST_DEFAULT_TIMEOUT_MS);
+
+2) 토스트를 아이콘 없이 띄우는 방법
+-----------------------------------
+icon 포인터와 width / height를 0으로 넣으면 된다.
+
+UI_Toast_Show("PROFILE SAVED",
+              0,
+              0u,
+              0u,
+              now_ms,
+              UI_TOAST_DEFAULT_TIMEOUT_MS);
+
+3) 팝업을 아이콘과 함께 띄우는 방법
+-----------------------------------
+
+UI_Popup_Show("WARNING",
+              "SD CARD ERROR",
+              "CHECK CARD STATE",
+              icon_ui_warn_8x8,
+              ICON8_W,
+              ICON8_H,
+              now_ms,
+              UI_POPUP_DEFAULT_TIMEOUT_MS);
+
+4) 팝업을 아이콘 없이 띄우는 방법
+---------------------------------
+
+UI_Popup_Show("NOTICE",
+              "NO ICON MODE",
+              "TEXT ONLY POPUP",
+              0,
+              0u,
+              0u,
+              now_ms,
+              UI_POPUP_DEFAULT_TIMEOUT_MS);
+
+5) 현재 테스트 화면의 기본 동작
+------------------------------
+- F4는 icon이 있는 toast 예시를 띄운다.
+- F5는 icon이 있는 popup 예시를 띄운다.
+- 필요하면 위 예시를 그대로 복붙해서 icon 없는 버전으로 바꾸면 된다.
+ *
+ *
+ *
+ */
+
+
+
+
+
 /* -------------------------------------------------------------------------- */
 /*  Public blink variables                                                     */
-/*                                                                            */
-/*  사용자가 기존 이름을 그대로 유지해 달라고 했으므로,                         */
-/*  SlowToggle2Hz / FastToggle5Hz를 전역으로 정의한다.                         */
 /* -------------------------------------------------------------------------- */
 volatile bool SlowToggle2Hz = false;
 volatile bool FastToggle5Hz = false;
 
 /* -------------------------------------------------------------------------- */
-/*  20Hz timing counters                                                       */
+/*  20Hz source tick                                                           */
 /*                                                                            */
-/*  TIM7 ISR가 20Hz frame tick을 만들어 주고,                                  */
-/*  여기서 slow/fast blink를 같은 하드웨어 타이머로 재사용한다.                */
+/*  TIM7의 frame token timer를 재사용한다.                                     */
+/*  - raw 20Hz tick count는 테스트 카운터 증가에 사용                           */
+/*  - slow / fast blink 토글도 여기서 같이 만든다                              */
 /* -------------------------------------------------------------------------- */
 static volatile uint32_t s_ui_tick_20hz = 0u;
 static volatile uint8_t  s_slow_divider = 0u;
 static volatile uint8_t  s_fast_divider = 0u;
 
-static ui_screen_id_t           s_current_screen = UI_SCREEN_TEST;
-static ui_layout_mode_t         s_layout_mode = UI_LAYOUT_MODE_TOP_BOTTOM_FIXED;
-static ui_record_state_t        s_record_state = UI_RECORD_STATE_STOP;
+static ui_screen_id_t            s_current_screen = UI_SCREEN_TEST;
+static ui_layout_mode_t          s_layout_mode = UI_LAYOUT_MODE_TOP_BOTTOM_FIXED;
+static ui_record_state_t         s_record_state = UI_RECORD_STATE_STOP;
 static ui_bluetooth_stub_state_t s_bt_stub_state = UI_BT_STUB_ON;
 
-static uint8_t                  s_imperial_units = 0u;
-static uint8_t                  s_test_blink_paused = 0u;
-static uint8_t                  s_test_cute_icon_index = 0u;
-static uint32_t                 s_bottom_overlay_until_ms = 0u;
-static uint32_t                 s_pressed_mask = 0u;
-static uint8_t                  s_force_redraw = 1u;
+static uint8_t  s_imperial_units = 0u;
+static uint8_t  s_test_updates_paused = 0u;
+static uint8_t  s_test_cute_icon_index = 0u;
+static bool     s_test_blink_phase_on = true;
+static uint32_t s_test_live_counter_20hz = 0u;
+static uint32_t s_test_last_processed_tick_20hz = 0u;
+static uint32_t s_bottom_overlay_until_ms = 0u;
+static uint32_t s_pressed_mask = 0u;
+static uint8_t  s_force_redraw = 1u;
 
 /* -------------------------------------------------------------------------- */
 /*  Local helpers                                                              */
 /* -------------------------------------------------------------------------- */
 static void ui_engine_request_overlay(uint32_t now_ms);
 static void ui_engine_configure_test_bottom_bar(void);
+static void ui_engine_update_test_dynamics(void);
 static void ui_engine_handle_test_events(uint32_t now_ms);
 static void ui_engine_handle_test_button_event(const button_event_t *event, uint32_t now_ms);
 static void ui_engine_build_status_model(ui_statusbar_model_t *out_model);
-static void ui_engine_compute_viewport(ui_rect_t *out_viewport, bool *out_status_visible, bool *out_bottom_visible);
+static void ui_engine_compute_viewport(u8g2_t *u8g2,
+                                       uint32_t now_ms,
+                                       ui_rect_t *out_viewport,
+                                       bool *out_status_visible,
+                                       bool *out_bottom_visible);
 static void ui_engine_draw_test_root(u8g2_t *u8g2, uint32_t now_ms);
+static const uint8_t *ui_engine_get_cute_icon(uint8_t index);
 
-/* -------------------------------------------------------------------------- */
-/*  Public init                                                                */
-/* -------------------------------------------------------------------------- */
 void UI_Engine_Init(void)
 {
     UI_BottomBar_Init();
@@ -73,8 +140,11 @@ void UI_Engine_Init(void)
     s_record_state = UI_RECORD_STATE_STOP;
     s_bt_stub_state = UI_BT_STUB_ON;
     s_imperial_units = 0u;
-    s_test_blink_paused = 0u;
+    s_test_updates_paused = 0u;
     s_test_cute_icon_index = 0u;
+    s_test_blink_phase_on = true;
+    s_test_live_counter_20hz = 0u;
+    s_test_last_processed_tick_20hz = s_ui_tick_20hz;
     s_bottom_overlay_until_ms = 0u;
     s_pressed_mask = Button_GetPressedMask();
     s_force_redraw = 1u;
@@ -126,9 +196,6 @@ void UI_Engine_SetBluetoothStubState(uint8_t state)
     s_bt_stub_state = (ui_bluetooth_stub_state_t)state;
 }
 
-/* -------------------------------------------------------------------------- */
-/*  TIM7 ISR hook                                                              */
-/* -------------------------------------------------------------------------- */
 void UI_Engine_OnFrameTickFromISR(void)
 {
     s_ui_tick_20hz++;
@@ -148,12 +215,6 @@ void UI_Engine_OnFrameTickFromISR(void)
     }
 }
 
-/* -------------------------------------------------------------------------- */
-/*  Optional board debug button hook                                           */
-/*                                                                            */
-/*  - 테스트 화면에서는 legacy debug로 바로 진입                               */
-/*  - legacy debug 화면에서는 기존 main.c 동작처럼 페이지를 넘긴다             */
-/* -------------------------------------------------------------------------- */
 void UI_Engine_OnBoardDebugButtonIrq(uint32_t now_ms)
 {
     if (s_current_screen == UI_SCREEN_DEBUG_LEGACY)
@@ -171,9 +232,6 @@ void UI_Engine_OnBoardDebugButtonIrq(uint32_t now_ms)
     s_force_redraw = 1u;
 }
 
-/* -------------------------------------------------------------------------- */
-/*  Root task                                                                  */
-/* -------------------------------------------------------------------------- */
 void UI_Engine_Task(uint32_t now_ms)
 {
     u8g2_t *u8g2;
@@ -185,6 +243,7 @@ void UI_Engine_Task(uint32_t now_ms)
     else
     {
         s_pressed_mask = Button_GetPressedMask();
+        ui_engine_update_test_dynamics();
         ui_engine_handle_test_events(now_ms);
     }
 
@@ -194,6 +253,13 @@ void UI_Engine_Task(uint32_t now_ms)
     if (U8G2_UC1608_TryAcquireFrameToken() == 0u)
     {
         return;
+    }
+
+    if (s_force_redraw != 0u)
+    {
+        /* 현재는 frame token이 오면 항상 전체 프레임을 다시 그리지만, */
+        /* 추후 dirty-region 최적화가 들어가더라도 API를 그대로 유지하기 */
+        /* 위해 redraw request 플래그를 남겨 둔다. */
     }
 
     u8g2 = U8G2_UC1608_GetHandle();
@@ -226,7 +292,7 @@ static void ui_engine_request_overlay(uint32_t now_ms)
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Bottom bar labels for test screen                                          */
+/*  Test bottom bar                                                            */
 /* -------------------------------------------------------------------------- */
 static void ui_engine_configure_test_bottom_bar(void)
 {
@@ -234,7 +300,7 @@ static void ui_engine_configure_test_bottom_bar(void)
 
     UI_BottomBar_SetButton(UI_FKEY_1, "DBG", UI_BOTTOMBAR_FLAG_DIVIDER);
     UI_BottomBar_SetButton(UI_FKEY_2,
-                           (s_test_blink_paused != 0u) ? "RUN" : "PAUSE",
+                           (s_test_updates_paused != 0u) ? "RUN" : "PAUSE",
                            UI_BOTTOMBAR_FLAG_DIVIDER);
     UI_BottomBar_SetButton(UI_FKEY_3, "MODE", UI_BOTTOMBAR_FLAG_DIVIDER);
     UI_BottomBar_SetButton(UI_FKEY_4, "TOAST", UI_BOTTOMBAR_FLAG_DIVIDER);
@@ -246,10 +312,39 @@ static void ui_engine_configure_test_bottom_bar(void)
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Test-mode button dispatch                                                  */
+/*  20Hz dynamic test update                                                   */
 /*                                                                            */
-/*  요구된 F1~F5 동작을 그대로 구현하고,                                       */
-/*  F6는 추가 테스트용으로 cute icon 순환에 할당했다.                           */
+/*  이전 패키지에서는 draw 함수가 raw 20Hz frame parity를 직접 써서             */
+/*  체감 blink가 너무 빨랐다.                                                  */
+/*                                                                            */
+/*  이제는                                                                   */
+/*  - 20Hz raw tick -> 큰 숫자 ++ 동적 테스트                                   */
+/*  - SlowToggle2Hz -> 눈으로 보는 깜빡임 패널                                 */
+/*  로 역할을 분리한다.                                                        */
+/* -------------------------------------------------------------------------- */
+static void ui_engine_update_test_dynamics(void)
+{
+    uint32_t tick_now;
+    uint32_t delta;
+
+    tick_now = s_ui_tick_20hz;
+    delta = (tick_now - s_test_last_processed_tick_20hz);
+    if (delta == 0u)
+    {
+        return;
+    }
+
+    s_test_last_processed_tick_20hz = tick_now;
+
+    if (s_test_updates_paused == 0u)
+    {
+        s_test_live_counter_20hz += delta;
+        s_test_blink_phase_on = (SlowToggle2Hz != false);
+    }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Event dispatch                                                             */
 /* -------------------------------------------------------------------------- */
 static void ui_engine_handle_test_events(uint32_t now_ms)
 {
@@ -299,10 +394,14 @@ static void ui_engine_handle_test_button_event(const button_event_t *event, uint
         break;
 
     case BUTTON_ID_2:
-        s_test_blink_paused = (s_test_blink_paused == 0u) ? 1u : 0u;
+        s_test_updates_paused = (s_test_updates_paused == 0u) ? 1u : 0u;
+        if (s_test_updates_paused != 0u)
+        {
+            s_test_blink_phase_on = (SlowToggle2Hz != false);
+        }
         ui_engine_configure_test_bottom_bar();
-        UI_Toast_Show((s_test_blink_paused != 0u) ? "BLINK PAUSED" : "BLINK RUN",
-                      icon_cute_heart_8x8,
+        UI_Toast_Show((s_test_updates_paused != 0u) ? "TEST HOLD" : "TEST RUN",
+                      icon_ui_bell_8x8,
                       ICON8_W,
                       ICON8_H,
                       now_ms,
@@ -316,7 +415,7 @@ static void ui_engine_handle_test_button_event(const button_event_t *event, uint
             ui_engine_request_overlay(now_ms);
         }
         UI_Toast_Show("LAYOUT CHANGED",
-                      icon_cute_star_8x8,
+                      icon_ui_folder_8x8,
                       ICON8_W,
                       ICON8_H,
                       now_ms,
@@ -324,8 +423,8 @@ static void ui_engine_handle_test_button_event(const button_event_t *event, uint
         break;
 
     case BUTTON_ID_4:
-        UI_Toast_Show("TOAST MESSAGE TEST",
-                      icon_cute_cat_8x8,
+        UI_Toast_Show("TOAST WITH ICON",
+                      icon_ui_info_8x8,
                       ICON8_W,
                       ICON8_H,
                       now_ms,
@@ -334,9 +433,9 @@ static void ui_engine_handle_test_button_event(const button_event_t *event, uint
 
     case BUTTON_ID_5:
         UI_Popup_Show("POPUP",
-                      "RIGHT TEXT FIXED",
-                      "FIRST LINE NO LONGER JUMPS",
-                      icon_cute_bike_8x8,
+                      "OPAQUE BODY ENABLED",
+                      "RIGHT TEXT ALIGN FIXED",
+                      icon_ui_warn_8x8,
                       ICON8_W,
                       ICON8_H,
                       now_ms,
@@ -346,9 +445,9 @@ static void ui_engine_handle_test_button_event(const button_event_t *event, uint
     case BUTTON_ID_6:
         s_test_cute_icon_index = (uint8_t)((s_test_cute_icon_index + 1u) & 0x03u);
         UI_Toast_Show("CUTE ICON NEXT",
-                      icon_arrow_right_7x4,
-                      ICON7X4_W,
-                      ICON7X4_H,
+                      ui_engine_get_cute_icon(s_test_cute_icon_index),
+                      ICON8_W,
+                      ICON8_H,
                       now_ms,
                       800u);
         break;
@@ -361,11 +460,24 @@ static void ui_engine_handle_test_button_event(const button_event_t *event, uint
     s_force_redraw = 1u;
 }
 
+
 /* -------------------------------------------------------------------------- */
-/*  Build lightweight status bar model                                         */
-/*                                                                            */
-/*  APP_STATE를 수정하지 않고, volatile 저장소에서 필요한 값만 뽑아 경량 모델을  */
-/*  만든다.                                                                    */
+/*  Small icon helper                                                          */
+/* -------------------------------------------------------------------------- */
+static const uint8_t *ui_engine_get_cute_icon(uint8_t index)
+{
+    switch (index & 0x03u)
+    {
+    case 0u: return icon_cute_cat_8x8;
+    case 1u: return icon_cute_heart_8x8;
+    case 2u: return icon_cute_star_8x8;
+    case 3u:
+    default: return icon_cute_bike_8x8;
+    }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Build lightweight status model                                             */
 /* -------------------------------------------------------------------------- */
 static void ui_engine_build_status_model(ui_statusbar_model_t *out_model)
 {
@@ -387,31 +499,32 @@ static void ui_engine_build_status_model(ui_statusbar_model_t *out_model)
     out_model->sd_mounted = g_app_state.sd.mounted;
     out_model->sd_initialized = g_app_state.sd.initialized;
 
-    out_model->clock_valid = g_app_state.clock.rtc_time_valid;
-    out_model->clock_year = g_app_state.clock.local.year;
-    out_model->clock_month = g_app_state.clock.local.month;
-    out_model->clock_day = g_app_state.clock.local.day;
-    out_model->clock_hour = g_app_state.clock.local.hour;
-    out_model->clock_minute = g_app_state.clock.local.min;
-    out_model->clock_second = g_app_state.clock.local.sec;
-    out_model->clock_weekday = g_app_state.clock.local.weekday;
+    out_model->time_valid   = g_app_state.clock.rtc_time_valid;
+    out_model->time_year    = g_app_state.clock.local.year;
+    out_model->time_month   = g_app_state.clock.local.month;
+    out_model->time_day     = g_app_state.clock.local.day;
+    out_model->time_hour    = g_app_state.clock.local.hour;
+    out_model->time_minute  = g_app_state.clock.local.min;
+    out_model->time_weekday = g_app_state.clock.local.weekday;
 
     out_model->record_state = s_record_state;
     out_model->imperial_units = s_imperial_units;
     out_model->bluetooth_stub_state = s_bt_stub_state;
-    out_model->bluetooth_aux_visible = 1u;
 }
 
 /* -------------------------------------------------------------------------- */
 /*  Viewport computation                                                       */
-/*                                                                            */
-/*  4가지 레이아웃 모드를 여기 한 곳에서만 계산한다.                            */
 /* -------------------------------------------------------------------------- */
-static void ui_engine_compute_viewport(ui_rect_t *out_viewport, bool *out_status_visible, bool *out_bottom_visible)
+static void ui_engine_compute_viewport(u8g2_t *u8g2,
+                                       uint32_t now_ms,
+                                       ui_rect_t *out_viewport,
+                                       bool *out_status_visible,
+                                       bool *out_bottom_visible)
 {
     bool status_visible = true;
     bool bottom_visible = false;
     ui_rect_t view;
+    uint8_t status_reserved_h = UI_StatusBar_GetReservedHeight(u8g2);
 
     view.x = 0;
     view.y = 0;
@@ -423,24 +536,23 @@ static void ui_engine_compute_viewport(ui_rect_t *out_viewport, bool *out_status
     case UI_LAYOUT_MODE_TOP_EXTENDED_NO_BOTTOM:
         status_visible = true;
         bottom_visible = false;
-        view.y = UI_STATUSBAR_H + UI_STATUSBAR_GAP_H;
-        view.h = UI_LCD_H - view.y;
+        view.y = (int16_t)(status_reserved_h + UI_STATUSBAR_GAP_H);
+        view.h = (int16_t)(UI_LCD_H - view.y);
         break;
 
     case UI_LAYOUT_MODE_TOP_EXTENDED_OVERLAY:
         status_visible = true;
         bottom_visible = ((s_pressed_mask != 0u) ||
-                          ((int32_t)(s_bottom_overlay_until_ms - HAL_GetTick()) > 0));
-        view.y = UI_STATUSBAR_H + UI_STATUSBAR_GAP_H;
-        view.h = UI_LCD_H - view.y;
+                          ((int32_t)(s_bottom_overlay_until_ms - now_ms) > 0));
+        view.y = (int16_t)(status_reserved_h + UI_STATUSBAR_GAP_H);
+        view.h = (int16_t)(UI_LCD_H - view.y);
         break;
 
     case UI_LAYOUT_MODE_TOP_BOTTOM_FIXED:
         status_visible = true;
         bottom_visible = true;
-        view.y = UI_STATUSBAR_H + UI_STATUSBAR_GAP_H;
-        view.h = UI_LCD_H - UI_STATUSBAR_H - UI_STATUSBAR_GAP_H -
-                 UI_BOTTOMBAR_H - UI_BOTTOMBAR_GAP_H;
+        view.y = (int16_t)(status_reserved_h + UI_STATUSBAR_GAP_H);
+        view.h = (int16_t)(UI_LCD_H - view.y - UI_BOTTOMBAR_H - UI_BOTTOMBAR_GAP_H);
         break;
 
     case UI_LAYOUT_MODE_FULLSCREEN:
@@ -472,7 +584,7 @@ static void ui_engine_compute_viewport(ui_rect_t *out_viewport, bool *out_status
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Draw test root                                                             */
+/*  Draw root                                                                  */
 /* -------------------------------------------------------------------------- */
 static void ui_engine_draw_test_root(u8g2_t *u8g2, uint32_t now_ms)
 {
@@ -481,36 +593,32 @@ static void ui_engine_draw_test_root(u8g2_t *u8g2, uint32_t now_ms)
     bool bottom_visible;
     ui_statusbar_model_t status_model;
 
-    ui_engine_compute_viewport(&viewport, &status_visible, &bottom_visible);
+    ui_engine_compute_viewport(u8g2, now_ms, &viewport, &status_visible, &bottom_visible);
 
-    /* Priority 1: main screen */
     UI_ScreenTest_Draw(u8g2,
                        &viewport,
-                       s_ui_tick_20hz,
-                       (s_test_blink_paused != 0u),
+                       s_test_live_counter_20hz,
+                       (s_test_updates_paused != 0u),
+                       s_test_blink_phase_on,
                        s_test_cute_icon_index,
                        s_layout_mode);
 
-    /* Priority 2: status bar */
     if (status_visible != false)
     {
         ui_engine_build_status_model(&status_model);
         UI_StatusBar_Draw(u8g2, &status_model, now_ms);
     }
 
-    /* Priority 3: bottom bar */
     if (bottom_visible != false)
     {
         UI_BottomBar_Draw(u8g2, s_pressed_mask);
     }
 
-    /* Priority 4: toast */
     if (UI_Toast_IsVisible() != false)
     {
         UI_Toast_Draw(u8g2, bottom_visible);
     }
 
-    /* Priority 5: popup */
     if (UI_Popup_IsVisible() != false)
     {
         UI_Popup_Draw(u8g2);

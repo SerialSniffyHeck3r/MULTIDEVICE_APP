@@ -2641,6 +2641,7 @@ int main(void)
   MX_DAC_Init();
   MX_TIM6_Init();
   MX_IWDG_Init();
+  MX_TIM8_Init();
   /* USER CODE BEGIN 2 */
   APP_STATE_Init();
 

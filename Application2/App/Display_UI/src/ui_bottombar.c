@@ -16,9 +16,6 @@ static ui_bottom_message_t s_msg;
 static void ui_bottombar_draw_buttons(u8g2_t *u8g2, uint32_t pressed_mask);
 static void ui_bottombar_draw_message(u8g2_t *u8g2);
 
-/* -------------------------------------------------------------------------- */
-/*  Init                                                                       */
-/* -------------------------------------------------------------------------- */
 void UI_BottomBar_Init(void)
 {
     memset(s_buttons, 0, sizeof(s_buttons));
@@ -66,8 +63,7 @@ void UI_BottomBar_SetButtonIcon4(ui_fkey_t key,
     s_buttons[key].icon = icon;
     s_buttons[key].icon_w = icon_w;
     s_buttons[key].icon_h = 4u;
-    s_buttons[key].flags = (uint8_t)(flags |
-                                     UI_BOTTOMBAR_FLAG_ICON_4PX);
+    s_buttons[key].flags = (uint8_t)(flags | UI_BOTTOMBAR_FLAG_ICON_4PX);
 }
 
 void UI_BottomBar_SetMessage(const ui_bottom_message_t *msg)
@@ -102,18 +98,16 @@ void UI_BottomBar_Draw(u8g2_t *u8g2, uint32_t pressed_mask)
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Buttons draw                                                               */
+/*  Button mode                                                                */
 /*                                                                            */
-/*  배경은 전체 black bar로 깔고,                                               */
-/*  - 기본 상태는 white text/icon on black                                     */
-/*  - 눌린 버튼 또는 forced invert는 white background with black content       */
-/*  로 표현한다.                                                               */
+/*  - 전체 하단 바는 black bar로 깐다.                                          */
+/*  - 눌린 칸 또는 forced invert 칸은 white로 반전한다.                         */
+/*  - 반전 여부는 Button status 기반이고, 실제 동작 수행은 Button event 기반이다. */
 /* -------------------------------------------------------------------------- */
 static void ui_bottombar_draw_buttons(u8g2_t *u8g2, uint32_t pressed_mask)
 {
     uint8_t y0 = (uint8_t)(UI_LCD_H - UI_BOTTOMBAR_H);
     uint8_t text_y = (uint8_t)(UI_LCD_H - 1);
-
     int i;
 
     u8g2_SetDrawColor(u8g2, 1);
@@ -182,10 +176,7 @@ static void ui_bottombar_draw_buttons(u8g2_t *u8g2, uint32_t pressed_mask)
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Message mode draw                                                          */
-/*                                                                            */
-/*  프로토타입과 같은 철학으로, 왼쪽에 아이콘을 둘 수 있고                      */
-/*  텍스트는 black bar 안에서 white로 출력한다.                                */
+/*  Message mode                                                               */
 /* -------------------------------------------------------------------------- */
 static void ui_bottombar_draw_message(u8g2_t *u8g2)
 {

@@ -2,8 +2,10 @@
 
 #include <string.h>
 
-#define UI_TOAST_TEXT_MAX   63
-#define UI_TOAST_BOX_H      13
+#define UI_TOAST_TEXT_MAX             63
+#define UI_TOAST_BOX_H                13
+#define UI_TOAST_TEXT_BASELINE_Y_OFF  10
+#define UI_TOAST_ICON_Y_VISUAL_OFF    1
 
 typedef struct
 {
@@ -113,16 +115,24 @@ void UI_Toast_Draw(u8g2_t *u8g2, bool avoid_bottom_bar)
         y0 -= UI_BOTTOMBAR_H;
     }
 
-    u8g2_SetDrawColor(u8g2, 1);
-    u8g2_DrawBox(u8g2, (u8g2_uint_t)x0, (u8g2_uint_t)y0, box_w, UI_TOAST_BOX_H);
+    /* ---------------------------------------------------------------------- */
+    /*  토스트는 항상 불투명한 흰색 body 위에 검은 외곽선을 둔다.               */
+    /* ---------------------------------------------------------------------- */
     u8g2_SetDrawColor(u8g2, 0);
+    u8g2_DrawBox(u8g2, (u8g2_uint_t)x0, (u8g2_uint_t)y0, box_w, UI_TOAST_BOX_H);
+
+    u8g2_SetDrawColor(u8g2, 1);
     u8g2_DrawFrame(u8g2, (u8g2_uint_t)x0, (u8g2_uint_t)y0, box_w, UI_TOAST_BOX_H);
 
     text_x = (int16_t)(x0 + 5);
 
     if (icon_space != 0u)
     {
-        int16_t icon_y = (int16_t)(y0 + ((UI_TOAST_BOX_H - s_toast.icon_h) / 2));
+        int16_t icon_y;
+
+        icon_y = (int16_t)(y0 + ((UI_TOAST_BOX_H - s_toast.icon_h) / 2));
+        icon_y += UI_TOAST_ICON_Y_VISUAL_OFF;
+
         u8g2_DrawXBM(u8g2,
                      (u8g2_uint_t)(x0 + 4),
                      (u8g2_uint_t)icon_y,
@@ -132,6 +142,8 @@ void UI_Toast_Draw(u8g2_t *u8g2, bool avoid_bottom_bar)
         text_x += icon_space;
     }
 
-    u8g2_DrawStr(u8g2, (u8g2_uint_t)text_x, (u8g2_uint_t)(y0 + 10), s_toast.text);
-    u8g2_SetDrawColor(u8g2, 1);
+    u8g2_DrawStr(u8g2,
+                 (u8g2_uint_t)text_x,
+                 (u8g2_uint_t)(y0 + UI_TOAST_TEXT_BASELINE_Y_OFF),
+                 s_toast.text);
 }

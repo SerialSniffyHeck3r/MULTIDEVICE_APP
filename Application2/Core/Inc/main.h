@@ -61,6 +61,8 @@ void Error_Handler(void);
 #define POWER_HOLD_GPIO_Port GPIOE
 #define BEEP_SOUND_Pin GPIO_PIN_5
 #define BEEP_SOUND_GPIO_Port GPIOE
+#define LED11_Pin GPIO_PIN_6
+#define LED11_GPIO_Port GPIOE
 #define BOARD_DEBUG_BUTTON_Pin GPIO_PIN_0
 #define BOARD_DEBUG_BUTTON_GPIO_Port GPIOA
 #define BOARD_DEBUG_BUTTON_EXTI_IRQn EXTI0_IRQn
@@ -120,6 +122,8 @@ void Error_Handler(void);
 #define LED8_GPIO_Port GPIOD
 #define LED9_Pin GPIO_PIN_15
 #define LED9_GPIO_Port GPIOD
+#define LED10_Pin GPIO_PIN_6
+#define LED10_GPIO_Port GPIOC
 #define LED5_Pin GPIO_PIN_9
 #define LED5_GPIO_Port GPIOC
 #define DEBUG_TX_Pin GPIO_PIN_9
