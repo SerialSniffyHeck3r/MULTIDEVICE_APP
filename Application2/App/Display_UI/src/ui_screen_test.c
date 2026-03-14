@@ -1,7 +1,314 @@
 #include "ui_screen_test.h"
+
+#include "ui_bottombar.h"
+#include "ui_statusbar.h"
+#include "ui_toast.h"
+#include "ui_popup.h"
 #include "ui_common_icons.h"
 
 #include <stdio.h>
+
+/* -------------------------------------------------------------------------- */
+/*  Screen-local runtime state                                                */
+/*                                                                            */
+/*  이 파일은 TEST 홈 화면의 "기능 로직" 을 전담한다.                          */
+/*  즉, 아래 상태들은 UI 엔진(ui_engine.c)이 아니라                             */
+/*  TEST 화면 정의 파일인 여기에서만 관리한다.                                 */
+/*                                                                            */
+/*  보관하는 항목                                                              */
+/*  - 현재 main viewport 모드(layout mode)                                     */
+/*  - RUN / HOLD 상태                                                          */
+/*  - cute icon index                                                          */
+/*  - 20Hz live counter                                                        */
+/*  - overlay형 bottom bar의 표시 만료 시각                                    */
+/* -------------------------------------------------------------------------- */
+static ui_layout_mode_t s_test_layout_mode = UI_LAYOUT_MODE_TOP_BOTTOM_FIXED;
+static uint8_t          s_test_updates_paused = 0u;
+static uint8_t          s_test_cute_icon_index = 0u;
+static bool             s_test_blink_phase_on = true;
+static uint32_t         s_test_live_counter_20hz = 0u;
+static uint32_t         s_test_last_processed_tick_20hz = 0u;
+static uint32_t         s_test_bottom_overlay_until_ms = 0u;
+
+/* -------------------------------------------------------------------------- */
+/*  Local helpers for TEST home logic                                         */
+/* -------------------------------------------------------------------------- */
+static void ui_screen_test_request_overlay(uint32_t now_ms);
+static void ui_screen_test_configure_bottom_bar(void);
+static const uint8_t *ui_screen_test_get_cute_icon(uint8_t index);
+
+/* -------------------------------------------------------------------------- */
+/*  Overlay request                                                           */
+/*                                                                            */
+/*  overlay mode에서는 버튼을 누르거나 event가 들어왔을 때만                    */
+/*  bottom bar가 잠깐 올라오도록 한다.                                         */
+/*  이 함수는 그 만료 시각을 갱신하는 역할만 한다.                              */
+/* -------------------------------------------------------------------------- */
+static void ui_screen_test_request_overlay(uint32_t now_ms)
+{
+  s_test_bottom_overlay_until_ms = now_ms + UI_BOTTOMBAR_OVERLAY_TIMEOUT_MS;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  TEST home bottom bar                                                      */
+/*                                                                            */
+/*  이 하단바는 TEST 홈 화면 전용 기능 힌트다.                                  */
+/*  - F1 : DBG                                                                 */
+/*  - F2 : PAUSE / RUN                                                         */
+/*  - F3 : MODE                                                                */
+/*  - F4 : TOAST                                                               */
+/*  - F5 : POPUP                                                               */
+/*  - F6 : 오른쪽 화살표 아이콘                                                */
+/* -------------------------------------------------------------------------- */
+static void ui_screen_test_configure_bottom_bar(void)
+{
+  UI_BottomBar_SetMode(UI_BOTTOMBAR_MODE_BUTTONS);
+
+  UI_BottomBar_SetButton(UI_FKEY_1, "DBG", UI_BOTTOMBAR_FLAG_DIVIDER);
+  UI_BottomBar_SetButton(UI_FKEY_2,
+                         (s_test_updates_paused != 0u) ? "RUN" : "PAUSE",
+                         UI_BOTTOMBAR_FLAG_DIVIDER);
+  UI_BottomBar_SetButton(UI_FKEY_3, "MODE", UI_BOTTOMBAR_FLAG_DIVIDER);
+  UI_BottomBar_SetButton(UI_FKEY_4, "TOAST", UI_BOTTOMBAR_FLAG_DIVIDER);
+  UI_BottomBar_SetButton(UI_FKEY_5, "POPUP", UI_BOTTOMBAR_FLAG_DIVIDER);
+  UI_BottomBar_SetButtonIcon4(UI_FKEY_6,
+                              icon_arrow_right_7x4,
+                              ICON7X4_W,
+                              0u);
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Public init                                                               */
+/* -------------------------------------------------------------------------- */
+void UI_ScreenTest_Init(uint32_t ui_tick_20hz)
+{
+  s_test_layout_mode = UI_LAYOUT_MODE_TOP_BOTTOM_FIXED;
+  s_test_updates_paused = 0u;
+  s_test_cute_icon_index = 0u;
+  s_test_blink_phase_on = true;
+  s_test_live_counter_20hz = 0u;
+  s_test_last_processed_tick_20hz = ui_tick_20hz;
+  s_test_bottom_overlay_until_ms = 0u;
+
+  ui_screen_test_configure_bottom_bar();
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Public on-enter                                                           */
+/*                                                                            */
+/*  TEST 홈으로 돌아올 때마다 현재 상태에 맞는 하단바만 다시 세팅한다.          */
+/*  숫자 카운터, layout mode, cute icon index는 유지한다.                      */
+/* -------------------------------------------------------------------------- */
+void UI_ScreenTest_OnEnter(void)
+{
+  ui_screen_test_configure_bottom_bar();
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Public 20Hz task                                                          */
+/*                                                                            */
+/*  20Hz raw tick는 큰 숫자 증가용으로만 사용한다.                              */
+/*  눈으로 보이는 깜빡임 위상은 SlowToggle2Hz의 현재 값만 반영한다.             */
+/* -------------------------------------------------------------------------- */
+void UI_ScreenTest_Task(uint32_t ui_tick_20hz)
+{
+  uint32_t delta;
+
+  delta = (ui_tick_20hz - s_test_last_processed_tick_20hz);
+  if (delta == 0u)
+  {
+    return;
+  }
+
+  s_test_last_processed_tick_20hz = ui_tick_20hz;
+
+  if (s_test_updates_paused == 0u)
+  {
+    s_test_live_counter_20hz += delta;
+    s_test_blink_phase_on = (SlowToggle2Hz != false);
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Public button handler                                                     */
+/*                                                                            */
+/*  화면 전환이 필요한 경우에만 action을 반환한다.                              */
+/*  toast / popup / layout / bottom bar text 변경은 이 함수 안에서 끝낸다.     */
+/* -------------------------------------------------------------------------- */
+ui_screen_test_action_t UI_ScreenTest_HandleButtonEvent(const button_event_t *event,
+                                                        uint32_t now_ms)
+{
+  if (event == 0)
+  {
+    return UI_SCREEN_TEST_ACTION_NONE;
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* overlay mode에서 들어오는 모든 버튼 event는 하단 overlay 표시를 연장한다. */
+  /* ---------------------------------------------------------------------- */
+  if (s_test_layout_mode == UI_LAYOUT_MODE_TOP_EXTENDED_OVERLAY)
+  {
+    switch (event->type)
+    {
+      case BUTTON_EVENT_PRESS:
+      case BUTTON_EVENT_RELEASE:
+      case BUTTON_EVENT_SHORT_PRESS:
+      case BUTTON_EVENT_LONG_PRESS:
+        ui_screen_test_request_overlay(now_ms);
+        break;
+
+      case BUTTON_EVENT_NONE:
+      default:
+        break;
+    }
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* TEST 홈 F1 long press -> 엔진 오일 교체 주기 설정 화면 진입               */
+  /*                                                                        */
+  /* F1 short press의 기존 debug 진입 기능은 그대로 유지해야 하므로,          */
+  /* long press만 별도 action으로 분리해 UI 엔진으로 올린다.                  */
+  /* ---------------------------------------------------------------------- */
+  if ((event->id == BUTTON_ID_1) &&
+      (event->type == BUTTON_EVENT_LONG_PRESS))
+  {
+    return UI_SCREEN_TEST_ACTION_ENTER_ENGINE_OIL;
+  }
+
+  if (event->type != BUTTON_EVENT_SHORT_PRESS)
+  {
+    return UI_SCREEN_TEST_ACTION_NONE;
+  }
+
+  switch (event->id)
+  {
+    case BUTTON_ID_1:
+      return UI_SCREEN_TEST_ACTION_ENTER_DEBUG_LEGACY;
+
+    case BUTTON_ID_2:
+      s_test_updates_paused = (s_test_updates_paused == 0u) ? 1u : 0u;
+      if (s_test_updates_paused != 0u)
+      {
+        s_test_blink_phase_on = (SlowToggle2Hz != false);
+      }
+
+      ui_screen_test_configure_bottom_bar();
+
+      UI_Toast_Show((s_test_updates_paused != 0u) ? "TEST HOLD" : "TEST RUN",
+                    icon_ui_bell_8x8,
+                    ICON8_W,
+                    ICON8_H,
+                    now_ms,
+                    900u);
+      break;
+
+    case BUTTON_ID_3:
+      s_test_layout_mode = (ui_layout_mode_t)(((uint32_t)s_test_layout_mode + 1u) %
+                                              (uint32_t)UI_LAYOUT_MODE_COUNT);
+      if (s_test_layout_mode == UI_LAYOUT_MODE_TOP_EXTENDED_OVERLAY)
+      {
+        ui_screen_test_request_overlay(now_ms);
+      }
+
+      UI_Toast_Show("LAYOUT CHANGED",
+                    icon_ui_folder_8x8,
+                    ICON8_W,
+                    ICON8_H,
+                    now_ms,
+                    900u);
+      break;
+
+    case BUTTON_ID_4:
+      UI_Toast_Show("TOAST WITH ICON",
+                    icon_ui_info_8x8,
+                    ICON8_W,
+                    ICON8_H,
+                    now_ms,
+                    UI_TOAST_DEFAULT_TIMEOUT_MS);
+      break;
+
+    case BUTTON_ID_5:
+      UI_Popup_Show("POPUP",
+                    "OPAQUE BODY ENABLED",
+                    "RIGHT TEXT ALIGN FIXED",
+                    icon_ui_warn_8x8,
+                    ICON8_W,
+                    ICON8_H,
+                    now_ms,
+                    UI_POPUP_DEFAULT_TIMEOUT_MS);
+      break;
+
+    case BUTTON_ID_6:
+      s_test_cute_icon_index = (uint8_t)((s_test_cute_icon_index + 1u) & 0x03u);
+      UI_Toast_Show("CUTE ICON NEXT",
+                    ui_screen_test_get_cute_icon(s_test_cute_icon_index),
+                    ICON8_W,
+                    ICON8_H,
+                    now_ms,
+                    800u);
+      break;
+
+    case BUTTON_ID_NONE:
+    default:
+      break;
+  }
+
+  return UI_SCREEN_TEST_ACTION_NONE;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Compose getters                                                           */
+/* -------------------------------------------------------------------------- */
+ui_layout_mode_t UI_ScreenTest_GetLayoutMode(void)
+{
+  return s_test_layout_mode;
+}
+
+bool UI_ScreenTest_IsStatusBarVisible(void)
+{
+  return (s_test_layout_mode != UI_LAYOUT_MODE_FULLSCREEN);
+}
+
+bool UI_ScreenTest_IsBottomBarVisible(uint32_t now_ms, uint32_t pressed_mask)
+{
+  switch (s_test_layout_mode)
+  {
+    case UI_LAYOUT_MODE_TOP_BOTTOM_FIXED:
+      return true;
+
+    case UI_LAYOUT_MODE_TOP_EXTENDED_OVERLAY:
+      return ((pressed_mask != 0u) ||
+              ((int32_t)(s_test_bottom_overlay_until_ms - now_ms) > 0));
+
+    case UI_LAYOUT_MODE_TOP_EXTENDED_NO_BOTTOM:
+    case UI_LAYOUT_MODE_FULLSCREEN:
+    default:
+      return false;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Draw-state getters                                                        */
+/* -------------------------------------------------------------------------- */
+uint32_t UI_ScreenTest_GetLiveCounter20Hz(void)
+{
+  return s_test_live_counter_20hz;
+}
+
+bool UI_ScreenTest_GetUpdatesPaused(void)
+{
+  return (s_test_updates_paused != 0u);
+}
+
+bool UI_ScreenTest_GetBlinkPhase(void)
+{
+  return s_test_blink_phase_on;
+}
+
+uint8_t UI_ScreenTest_GetCuteIconIndex(void)
+{
+  return s_test_cute_icon_index;
+}
 
 /* -------------------------------------------------------------------------- */
 /* Local helper: cute icon selector                                           */

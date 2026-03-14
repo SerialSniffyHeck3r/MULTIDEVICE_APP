@@ -1,7 +1,240 @@
 #include "ui_screen_engine_oil.h"
 
+#include "ui_bottombar.h"
+#include "ui_toast.h"
+#include "ui_common_icons.h"
+
 #include <stdio.h>
-#include <string.h>
+
+/* -------------------------------------------------------------------------- */
+/*  Screen-local runtime state                                                */
+/*                                                                            */
+/*  이 파일은 엔진 오일 교체 주기 화면의 기능 로직을 전담한다.                  */
+/*  즉, 저장값 / 편집값 / 선택 자릿수 / bottom bar 내용 결정은                  */
+/*  UI 엔진이 아니라 이 화면 파일 안에서만 관리한다.                           */
+/* -------------------------------------------------------------------------- */
+#define UI_ENGINE_OIL_DIGIT_COUNT    5u
+#define UI_ENGINE_OIL_INTERVAL_MAX   99999u
+
+static uint32_t s_engine_oil_interval_saved = 5000u;
+static uint32_t s_engine_oil_interval_edit = 5000u;
+static uint8_t  s_engine_oil_digit_index = 0u;
+
+/* -------------------------------------------------------------------------- */
+/*  Local helpers for engine-oil screen                                       */
+/* -------------------------------------------------------------------------- */
+static void ui_screen_engine_oil_configure_bottom_bar(void);
+static uint32_t ui_screen_engine_oil_get_place_value(uint8_t digit_index);
+static void ui_screen_engine_oil_adjust_digit(int8_t delta);
+
+/* -------------------------------------------------------------------------- */
+/*  Engine-oil bottom bar                                                     */
+/*                                                                            */
+/*  이 화면의 bottom bar는 6개의 물리 버튼과 1:1로 대응한다.                    */
+/*  - F1 : BACK 텍스트                                                         */
+/*  - F2 : 왼쪽 화살표                                                         */
+/*  - F3 : 오른쪽 화살표                                                       */
+/*  - F4 : 위쪽 화살표                                                         */
+/*  - F5 : 아래쪽 화살표                                                       */
+/*  - F6 : DONE 텍스트                                                         */
+/* -------------------------------------------------------------------------- */
+static void ui_screen_engine_oil_configure_bottom_bar(void)
+{
+    UI_BottomBar_SetMode(UI_BOTTOMBAR_MODE_BUTTONS);
+
+    UI_BottomBar_SetButton(UI_FKEY_1, "BACK", UI_BOTTOMBAR_FLAG_DIVIDER);
+    UI_BottomBar_SetButtonIcon4(UI_FKEY_2,
+                                icon_arrow_left_7x4,
+                                ICON7X4_W,
+                                UI_BOTTOMBAR_FLAG_DIVIDER);
+    UI_BottomBar_SetButtonIcon4(UI_FKEY_3,
+                                icon_arrow_right_7x4,
+                                ICON7X4_W,
+                                UI_BOTTOMBAR_FLAG_DIVIDER);
+    UI_BottomBar_SetButtonIcon4(UI_FKEY_4,
+                                icon_arrow_up_7x4,
+                                ICON7X4_W,
+                                UI_BOTTOMBAR_FLAG_DIVIDER);
+    UI_BottomBar_SetButtonIcon4(UI_FKEY_5,
+                                icon_arrow_down_7x4,
+                                ICON7X4_W,
+                                UI_BOTTOMBAR_FLAG_DIVIDER);
+    UI_BottomBar_SetButton(UI_FKEY_6, "DONE", 0u);
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Place-value helper                                                        */
+/*                                                                            */
+/*  선택 자릿수 index는 왼쪽에서 오른쪽 순서다.                                */
+/*  - 0 -> 10000 자리                                                          */
+/*  - 1 -> 1000 자리                                                           */
+/*  - 2 -> 100 자리                                                            */
+/*  - 3 -> 10 자리                                                             */
+/*  - 4 -> 1 자리                                                              */
+/* -------------------------------------------------------------------------- */
+static uint32_t ui_screen_engine_oil_get_place_value(uint8_t digit_index)
+{
+    static const uint32_t place_table[UI_ENGINE_OIL_DIGIT_COUNT] =
+    {
+        10000u, 1000u, 100u, 10u, 1u
+    };
+
+    if (digit_index >= UI_ENGINE_OIL_DIGIT_COUNT)
+    {
+        return 1u;
+    }
+
+    return place_table[digit_index];
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Current digit +/- 1                                                       */
+/*                                                                            */
+/*  현재 선택된 자릿수 하나만 0~9 범위에서 순환시킨다.                          */
+/*  다른 자릿수는 절대 건드리지 않는다.                                         */
+/* -------------------------------------------------------------------------- */
+static void ui_screen_engine_oil_adjust_digit(int8_t delta)
+{
+    uint32_t place_value;
+    uint32_t current_digit;
+    uint32_t new_digit;
+
+    place_value = ui_screen_engine_oil_get_place_value(s_engine_oil_digit_index);
+    current_digit = (s_engine_oil_interval_edit / place_value) % 10u;
+
+    if (delta >= 0)
+    {
+        new_digit = (current_digit + 1u) % 10u;
+    }
+    else
+    {
+        new_digit = (current_digit == 0u) ? 9u : (current_digit - 1u);
+    }
+
+    s_engine_oil_interval_edit -= (current_digit * place_value);
+    s_engine_oil_interval_edit += (new_digit * place_value);
+
+    if (s_engine_oil_interval_edit > UI_ENGINE_OIL_INTERVAL_MAX)
+    {
+        s_engine_oil_interval_edit = UI_ENGINE_OIL_INTERVAL_MAX;
+    }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Public init                                                               */
+/* -------------------------------------------------------------------------- */
+void UI_ScreenEngineOil_Init(void)
+{
+    s_engine_oil_interval_saved = 5000u;
+    s_engine_oil_interval_edit = s_engine_oil_interval_saved;
+    s_engine_oil_digit_index = 0u;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Public on-enter                                                           */
+/*                                                                            */
+/*  진입 시 현재 편집값을 저장값으로부터 다시 읽어 와서                         */
+/*  "항상 저장 완료값에서 편집 시작" 하도록 만든다.                            */
+/* -------------------------------------------------------------------------- */
+void UI_ScreenEngineOil_OnEnter(void)
+{
+    s_engine_oil_interval_edit = s_engine_oil_interval_saved;
+    s_engine_oil_digit_index = 0u;
+
+    ui_screen_engine_oil_configure_bottom_bar();
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Public button handler                                                     */
+/* -------------------------------------------------------------------------- */
+ui_screen_engine_oil_action_t UI_ScreenEngineOil_HandleButtonEvent(const button_event_t *event,
+                                                                   uint32_t now_ms)
+{
+    if (event == 0)
+    {
+        return UI_SCREEN_ENGINE_OIL_ACTION_NONE;
+    }
+
+    if (event->type != BUTTON_EVENT_SHORT_PRESS)
+    {
+        return UI_SCREEN_ENGINE_OIL_ACTION_NONE;
+    }
+
+    switch (event->id)
+    {
+        case BUTTON_ID_1:
+            return UI_SCREEN_ENGINE_OIL_ACTION_BACK_TO_TEST;
+
+        case BUTTON_ID_2:
+            if (s_engine_oil_digit_index > 0u)
+            {
+                s_engine_oil_digit_index--;
+            }
+            break;
+
+        case BUTTON_ID_3:
+            if ((uint32_t)s_engine_oil_digit_index + 1u < UI_ENGINE_OIL_DIGIT_COUNT)
+            {
+                s_engine_oil_digit_index++;
+            }
+            break;
+
+        case BUTTON_ID_4:
+            ui_screen_engine_oil_adjust_digit(+1);
+            break;
+
+        case BUTTON_ID_5:
+            ui_screen_engine_oil_adjust_digit(-1);
+            break;
+
+        case BUTTON_ID_6:
+            s_engine_oil_interval_saved = s_engine_oil_interval_edit;
+            UI_Toast_Show("OIL INT SAVED",
+                          icon_ui_ok_8x8,
+                          ICON8_W,
+                          ICON8_H,
+                          now_ms,
+                          900u);
+            return UI_SCREEN_ENGINE_OIL_ACTION_SAVE_AND_BACK_TO_TEST;
+
+        case BUTTON_ID_NONE:
+        default:
+            break;
+    }
+
+    return UI_SCREEN_ENGINE_OIL_ACTION_NONE;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Compose getters                                                           */
+/* -------------------------------------------------------------------------- */
+ui_layout_mode_t UI_ScreenEngineOil_GetLayoutMode(void)
+{
+    return UI_LAYOUT_MODE_TOP_BOTTOM_FIXED;
+}
+
+bool UI_ScreenEngineOil_IsStatusBarVisible(void)
+{
+    return true;
+}
+
+bool UI_ScreenEngineOil_IsBottomBarVisible(void)
+{
+    return true;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Draw-state getters                                                        */
+/* -------------------------------------------------------------------------- */
+uint32_t UI_ScreenEngineOil_GetIntervalValue(void)
+{
+    return s_engine_oil_interval_edit;
+}
+
+uint8_t UI_ScreenEngineOil_GetSelectedDigitIndex(void)
+{
+    return s_engine_oil_digit_index;
+}
 
 /* -------------------------------------------------------------------------- */
 /*  Local font policy                                                          */
@@ -18,7 +251,6 @@
 /*  5자리 숫자를 cell 기반으로 배치해                                          */
 /*  자릿수 선택 박스를 안정적으로 그릴 수 있게 한다.                           */
 /* -------------------------------------------------------------------------- */
-#define UI_ENGINE_OIL_DIGIT_COUNT  5u
 #define UI_ENGINE_OIL_DIGIT_GAP    2
 
 void UI_ScreenEngineOil_Draw(u8g2_t *u8g2,

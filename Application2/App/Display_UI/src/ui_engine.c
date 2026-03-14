@@ -8,7 +8,6 @@
 #include "ui_boot.h"
 #include "ui_screen_test.h"
 #include "ui_screen_engine_oil.h"
-#include "ui_common_icons.h"
 #include "ui_debug_legacy.h"
 #include "APP_STATE.h"
 #include "button.h"
@@ -16,72 +15,11 @@
 
 #include <string.h>
 
-/*
- * UI_TOAST_POPUP_USAGE.txt
-========================
-
-1) 토스트를 아이콘과 함께 띄우는 방법
--------------------------------------
-아래 코드를 그대로 사용하면 된다.
-
-UI_Toast_Show("BT CONNECTED",
-              icon_ui_info_8x8,
-              ICON8_W,
-              ICON8_H,
-              now_ms,
-              UI_TOAST_DEFAULT_TIMEOUT_MS);
-
-2) 토스트를 아이콘 없이 띄우는 방법
------------------------------------
-icon 포인터와 width / height를 0으로 넣으면 된다.
-
-UI_Toast_Show("PROFILE SAVED",
-              0,
-              0u,
-              0u,
-              now_ms,
-              UI_TOAST_DEFAULT_TIMEOUT_MS);
-
-3) 팝업을 아이콘과 함께 띄우는 방법
------------------------------------
-
-UI_Popup_Show("WARNING",
-              "SD CARD ERROR",
-              "CHECK CARD STATE",
-              icon_ui_warn_8x8,
-              ICON8_W,
-              ICON8_H,
-              now_ms,
-              UI_POPUP_DEFAULT_TIMEOUT_MS);
-
-4) 팝업을 아이콘 없이 띄우는 방법
----------------------------------
-
-UI_Popup_Show("NOTICE",
-              "NO ICON MODE",
-              "TEXT ONLY POPUP",
-              0,
-              0u,
-              0u,
-              now_ms,
-              UI_POPUP_DEFAULT_TIMEOUT_MS);
-
-5) 현재 테스트 화면의 기본 동작
-------------------------------
-- F4는 icon이 있는 toast 예시를 띄운다.
-- F5는 icon이 있는 popup 예시를 띄운다.
-- 필요하면 위 예시를 그대로 복붙해서 icon 없는 버전으로 바꾸면 된다.
- *
- *
- *
- */
-
-
-
-
-
 /* -------------------------------------------------------------------------- */
 /*  Public blink variables                                                     */
+/*                                                                            */
+/*  status bar와 각 화면 파일은 이 blink phase를 읽어서                         */
+/*  아이콘 점멸 / 반전 패널 / 경고 표시를 동일 위상으로 맞춘다.                  */
 /* -------------------------------------------------------------------------- */
 volatile bool SlowToggle2Hz = false;
 volatile bool FastToggle5Hz = false;
@@ -89,89 +27,157 @@ volatile bool FastToggle5Hz = false;
 /* -------------------------------------------------------------------------- */
 /*  20Hz source tick                                                           */
 /*                                                                            */
-/*  TIM7의 frame token timer를 재사용한다.                                     */
-/*  - raw 20Hz tick count는 테스트 카운터 증가에 사용                           */
-/*  - slow / fast blink 토글도 여기서 같이 만든다                              */
+/*  TIM7 frame token timer를 재사용한다.                                       */
+/*  - raw 20Hz tick count : 화면 내부 live counter 증가용                      */
+/*  - slow / fast blink   : 2Hz / 5Hz 토글 생성                                */
+/*                                                                            */
+/*  중요                                                                      */
+/*  이 파일은 raw tick만 배포한다.                                             */
+/*  어떤 화면이 tick을 어떻게 해석할지는 각 화면 파일이 결정한다.              */
 /* -------------------------------------------------------------------------- */
 static volatile uint32_t s_ui_tick_20hz = 0u;
 static volatile uint8_t  s_slow_divider = 0u;
 static volatile uint8_t  s_fast_divider = 0u;
 
+/* -------------------------------------------------------------------------- */
+/*  Engine-global screen selection and status-bar stub state                   */
+/*                                                                            */
+/*  UI 엔진은                                                                  */
+/*  - 현재 어떤 root screen을 합성할지                                         */
+/*  - status bar에 공급할 최소 표시 상태                                       */
+/*  - 현재 눌린 버튼 bitmask                                                    */
+/*  - redraw request flag                                                      */
+/*  만 보관한다.                                                               */
+/*                                                                            */
+/*  TEST 화면의 layout mode / pause 상태 / cute icon index 같은                */
+/*  "기능 로직 상태" 는 각 화면 파일로 분리했다.                               */
+/* -------------------------------------------------------------------------- */
 static ui_screen_id_t            s_current_screen = UI_SCREEN_TEST;
-static ui_layout_mode_t          s_layout_mode = UI_LAYOUT_MODE_TOP_BOTTOM_FIXED;
 static ui_record_state_t         s_record_state = UI_RECORD_STATE_STOP;
 static ui_bluetooth_stub_state_t s_bt_stub_state = UI_BT_STUB_ON;
-
-static uint8_t  s_imperial_units = 0u;
-static uint8_t  s_test_updates_paused = 0u;
-static uint8_t  s_test_cute_icon_index = 0u;
-static bool     s_test_blink_phase_on = true;
-static uint32_t s_test_live_counter_20hz = 0u;
-static uint32_t s_test_last_processed_tick_20hz = 0u;
-static uint32_t s_bottom_overlay_until_ms = 0u;
-static uint32_t s_pressed_mask = 0u;
-static uint8_t  s_force_redraw = 1u;
-
-/* -------------------------------------------------------------------------- */
-/*  Viewport / engine-oil setting constants                                    */
-/*                                                                            */
-/*  UI 본문 뷰포트는 status bar가 있는 모드에서만 위로 정확히 2px 확장한다.    */
-/*  이때 왼쪽 / 오른쪽 / 아래쪽 경계는 그대로 둔다.                           */
-/*                                                                            */
-/*  엔진 오일 교체 주기 스텁 화면은 5자리 숫자를 편집하므로,                   */
-/*  자릿수 개수와 최대값도 이 파일에서 함께 고정한다.                          */
-/* -------------------------------------------------------------------------- */
-#define UI_VIEWPORT_STATUSBAR_TOP_EXPAND_PX  1u
-#define UI_ENGINE_OIL_DIGIT_COUNT            5u
-#define UI_ENGINE_OIL_INTERVAL_MAX           99999u
-
-/* -------------------------------------------------------------------------- */
-/*  Engine oil interval stub screen state                                      */
-/*                                                                            */
-/*  - saved : 저장 완료된 값                                                   */
-/*  - edit  : 현재 편집 중인 값                                                */
-/*  - digit : 현재 선택된 자릿수 (0 = 가장 왼쪽 10^4 자리)                    */
-/*  - saved_layout_mode_before_oil : 설정 화면 진입 전 TEST 홈 레이아웃 보관   */
-/* -------------------------------------------------------------------------- */
-static uint32_t s_engine_oil_interval_saved = 5000u;
-static uint32_t s_engine_oil_interval_edit = 5000u;
-static uint8_t  s_engine_oil_digit_index = 0u;
-static ui_layout_mode_t s_saved_layout_mode_before_oil = UI_LAYOUT_MODE_TOP_BOTTOM_FIXED;
+static uint8_t                   s_imperial_units = 0u;
+static uint32_t                  s_pressed_mask = 0u;
+static uint8_t                   s_force_redraw = 1u;
 
 /* -------------------------------------------------------------------------- */
 /*  Legacy debug screen F1 long-press return tracking                          */
 /*                                                                            */
-/*  레거시 디버그 화면은 내부에서 Button_PopEvent()를 직접 소비하므로,         */
-/*  TEST 홈으로 복귀하는 "F1 길게 누름" 은 event queue가 아니라                */
-/*  현재 안정 눌림 상태(Button_IsPressed) + 시간 누적으로 별도 추적한다.       */
+/*  레거시 debug 화면은 내부에서 Button_PopEvent()를 직접 소비하므로,           */
+/*  TEST 홈으로 복귀하는 "F1 길게 누름" 은                                     */
+/*  event queue가 아니라 현재 안정 눌림 상태(Button_IsPressed) + 시간 누적으로   */
+/*  여기서 따로 추적한다.                                                      */
 /* -------------------------------------------------------------------------- */
 static uint32_t s_debug_f1_hold_start_ms = 0u;
 static uint8_t  s_debug_f1_hold_latched = 0u;
 
 /* -------------------------------------------------------------------------- */
+/*  Per-frame compose plan                                                     */
+/*                                                                            */
+/*  draw root는 매 프레임 아래 5가지만 확정한다.                                */
+/*  - viewport mode                                                            */
+/*  - status bar draw 여부                                                     */
+/*  - bottom bar draw 여부                                                     */
+/*  - popup draw 여부                                                          */
+/*  - toast draw 여부                                                          */
+/*                                                                            */
+/*  실제 raster draw 순서는                                                    */
+/*  main viewport -> status bar -> bottom bar -> toast -> popup               */
+/*  로 유지한다.                                                               */
+/*  이유는 overlay bottom bar와 기존 toast/popup 겹침 순서를                    */
+/*  현재 UI와 완전히 동일하게 유지해야 하기 때문이다.                          */
+/* -------------------------------------------------------------------------- */
+typedef struct
+{
+    ui_layout_mode_t layout_mode;
+    bool draw_statusbar;
+    bool draw_bottombar;
+    bool draw_popup;
+    bool draw_toast;
+} ui_engine_compose_plan_t;
+
+/* -------------------------------------------------------------------------- */
 /*  Local helpers                                                              */
 /* -------------------------------------------------------------------------- */
-static void ui_engine_request_overlay(uint32_t now_ms);
-static void ui_engine_configure_test_bottom_bar(void);
-static void ui_engine_configure_engine_oil_bottom_bar(void);
-static void ui_engine_enter_test_home(void);
-static void ui_engine_enter_engine_oil_screen(void);
-static void ui_engine_update_test_dynamics(void);
-static void ui_engine_handle_test_events(uint32_t now_ms);
-static void ui_engine_handle_engine_oil_events(uint32_t now_ms);
-static void ui_engine_handle_test_button_event(const button_event_t *event, uint32_t now_ms);
-static void ui_engine_handle_engine_oil_button_event(const button_event_t *event, uint32_t now_ms);
-static void ui_engine_adjust_engine_oil_digit(int8_t delta);
-static uint32_t ui_engine_get_engine_oil_place_value(uint8_t digit_index);
+static void ui_engine_reset_debug_f1_hold(void);
+static void ui_engine_activate_test_screen(void);
+static void ui_engine_activate_debug_legacy_screen(void);
+static void ui_engine_activate_engine_oil_screen(void);
+static void ui_engine_process_test_screen(uint32_t now_ms);
+static void ui_engine_process_engine_oil_screen(uint32_t now_ms);
+static void ui_engine_process_debug_legacy_screen(uint32_t now_ms);
+static void ui_engine_handle_test_screen_action(ui_screen_test_action_t action);
+static void ui_engine_handle_engine_oil_screen_action(ui_screen_engine_oil_action_t action);
 static void ui_engine_update_debug_f1_hold_return(uint32_t now_ms);
 static void ui_engine_build_status_model(ui_statusbar_model_t *out_model);
+static void ui_engine_build_compose_plan(uint32_t now_ms,
+                                         ui_engine_compose_plan_t *out_plan);
+static int16_t ui_engine_get_statusbar_body_top_y(u8g2_t *u8g2,
+                                                  bool statusbar_visible);
+static int16_t ui_engine_get_fixed_bottom_body_bottom_y(void);
 static void ui_engine_compute_viewport(u8g2_t *u8g2,
-                                       uint32_t now_ms,
-                                       ui_rect_t *out_viewport,
-                                       bool *out_status_visible,
-                                       bool *out_bottom_visible);
+                                       const ui_engine_compose_plan_t *plan,
+                                       ui_rect_t *out_viewport);
+static void ui_engine_draw_main_viewport(u8g2_t *u8g2,
+                                         const ui_rect_t *viewport);
 static void ui_engine_draw_root(u8g2_t *u8g2, uint32_t now_ms);
-static const uint8_t *ui_engine_get_cute_icon(uint8_t index);
+
+/* -------------------------------------------------------------------------- */
+/*  Small helper: reset debug F1 hold state                                    */
+/* -------------------------------------------------------------------------- */
+static void ui_engine_reset_debug_f1_hold(void)
+{
+    s_debug_f1_hold_start_ms = 0u;
+    s_debug_f1_hold_latched = 0u;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Activate TEST home                                                         */
+/*                                                                            */
+/*  이 함수는 오직 root screen 전환만 담당한다.                                */
+/*  TEST 화면 내부 layout mode / counter / cute icon state는                   */
+/*  ui_screen_test.c 안에 그대로 유지된다.                                     */
+/* -------------------------------------------------------------------------- */
+static void ui_engine_activate_test_screen(void)
+{
+    s_current_screen = UI_SCREEN_TEST;
+    UI_ScreenTest_OnEnter();
+    s_pressed_mask = Button_GetPressedMask();
+    ui_engine_reset_debug_f1_hold();
+    s_force_redraw = 1u;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Activate legacy debug screen                                               */
+/*                                                                            */
+/*  레거시 debug 화면은 현재 엔진 외부의 기존 동작을 최대한 그대로 유지한다.    */
+/*  따라서 진입 시 toast / popup은 정리하고, draw 역시 debug 모듈에 맡긴다.    */
+/* -------------------------------------------------------------------------- */
+static void ui_engine_activate_debug_legacy_screen(void)
+{
+    s_current_screen = UI_SCREEN_DEBUG_LEGACY;
+    UI_DebugLegacy_Init();
+    ui_engine_reset_debug_f1_hold();
+    UI_Toast_Hide();
+    UI_Popup_Hide();
+    s_force_redraw = 1u;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Activate engine-oil screen                                                 */
+/*                                                                            */
+/*  엔진 오일 화면 진입 시에는 이전 화면의 toast / popup을 정리한다.            */
+/*  이후 bottom bar 내용과 편집 상태 준비는                                   */
+/*  ui_screen_engine_oil.c가 맡는다.                                           */
+/* -------------------------------------------------------------------------- */
+static void ui_engine_activate_engine_oil_screen(void)
+{
+    s_current_screen = UI_SCREEN_ENGINE_OIL_INTERVAL;
+    UI_ScreenEngineOil_OnEnter();
+    UI_Toast_Hide();
+    UI_Popup_Hide();
+    s_pressed_mask = Button_GetPressedMask();
+    s_force_redraw = 1u;
+}
 
 void UI_Engine_Init(void)
 {
@@ -181,28 +187,17 @@ void UI_Engine_Init(void)
     UI_DebugLegacy_Init();
 
     s_current_screen = UI_SCREEN_TEST;
-    s_layout_mode = UI_LAYOUT_MODE_TOP_BOTTOM_FIXED;
     s_record_state = UI_RECORD_STATE_STOP;
     s_bt_stub_state = UI_BT_STUB_ON;
     s_imperial_units = 0u;
-    s_test_updates_paused = 0u;
-    s_test_cute_icon_index = 0u;
-    s_test_blink_phase_on = true;
-    s_test_live_counter_20hz = 0u;
-    s_test_last_processed_tick_20hz = s_ui_tick_20hz;
-    s_bottom_overlay_until_ms = 0u;
     s_pressed_mask = Button_GetPressedMask();
     s_force_redraw = 1u;
 
-    s_engine_oil_interval_saved = 5000u;
-    s_engine_oil_interval_edit = s_engine_oil_interval_saved;
-    s_engine_oil_digit_index = 0u;
-    s_saved_layout_mode_before_oil = s_layout_mode;
+    ui_engine_reset_debug_f1_hold();
 
-    s_debug_f1_hold_start_ms = 0u;
-    s_debug_f1_hold_latched = 0u;
-
-    ui_engine_configure_test_bottom_bar();
+    UI_ScreenTest_Init((uint32_t)s_ui_tick_20hz);
+    UI_ScreenEngineOil_Init();
+    UI_ScreenTest_OnEnter();
 }
 
 void UI_Engine_EarlyBootDraw(void)
@@ -224,7 +219,6 @@ void UI_Engine_RequestRedraw(void)
     s_force_redraw = 1u;
 }
 
-
 void UI_Engine_SetRecordState(uint8_t record_state)
 {
     if (record_state > (uint8_t)UI_RECORD_STATE_PAUSE)
@@ -233,11 +227,13 @@ void UI_Engine_SetRecordState(uint8_t record_state)
     }
 
     s_record_state = (ui_record_state_t)record_state;
+    s_force_redraw = 1u;
 }
 
 void UI_Engine_SetImperialUnits(uint8_t enabled)
 {
     s_imperial_units = (enabled != 0u) ? 1u : 0u;
+    s_force_redraw = 1u;
 }
 
 void UI_Engine_SetBluetoothStubState(uint8_t state)
@@ -248,6 +244,7 @@ void UI_Engine_SetBluetoothStubState(uint8_t state)
     }
 
     s_bt_stub_state = (ui_bluetooth_stub_state_t)state;
+    s_force_redraw = 1u;
 }
 
 void UI_Engine_OnFrameTickFromISR(void)
@@ -277,37 +274,187 @@ void UI_Engine_OnBoardDebugButtonIrq(uint32_t now_ms)
     }
     else
     {
-        s_current_screen = UI_SCREEN_DEBUG_LEGACY;
-        UI_DebugLegacy_Init();
+        ui_engine_activate_debug_legacy_screen();
+    }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Process TEST screen                                                        */
+/*                                                                            */
+/*  UI 엔진은 event queue를 꺼내서 TEST 화면 파일에 넘겨 준다.                 */
+/*  - 어떤 toast를 띄울지                                                      */
+/*  - bottom bar 문구를 어떻게 바꿀지                                          */
+/*  - 어느 화면으로 넘어갈지                                                   */
+/*  는 TEST 화면 파일이 결정한다.                                              */
+/* -------------------------------------------------------------------------- */
+static void ui_engine_process_test_screen(uint32_t now_ms)
+{
+    button_event_t event;
+
+    s_pressed_mask = Button_GetPressedMask();
+    UI_ScreenTest_Task((uint32_t)s_ui_tick_20hz);
+
+    while (Button_PopEvent(&event) != false)
+    {
+        ui_screen_test_action_t action;
+
+        action = UI_ScreenTest_HandleButtonEvent(&event, now_ms);
+        s_force_redraw = 1u;
+
+        if (action != UI_SCREEN_TEST_ACTION_NONE)
+        {
+            ui_engine_handle_test_screen_action(action);
+            break;
+        }
     }
 
-    s_debug_f1_hold_start_ms = 0u;
-    s_debug_f1_hold_latched = 0u;
+    s_pressed_mask = Button_GetPressedMask();
+}
 
-    UI_Toast_Hide();
-    UI_Popup_Hide();
-    s_force_redraw = 1u;
+/* -------------------------------------------------------------------------- */
+/*  Process engine-oil screen                                                  */
+/*                                                                            */
+/*  이 화면 역시 event queue 소비는 UI 엔진이 하고,                             */
+/*  실제 버튼 의미 해석은 화면 파일이 담당한다.                                */
+/* -------------------------------------------------------------------------- */
+static void ui_engine_process_engine_oil_screen(uint32_t now_ms)
+{
+    button_event_t event;
+
+    s_pressed_mask = Button_GetPressedMask();
+
+    while (Button_PopEvent(&event) != false)
+    {
+        ui_screen_engine_oil_action_t action;
+
+        action = UI_ScreenEngineOil_HandleButtonEvent(&event, now_ms);
+        s_force_redraw = 1u;
+
+        if (action != UI_SCREEN_ENGINE_OIL_ACTION_NONE)
+        {
+            ui_engine_handle_engine_oil_screen_action(action);
+            break;
+        }
+    }
+
+    s_pressed_mask = Button_GetPressedMask();
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Process legacy debug screen                                                */
+/*                                                                            */
+/*  debug 모듈은 기존처럼 자체 task / 자체 event 소비를 유지한다.               */
+/*  여기서는 TEST 홈 복귀용 F1 long press만 별도 추적한다.                     */
+/* -------------------------------------------------------------------------- */
+static void ui_engine_process_debug_legacy_screen(uint32_t now_ms)
+{
+    UI_DebugLegacy_Task(now_ms);
+    ui_engine_update_debug_f1_hold_return(now_ms);
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Handle TEST screen action                                                  */
+/* -------------------------------------------------------------------------- */
+static void ui_engine_handle_test_screen_action(ui_screen_test_action_t action)
+{
+    switch (action)
+    {
+    case UI_SCREEN_TEST_ACTION_ENTER_DEBUG_LEGACY:
+        ui_engine_activate_debug_legacy_screen();
+        break;
+
+    case UI_SCREEN_TEST_ACTION_ENTER_ENGINE_OIL:
+        ui_engine_activate_engine_oil_screen();
+        break;
+
+    case UI_SCREEN_TEST_ACTION_NONE:
+    default:
+        break;
+    }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Handle engine-oil screen action                                            */
+/*                                                                            */
+/*  저장하고 나가는 경우에는                                                   */
+/*  ui_screen_engine_oil.c가 방금 만든 toast를 그대로 살려 둔다.                */
+/*  저장하지 않고 나가는 경우에는 popup / toast 모두 정리한다.                 */
+/* -------------------------------------------------------------------------- */
+static void ui_engine_handle_engine_oil_screen_action(ui_screen_engine_oil_action_t action)
+{
+    switch (action)
+    {
+    case UI_SCREEN_ENGINE_OIL_ACTION_BACK_TO_TEST:
+        UI_Toast_Hide();
+        UI_Popup_Hide();
+        ui_engine_activate_test_screen();
+        break;
+
+    case UI_SCREEN_ENGINE_OIL_ACTION_SAVE_AND_BACK_TO_TEST:
+        UI_Popup_Hide();
+        ui_engine_activate_test_screen();
+        break;
+
+    case UI_SCREEN_ENGINE_OIL_ACTION_NONE:
+    default:
+        break;
+    }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Legacy debug F1 long-press return                                          */
+/* -------------------------------------------------------------------------- */
+static void ui_engine_update_debug_f1_hold_return(uint32_t now_ms)
+{
+    if (s_current_screen != UI_SCREEN_DEBUG_LEGACY)
+    {
+        ui_engine_reset_debug_f1_hold();
+        return;
+    }
+
+    if (Button_IsPressed(BUTTON_ID_1) == false)
+    {
+        ui_engine_reset_debug_f1_hold();
+        return;
+    }
+
+    if (s_debug_f1_hold_start_ms == 0u)
+    {
+        s_debug_f1_hold_start_ms = now_ms;
+    }
+
+    if ((s_debug_f1_hold_latched == 0u) &&
+        ((now_ms - s_debug_f1_hold_start_ms) >= BUTTON_LONG_PRESS_MS))
+    {
+        s_debug_f1_hold_latched = 1u;
+        UI_Toast_Hide();
+        UI_Popup_Hide();
+        ui_engine_activate_test_screen();
+    }
 }
 
 void UI_Engine_Task(uint32_t now_ms)
 {
     u8g2_t *u8g2;
 
-    if (s_current_screen == UI_SCREEN_DEBUG_LEGACY)
+    switch (s_current_screen)
     {
-        UI_DebugLegacy_Task(now_ms);
-        ui_engine_update_debug_f1_hold_return(now_ms);
-    }
-    else if (s_current_screen == UI_SCREEN_ENGINE_OIL_INTERVAL)
-    {
-        s_pressed_mask = Button_GetPressedMask();
-        ui_engine_handle_engine_oil_events(now_ms);
-    }
-    else
-    {
-        s_pressed_mask = Button_GetPressedMask();
-        ui_engine_update_test_dynamics();
-        ui_engine_handle_test_events(now_ms);
+    case UI_SCREEN_TEST:
+        ui_engine_process_test_screen(now_ms);
+        break;
+
+    case UI_SCREEN_ENGINE_OIL_INTERVAL:
+        ui_engine_process_engine_oil_screen(now_ms);
+        break;
+
+    case UI_SCREEN_DEBUG_LEGACY:
+        ui_engine_process_debug_legacy_screen(now_ms);
+        break;
+
+    case UI_SCREEN_COUNT:
+    default:
+        ui_engine_activate_test_screen();
+        break;
     }
 
     UI_Popup_Task(now_ms);
@@ -320,14 +467,15 @@ void UI_Engine_Task(uint32_t now_ms)
 
     if (s_force_redraw != 0u)
     {
-        /* 현재는 frame token이 오면 항상 전체 프레임을 다시 그리지만, */
-        /* 추후 dirty-region 최적화가 들어가더라도 API를 그대로 유지하기 */
-        /* 위해 redraw request 플래그를 남겨 둔다. */
+        /* 현재 구현은 frame token이 오면 전체 프레임을 다시 그린다. */
+        /* 다만 추후 dirty-region 최적화가 들어가더라도 */
+        /* public API를 바꾸지 않기 위해 redraw request 플래그는 유지한다. */
     }
 
     u8g2 = U8G2_UC1608_GetHandle();
     if (u8g2 == 0)
     {
+        s_force_redraw = 1u;
         return;
     }
 
@@ -347,505 +495,10 @@ void UI_Engine_Task(uint32_t now_ms)
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Overlay visibility helper                                                  */
-/* -------------------------------------------------------------------------- */
-static void ui_engine_request_overlay(uint32_t now_ms)
-{
-    s_bottom_overlay_until_ms = now_ms + UI_BOTTOMBAR_OVERLAY_TIMEOUT_MS;
-}
-
-/* -------------------------------------------------------------------------- */
-/*  Test bottom bar                                                            */
-/* -------------------------------------------------------------------------- */
-static void ui_engine_configure_test_bottom_bar(void)
-{
-    UI_BottomBar_SetMode(UI_BOTTOMBAR_MODE_BUTTONS);
-
-    UI_BottomBar_SetButton(UI_FKEY_1, "DBG", UI_BOTTOMBAR_FLAG_DIVIDER);
-    UI_BottomBar_SetButton(UI_FKEY_2,
-                           (s_test_updates_paused != 0u) ? "RUN" : "PAUSE",
-                           UI_BOTTOMBAR_FLAG_DIVIDER);
-    UI_BottomBar_SetButton(UI_FKEY_3, "MODE", UI_BOTTOMBAR_FLAG_DIVIDER);
-    UI_BottomBar_SetButton(UI_FKEY_4, "TOAST", UI_BOTTOMBAR_FLAG_DIVIDER);
-    UI_BottomBar_SetButton(UI_FKEY_5, "POPUP", UI_BOTTOMBAR_FLAG_DIVIDER);
-    UI_BottomBar_SetButtonIcon4(UI_FKEY_6,
-                                icon_arrow_right_7x4,
-                                ICON7X4_W,
-                                0u);
-}
-
-
-/* -------------------------------------------------------------------------- */
-/*  Engine oil interval bottom bar                                             */
-/*                                                                            */
-/*  이 하단바는 6개의 물리 버튼과 1:1로 대응한다.                              */
-/*  - F1 : BACK 텍스트                                                        */
-/*  - F2 : 왼쪽 화살표 (자릿수 왼쪽 이동)                                      */
-/*  - F3 : 오른쪽 화살표 (자릿수 오른쪽 이동)                                  */
-/*  - F4 : 위쪽 화살표 (현재 자릿수 값 +1)                                     */
-/*  - F5 : 아래쪽 화살표 (현재 자릿수 값 -1)                                   */
-/*  - F6 : DONE 텍스트                                                        */
-/*                                                                            */
-/*  아이콘 높이 4px 규격은 기존 bottom bar 렌더러 제약을 그대로 따른다.       */
-/* -------------------------------------------------------------------------- */
-static void ui_engine_configure_engine_oil_bottom_bar(void)
-{
-    UI_BottomBar_SetMode(UI_BOTTOMBAR_MODE_BUTTONS);
-
-    UI_BottomBar_SetButton(UI_FKEY_1, "BACK", UI_BOTTOMBAR_FLAG_DIVIDER);
-    UI_BottomBar_SetButtonIcon4(UI_FKEY_2,
-                                icon_arrow_left_7x4,
-                                ICON7X4_W,
-                                UI_BOTTOMBAR_FLAG_DIVIDER);
-    UI_BottomBar_SetButtonIcon4(UI_FKEY_3,
-                                icon_arrow_right_7x4,
-                                ICON7X4_W,
-                                UI_BOTTOMBAR_FLAG_DIVIDER);
-    UI_BottomBar_SetButtonIcon4(UI_FKEY_4,
-                                icon_arrow_up_7x4,
-                                ICON7X4_W,
-                                UI_BOTTOMBAR_FLAG_DIVIDER);
-    UI_BottomBar_SetButtonIcon4(UI_FKEY_5,
-                                icon_arrow_down_7x4,
-                                ICON7X4_W,
-                                UI_BOTTOMBAR_FLAG_DIVIDER);
-    UI_BottomBar_SetButton(UI_FKEY_6, "DONE", 0u);
-}
-
-/* -------------------------------------------------------------------------- */
-/*  Enter TEST home                                                            */
-/*                                                                            */
-/*  TEST 홈으로 복귀할 때 공통으로 정리해야 하는 UI 상태를 한 곳에 모은다.     */
-/*  - root screen을 TEST로 되돌린다.                                           */
-/*  - TEST 홈 하단바를 복원한다.                                               */
-/*  - toast / popup 잔상을 지운다.                                             */
-/*  - debug 화면용 F1 long-press 추적 상태를 초기화한다.                       */
-/* -------------------------------------------------------------------------- */
-static void ui_engine_enter_test_home(void)
-{
-    s_current_screen = UI_SCREEN_TEST;
-    ui_engine_configure_test_bottom_bar();
-
-    UI_Toast_Hide();
-    UI_Popup_Hide();
-
-    s_pressed_mask = Button_GetPressedMask();
-    s_debug_f1_hold_start_ms = 0u;
-    s_debug_f1_hold_latched = 0u;
-    s_force_redraw = 1u;
-}
-
-/* -------------------------------------------------------------------------- */
-/*  Enter engine oil interval stub screen                                      */
-/*                                                                            */
-/*  요구사항대로 이 화면은 status bar + bottom bar가 동시에 있는               */
-/*  고정 레이아웃에서 동작하게 만든다.                                         */
-/*                                                                            */
-/*  진입 시 하는 일                                                            */
-/*  - TEST 홈에서 사용 중이던 레이아웃 모드를 보관                             */
-/*  - 현재 편집값을 저장값으로부터 로드                                         */
-/*  - 선택 자릿수를 가장 왼쪽(만 단위)부터 시작                                */
-/*  - 전용 bottom bar를 세팅                                                   */
-/* -------------------------------------------------------------------------- */
-static void ui_engine_enter_engine_oil_screen(void)
-{
-    s_saved_layout_mode_before_oil = s_layout_mode;
-    s_layout_mode = UI_LAYOUT_MODE_TOP_BOTTOM_FIXED;
-
-    s_current_screen = UI_SCREEN_ENGINE_OIL_INTERVAL;
-    s_engine_oil_interval_edit = s_engine_oil_interval_saved;
-    s_engine_oil_digit_index = 0u;
-
-    ui_engine_configure_engine_oil_bottom_bar();
-
-    UI_Toast_Hide();
-    UI_Popup_Hide();
-
-    s_pressed_mask = Button_GetPressedMask();
-    s_force_redraw = 1u;
-}
-
-/* -------------------------------------------------------------------------- */
-/*  Engine oil digit place value helper                                        */
-/*                                                                            */
-/*  화면에서 선택 자릿수 index는 왼쪽에서 오른쪽 순서다.                       */
-/*  - 0 -> 10000 자리                                                          */
-/*  - 1 -> 1000 자리                                                           */
-/*  - 2 -> 100 자리                                                            */
-/*  - 3 -> 10 자리                                                             */
-/*  - 4 -> 1 자리                                                              */
-/* -------------------------------------------------------------------------- */
-static uint32_t ui_engine_get_engine_oil_place_value(uint8_t digit_index)
-{
-    static const uint32_t place_table[UI_ENGINE_OIL_DIGIT_COUNT] =
-    {
-        10000u, 1000u, 100u, 10u, 1u
-    };
-
-    if (digit_index >= UI_ENGINE_OIL_DIGIT_COUNT)
-    {
-        return 1u;
-    }
-
-    return place_table[digit_index];
-}
-
-/* -------------------------------------------------------------------------- */
-/*  Engine oil current digit +/- 1                                             */
-/*                                                                            */
-/*  현재 선택된 자릿수만 0~9 범위에서 순환시킨다.                              */
-/*  다른 자릿수는 절대 건드리지 않는다.                                         */
-/*                                                                            */
-/*  예) 현재 값이 05400이고, 선택 자릿수가 100 자리라면                         */
-/*      +1 -> 05500                                                            */
-/*      -1 -> 05300                                                            */
-/* -------------------------------------------------------------------------- */
-static void ui_engine_adjust_engine_oil_digit(int8_t delta)
-{
-    uint32_t place_value;
-    uint32_t current_digit;
-    uint32_t new_digit;
-
-    place_value = ui_engine_get_engine_oil_place_value(s_engine_oil_digit_index);
-    current_digit = (s_engine_oil_interval_edit / place_value) % 10u;
-
-    if (delta >= 0)
-    {
-        new_digit = (current_digit + 1u) % 10u;
-    }
-    else
-    {
-        new_digit = (current_digit == 0u) ? 9u : (current_digit - 1u);
-    }
-
-    s_engine_oil_interval_edit -= (current_digit * place_value);
-    s_engine_oil_interval_edit += (new_digit * place_value);
-
-    if (s_engine_oil_interval_edit > UI_ENGINE_OIL_INTERVAL_MAX)
-    {
-        s_engine_oil_interval_edit = UI_ENGINE_OIL_INTERVAL_MAX;
-    }
-}
-
-/* -------------------------------------------------------------------------- */
-/*  Legacy debug F1 long-press return                                          */
-/*                                                                            */
-/*  레거시 디버그 화면에서는 BUTTON1 short press가 원래 기능대로                */
-/*  "다음 디버그 페이지" 로 남아 있어야 한다.                                  */
-/*                                                                            */
-/*  그래서 short press 로직은 debug 파일 내부에 그대로 두고,                   */
-/*  여기서는 Button_IsPressed() 기반으로 F1 hold time만 별도로 본다.           */
-/*  일정 시간 이상 길게 눌리면 TEST 홈으로 즉시 복귀한다.                      */
-/* -------------------------------------------------------------------------- */
-static void ui_engine_update_debug_f1_hold_return(uint32_t now_ms)
-{
-    if (s_current_screen != UI_SCREEN_DEBUG_LEGACY)
-    {
-        s_debug_f1_hold_start_ms = 0u;
-        s_debug_f1_hold_latched = 0u;
-        return;
-    }
-
-    if (Button_IsPressed(BUTTON_ID_1) == false)
-    {
-        s_debug_f1_hold_start_ms = 0u;
-        s_debug_f1_hold_latched = 0u;
-        return;
-    }
-
-    if (s_debug_f1_hold_start_ms == 0u)
-    {
-        s_debug_f1_hold_start_ms = now_ms;
-    }
-
-    if ((s_debug_f1_hold_latched == 0u) &&
-        ((now_ms - s_debug_f1_hold_start_ms) >= BUTTON_LONG_PRESS_MS))
-    {
-        s_debug_f1_hold_latched = 1u;
-        ui_engine_enter_test_home();
-    }
-}
-
-/* -------------------------------------------------------------------------- */
-/*  20Hz dynamic test update                                                   */
-/*                                                                            */
-/*  이전 패키지에서는 draw 함수가 raw 20Hz frame parity를 직접 써서             */
-/*  체감 blink가 너무 빨랐다.                                                  */
-/*                                                                            */
-/*  이제는                                                                   */
-/*  - 20Hz raw tick -> 큰 숫자 ++ 동적 테스트                                   */
-/*  - SlowToggle2Hz -> 눈으로 보는 깜빡임 패널                                 */
-/*  로 역할을 분리한다.                                                        */
-/* -------------------------------------------------------------------------- */
-static void ui_engine_update_test_dynamics(void)
-{
-    uint32_t tick_now;
-    uint32_t delta;
-
-    tick_now = s_ui_tick_20hz;
-    delta = (tick_now - s_test_last_processed_tick_20hz);
-    if (delta == 0u)
-    {
-        return;
-    }
-
-    s_test_last_processed_tick_20hz = tick_now;
-
-    if (s_test_updates_paused == 0u)
-    {
-        s_test_live_counter_20hz += delta;
-        s_test_blink_phase_on = (SlowToggle2Hz != false);
-    }
-}
-
-/* -------------------------------------------------------------------------- */
-/*  Event dispatch                                                             */
-/* -------------------------------------------------------------------------- */
-static void ui_engine_handle_test_events(uint32_t now_ms)
-{
-    button_event_t event;
-
-    while (Button_PopEvent(&event) != false)
-    {
-        s_pressed_mask = Button_GetPressedMask();
-
-        if ((s_layout_mode == UI_LAYOUT_MODE_TOP_EXTENDED_OVERLAY) &&
-            ((event.type == BUTTON_EVENT_PRESS) ||
-             (event.type == BUTTON_EVENT_RELEASE) ||
-             (event.type == BUTTON_EVENT_SHORT_PRESS) ||
-             (event.type == BUTTON_EVENT_LONG_PRESS)))
-        {
-            ui_engine_request_overlay(now_ms);
-        }
-
-        ui_engine_handle_test_button_event(&event, now_ms);
-
-        if (s_current_screen != UI_SCREEN_TEST)
-        {
-            break;
-        }
-    }
-}
-
-static void ui_engine_handle_test_button_event(const button_event_t *event, uint32_t now_ms)
-{
-    if (event == 0)
-    {
-        return;
-    }
-
-    /* ---------------------------------------------------------------------- */
-    /*  TEST 홈 F1 long press -> 엔진 오일 교체 주기 설정 스텁 화면 진입        */
-    /*                                                                            */
-    /*  short press의 기존 디버그 진입 기능은 그대로 유지해야 하므로,            */
-    /*  long press만 먼저 가로채서 별도 화면으로 보낸다.                         */
-    /* ---------------------------------------------------------------------- */
-    if ((event->id == BUTTON_ID_1) &&
-        (event->type == BUTTON_EVENT_LONG_PRESS))
-    {
-        ui_engine_enter_engine_oil_screen();
-        return;
-    }
-
-    if (event->type != BUTTON_EVENT_SHORT_PRESS)
-    {
-        return;
-    }
-
-    switch (event->id)
-    {
-    case BUTTON_ID_1:
-        s_current_screen = UI_SCREEN_DEBUG_LEGACY;
-        UI_DebugLegacy_Init();
-        s_debug_f1_hold_start_ms = 0u;
-        s_debug_f1_hold_latched = 0u;
-        UI_Toast_Hide();
-        UI_Popup_Hide();
-        break;
-
-    case BUTTON_ID_2:
-        s_test_updates_paused = (s_test_updates_paused == 0u) ? 1u : 0u;
-        if (s_test_updates_paused != 0u)
-        {
-            s_test_blink_phase_on = (SlowToggle2Hz != false);
-        }
-        ui_engine_configure_test_bottom_bar();
-        UI_Toast_Show((s_test_updates_paused != 0u) ? "TEST HOLD" : "TEST RUN",
-                      icon_ui_bell_8x8,
-                      ICON8_W,
-                      ICON8_H,
-                      now_ms,
-                      900u);
-        break;
-
-    case BUTTON_ID_3:
-        s_layout_mode = (ui_layout_mode_t)(((uint32_t)s_layout_mode + 1u) % (uint32_t)UI_LAYOUT_MODE_COUNT);
-        if (s_layout_mode == UI_LAYOUT_MODE_TOP_EXTENDED_OVERLAY)
-        {
-            ui_engine_request_overlay(now_ms);
-        }
-        UI_Toast_Show("LAYOUT CHANGED",
-                      icon_ui_folder_8x8,
-                      ICON8_W,
-                      ICON8_H,
-                      now_ms,
-                      900u);
-        break;
-
-    case BUTTON_ID_4:
-        UI_Toast_Show("TOAST WITH ICON",
-                      icon_ui_info_8x8,
-                      ICON8_W,
-                      ICON8_H,
-                      now_ms,
-                      UI_TOAST_DEFAULT_TIMEOUT_MS);
-        break;
-
-    case BUTTON_ID_5:
-        UI_Popup_Show("POPUP",
-                      "OPAQUE BODY ENABLED",
-                      "RIGHT TEXT ALIGN FIXED",
-                      icon_ui_warn_8x8,
-                      ICON8_W,
-                      ICON8_H,
-                      now_ms,
-                      UI_POPUP_DEFAULT_TIMEOUT_MS);
-        break;
-
-    case BUTTON_ID_6:
-        s_test_cute_icon_index = (uint8_t)((s_test_cute_icon_index + 1u) & 0x03u);
-        UI_Toast_Show("CUTE ICON NEXT",
-                      ui_engine_get_cute_icon(s_test_cute_icon_index),
-                      ICON8_W,
-                      ICON8_H,
-                      now_ms,
-                      800u);
-        break;
-
-    case BUTTON_ID_NONE:
-    default:
-        break;
-    }
-
-    s_force_redraw = 1u;
-}
-
-
-/* -------------------------------------------------------------------------- */
-/*  Engine oil stub event dispatch                                             */
-/*                                                                            */
-/*  이 화면에서는 Button event를 새 루트 화면이 직접 소비한다.                 */
-/*  debug 레거시 화면처럼 별도 모듈 내부에서 queue를 먹지 않으므로             */
-/*  일반 TEST 홈과 같은 방식으로 여기서 while(pop) 처리한다.                  */
-/* -------------------------------------------------------------------------- */
-static void ui_engine_handle_engine_oil_events(uint32_t now_ms)
-{
-    button_event_t event;
-
-    while (Button_PopEvent(&event) != false)
-    {
-        s_pressed_mask = Button_GetPressedMask();
-        ui_engine_handle_engine_oil_button_event(&event, now_ms);
-
-        if (s_current_screen != UI_SCREEN_ENGINE_OIL_INTERVAL)
-        {
-            break;
-        }
-    }
-}
-
-/* -------------------------------------------------------------------------- */
-/*  Engine oil stub button mapping                                             */
-/*                                                                            */
-/*  short press 매핑                                                           */
-/*  - F1 : 저장하지 않고 TEST 홈으로 복귀                                      */
-/*  - F2 : 선택 자릿수 왼쪽 이동                                               */
-/*  - F3 : 선택 자릿수 오른쪽 이동                                             */
-/*  - F4 : 현재 자릿수 값 +1                                                   */
-/*  - F5 : 현재 자릿수 값 -1                                                   */
-/*  - F6 : 현재 편집값 저장 후 TEST 홈 복귀                                    */
-/* -------------------------------------------------------------------------- */
-static void ui_engine_handle_engine_oil_button_event(const button_event_t *event, uint32_t now_ms)
-{
-    if (event == 0)
-    {
-        return;
-    }
-
-    if (event->type != BUTTON_EVENT_SHORT_PRESS)
-    {
-        return;
-    }
-
-    switch (event->id)
-    {
-    case BUTTON_ID_1:
-        s_layout_mode = s_saved_layout_mode_before_oil;
-        ui_engine_enter_test_home();
-        break;
-
-    case BUTTON_ID_2:
-        if (s_engine_oil_digit_index > 0u)
-        {
-            s_engine_oil_digit_index--;
-        }
-        s_force_redraw = 1u;
-        break;
-
-    case BUTTON_ID_3:
-        if (s_engine_oil_digit_index + 1u < UI_ENGINE_OIL_DIGIT_COUNT)
-        {
-            s_engine_oil_digit_index++;
-        }
-        s_force_redraw = 1u;
-        break;
-
-    case BUTTON_ID_4:
-        ui_engine_adjust_engine_oil_digit(+1);
-        s_force_redraw = 1u;
-        break;
-
-    case BUTTON_ID_5:
-        ui_engine_adjust_engine_oil_digit(-1);
-        s_force_redraw = 1u;
-        break;
-
-    case BUTTON_ID_6:
-        s_engine_oil_interval_saved = s_engine_oil_interval_edit;
-        s_layout_mode = s_saved_layout_mode_before_oil;
-        ui_engine_enter_test_home();
-        UI_Toast_Show("OIL INT SAVED",
-                      icon_ui_ok_8x8,
-                      ICON8_W,
-                      ICON8_H,
-                      now_ms,
-                      900u);
-        break;
-
-    case BUTTON_ID_NONE:
-    default:
-        break;
-    }
-}
-
-
-/* -------------------------------------------------------------------------- */
-/*  Small icon helper                                                          */
-/* -------------------------------------------------------------------------- */
-static const uint8_t *ui_engine_get_cute_icon(uint8_t index)
-{
-    switch (index & 0x03u)
-    {
-    case 0u: return icon_cute_cat_8x8;
-    case 1u: return icon_cute_heart_8x8;
-    case 2u: return icon_cute_star_8x8;
-    case 3u:
-    default: return icon_cute_bike_8x8;
-    }
-}
-
-/* -------------------------------------------------------------------------- */
 /*  Build lightweight status model                                             */
+/*                                                                            */
+/*  status bar는 APP_STATE 전체를 직접 읽지 않고,                              */
+/*  화면 표시에 필요한 최소 필드만 담은 경량 model만 받아서 그린다.             */
 /* -------------------------------------------------------------------------- */
 static void ui_engine_build_status_model(ui_statusbar_model_t *out_model)
 {
@@ -881,156 +534,266 @@ static void ui_engine_build_status_model(ui_statusbar_model_t *out_model)
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Viewport computation                                                       */
+/*  Build per-frame compose plan                                               */
+/*                                                                            */
+/*  status bar / bottom bar draw flag와 viewport mode는                        */
+/*  각 화면 파일의 getter를 통해 받아온다.                                     */
+/* -------------------------------------------------------------------------- */
+static void ui_engine_build_compose_plan(uint32_t now_ms,
+                                         ui_engine_compose_plan_t *out_plan)
+{
+    if (out_plan == 0)
+    {
+        return;
+    }
+
+    memset(out_plan, 0, sizeof(*out_plan));
+    out_plan->layout_mode = UI_LAYOUT_MODE_FULLSCREEN;
+
+    switch (s_current_screen)
+    {
+    case UI_SCREEN_TEST:
+        out_plan->layout_mode = UI_ScreenTest_GetLayoutMode();
+        out_plan->draw_statusbar = UI_ScreenTest_IsStatusBarVisible();
+        out_plan->draw_bottombar = UI_ScreenTest_IsBottomBarVisible(now_ms, s_pressed_mask);
+        break;
+
+    case UI_SCREEN_ENGINE_OIL_INTERVAL:
+        out_plan->layout_mode = UI_ScreenEngineOil_GetLayoutMode();
+        out_plan->draw_statusbar = UI_ScreenEngineOil_IsStatusBarVisible();
+        out_plan->draw_bottombar = UI_ScreenEngineOil_IsBottomBarVisible();
+        break;
+
+    case UI_SCREEN_DEBUG_LEGACY:
+    case UI_SCREEN_COUNT:
+    default:
+        break;
+    }
+
+    out_plan->draw_popup = UI_Popup_IsVisible();
+    out_plan->draw_toast = UI_Toast_IsVisible();
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Get main-body top Y when status bar is visible                             */
+/*                                                                            */
+/*  status bar는 절대 건드리지 않는다.                                          */
+/*  따라서 main viewport의 top은                                               */
+/*  "현재 status bar가 실제로 점유하는 높이" + "그 아래 1px gap"              */
+/*  로만 계산한다.                                                             */
+/* -------------------------------------------------------------------------- */
+static int16_t ui_engine_get_statusbar_body_top_y(u8g2_t *u8g2,
+                                                  bool statusbar_visible)
+{
+    int16_t top_y = 0;
+
+    if (statusbar_visible != false)
+    {
+        top_y = (int16_t)UI_StatusBar_GetReservedHeight(u8g2);
+        top_y = (int16_t)(top_y + UI_STATUSBAR_GAP_H);
+    }
+
+    if (top_y < 0)
+    {
+        top_y = 0;
+    }
+    if (top_y > UI_LCD_H)
+    {
+        top_y = UI_LCD_H;
+    }
+
+    return top_y;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Get fixed-bottom-mode body bottom Y                                        */
+/*                                                                            */
+/*  TOP+BTM fixed mode에서는 main viewport의 bottom을                          */
+/*  bottom gap의 바로 위까지로 제한한다.                                       */
+/*                                                                            */
+/*  즉, LCD 128px 기준 bottom bar가 8px, gap이 1px라면                         */
+/*  main viewport의 마지막 usable Y는                                          */
+/*  128 - 8 - 1 = 119 line 바로 위 영역이 된다.                                */
+/* -------------------------------------------------------------------------- */
+static int16_t ui_engine_get_fixed_bottom_body_bottom_y(void)
+{
+    int16_t bottom_y;
+
+    bottom_y = (int16_t)(UI_LCD_H - UI_BOTTOMBAR_GAP_H - UI_BOTTOMBAR_H);
+
+    if (bottom_y < 0)
+    {
+        bottom_y = 0;
+    }
+    if (bottom_y > UI_LCD_H)
+    {
+        bottom_y = UI_LCD_H;
+    }
+
+    return bottom_y;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Compute main viewport                                                      */
+/*                                                                            */
+/*  정리된 규칙                                                                */
+/*  - TOP+BTM fixed      : status 아래 + bottom gap 위                         */
+/*  - TOP only           : status 아래부터 LCD 맨 아래까지                      */
+/*  - TOP + bottom overlay : TOP only와 같은 viewport                           */
+/*  - FULL               : 240x128 전체                                        */
+/*                                                                            */
+/*  중요                                                                      */
+/*  예전 코드처럼 viewport를 1px 위로 억지 확장하지 않는다.                    */
+/*  status bar의 실제 배치는 status bar 모듈이 그대로 책임지고,                 */
+/*  main viewport는 그 결과를 깨끗하게 받아 계산만 한다.                       */
 /* -------------------------------------------------------------------------- */
 static void ui_engine_compute_viewport(u8g2_t *u8g2,
-                                       uint32_t now_ms,
-                                       ui_rect_t *out_viewport,
-                                       bool *out_status_visible,
-                                       bool *out_bottom_visible)
+                                       const ui_engine_compose_plan_t *plan,
+                                       ui_rect_t *out_viewport)
 {
-    bool status_visible = true;
-    bool bottom_visible = false;
     ui_rect_t view;
-    uint8_t status_reserved_h = UI_StatusBar_GetReservedHeight(u8g2);
+    int16_t top_y;
+    int16_t bottom_y;
 
     view.x = 0;
     view.y = 0;
     view.w = UI_LCD_W;
     view.h = UI_LCD_H;
 
-    switch (s_layout_mode)
+    if ((plan == 0) || (out_viewport == 0))
     {
-    case UI_LAYOUT_MODE_TOP_EXTENDED_NO_BOTTOM:
-        status_visible = true;
-        bottom_visible = false;
-        view.y = (int16_t)(status_reserved_h + UI_STATUSBAR_GAP_H);
-        view.h = (int16_t)(UI_LCD_H - view.y);
-        break;
+        return;
+    }
 
-    case UI_LAYOUT_MODE_TOP_EXTENDED_OVERLAY:
-        status_visible = true;
-        bottom_visible = ((s_pressed_mask != 0u) ||
-                          ((int32_t)(s_bottom_overlay_until_ms - now_ms) > 0));
-        view.y = (int16_t)(status_reserved_h + UI_STATUSBAR_GAP_H);
-        view.h = (int16_t)(UI_LCD_H - view.y);
-        break;
+    top_y = ui_engine_get_statusbar_body_top_y(u8g2, plan->draw_statusbar);
 
+    switch (plan->layout_mode)
+    {
     case UI_LAYOUT_MODE_TOP_BOTTOM_FIXED:
-        status_visible = true;
-        bottom_visible = true;
-        view.y = (int16_t)(status_reserved_h + UI_STATUSBAR_GAP_H);
-        view.h = (int16_t)(UI_LCD_H - view.y - UI_BOTTOMBAR_H - UI_BOTTOMBAR_GAP_H);
+        bottom_y = ui_engine_get_fixed_bottom_body_bottom_y();
+        view.y = top_y;
+        view.h = (int16_t)(bottom_y - top_y);
+        break;
+
+    case UI_LAYOUT_MODE_TOP_EXTENDED_NO_BOTTOM:
+    case UI_LAYOUT_MODE_TOP_EXTENDED_OVERLAY:
+        view.y = top_y;
+        view.h = (int16_t)(UI_LCD_H - top_y);
         break;
 
     case UI_LAYOUT_MODE_FULLSCREEN:
+    case UI_LAYOUT_MODE_COUNT:
     default:
-        status_visible = false;
-        bottom_visible = false;
         view.y = 0;
         view.h = UI_LCD_H;
         break;
     }
 
-    /* ---------------------------------------------------------------------- */
-    /*  Status-visible mode viewport top expansion                             */
-    /*                                                                            */
-    /*  요구사항                                                                */
-    /*  - status bar가 보이는 모드에서만 본문 뷰포트의 top을 정확히 2px 올린다.  */
-    /*  - left / right / bottom 경계는 그대로 유지한다.                         */
-    /*                                                                            */
-    /*  구현 방법                                                                */
-    /*  - y를 2 줄이고                                                          */
-    /*  - 같은 양만큼 h를 늘려서                                                */
-    /*    bottom edge가 절대로 움직이지 않게 만든다.                           */
-    /* ---------------------------------------------------------------------- */
-    if (status_visible != false)
+    if (view.y < 0)
     {
-        int16_t grow_up_px = (int16_t)UI_VIEWPORT_STATUSBAR_TOP_EXPAND_PX;
-
-        if (view.y < grow_up_px)
-        {
-            grow_up_px = view.y;
-        }
-
-        view.y = (int16_t)(view.y - grow_up_px);
-        view.h = (int16_t)(view.h + grow_up_px);
+        view.y = 0;
     }
-
+    if (view.y > UI_LCD_H)
+    {
+        view.y = UI_LCD_H;
+    }
     if (view.h < 0)
     {
         view.h = 0;
     }
+    if ((view.y + view.h) > UI_LCD_H)
+    {
+        view.h = (int16_t)(UI_LCD_H - view.y);
+    }
 
-    if (out_viewport != 0)
+    *out_viewport = view;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Draw current main viewport                                                 */
+/*                                                                            */
+/*  여기서는 오직 본문 renderer만 호출한다.                                    */
+/*  status bar / bottom bar / popup / toast는 여기서 그리지 않는다.            */
+/* -------------------------------------------------------------------------- */
+static void ui_engine_draw_main_viewport(u8g2_t *u8g2,
+                                         const ui_rect_t *viewport)
+{
+    if ((u8g2 == 0) || (viewport == 0))
     {
-        *out_viewport = view;
+        return;
     }
-    if (out_status_visible != 0)
+
+    switch (s_current_screen)
     {
-        *out_status_visible = status_visible;
-    }
-    if (out_bottom_visible != 0)
-    {
-        *out_bottom_visible = bottom_visible;
+    case UI_SCREEN_TEST:
+        UI_ScreenTest_Draw(u8g2,
+                           viewport,
+                           UI_ScreenTest_GetLiveCounter20Hz(),
+                           UI_ScreenTest_GetUpdatesPaused(),
+                           UI_ScreenTest_GetBlinkPhase(),
+                           UI_ScreenTest_GetCuteIconIndex(),
+                           UI_ScreenTest_GetLayoutMode());
+        break;
+
+    case UI_SCREEN_ENGINE_OIL_INTERVAL:
+        UI_ScreenEngineOil_Draw(u8g2,
+                                viewport,
+                                UI_ScreenEngineOil_GetIntervalValue(),
+                                UI_ScreenEngineOil_GetSelectedDigitIndex());
+        break;
+
+    case UI_SCREEN_DEBUG_LEGACY:
+    case UI_SCREEN_COUNT:
+    default:
+        break;
     }
 }
 
 /* -------------------------------------------------------------------------- */
 /*  Draw root                                                                  */
+/*                                                                            */
+/*  논리적 compose plan은 status/bottom/main/popup/toast 순으로 분리해도,      */
+/*  실제 raster draw는 현재 UI 픽셀 결과를 보존하기 위해                       */
+/*  main -> status -> bottom -> toast -> popup 순으로 넣는다.                  */
+/*                                                                            */
+/*  이렇게 해야                                                                */
+/*  - overlay bottom bar가 main viewport 위에 정확히 얹히고                    */
+/*  - popup / toast가 동시에 살아 있을 때도 현재와 같은 겹침 순서               */
+/*    (popup이 더 위) 를 유지한다.                                             */
 /* -------------------------------------------------------------------------- */
 static void ui_engine_draw_root(u8g2_t *u8g2, uint32_t now_ms)
 {
+    ui_engine_compose_plan_t plan;
     ui_rect_t viewport;
-    bool status_visible;
-    bool bottom_visible;
     ui_statusbar_model_t status_model;
 
-    ui_engine_compute_viewport(u8g2, now_ms, &viewport, &status_visible, &bottom_visible);
-
-    /* ---------------------------------------------------------------------- */
-    /*  Root content selection                                                 */
-    /*                                                                            */
-    /*  - TEST 홈이면 기존 TEST renderer를 그대로 호출한다.                    */
-    /*  - 엔진 오일 교체 주기 화면이면 새 stub renderer를 호출한다.            */
-    /*                                                                            */
-    /*  status bar / bottom bar / toast / popup은 그 이후에 공통으로 얹는다.   */
-    /* ---------------------------------------------------------------------- */
-    if (s_current_screen == UI_SCREEN_ENGINE_OIL_INTERVAL)
+    if (u8g2 == 0)
     {
-        UI_ScreenEngineOil_Draw(u8g2,
-                                &viewport,
-                                s_engine_oil_interval_edit,
-                                s_engine_oil_digit_index);
-    }
-    else
-    {
-        UI_ScreenTest_Draw(u8g2,
-                           &viewport,
-                           s_test_live_counter_20hz,
-                           (s_test_updates_paused != 0u),
-                           s_test_blink_phase_on,
-                           s_test_cute_icon_index,
-                           s_layout_mode);
+        return;
     }
 
-    if (status_visible != false)
+    ui_engine_build_compose_plan(now_ms, &plan);
+    ui_engine_compute_viewport(u8g2, &plan, &viewport);
+
+    ui_engine_draw_main_viewport(u8g2, &viewport);
+
+    if (plan.draw_statusbar != false)
     {
         ui_engine_build_status_model(&status_model);
         UI_StatusBar_Draw(u8g2, &status_model, now_ms);
     }
 
-    if (bottom_visible != false)
+    if (plan.draw_bottombar != false)
     {
         UI_BottomBar_Draw(u8g2, s_pressed_mask);
     }
 
-    if (UI_Toast_IsVisible() != false)
+    if (plan.draw_toast != false)
     {
-        UI_Toast_Draw(u8g2, bottom_visible);
+        UI_Toast_Draw(u8g2, plan.draw_bottombar);
     }
 
-    if (UI_Popup_IsVisible() != false)
+    if (plan.draw_popup != false)
     {
         UI_Popup_Draw(u8g2);
     }

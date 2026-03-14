@@ -28,7 +28,7 @@ extern "C" {
 /*  - 각 바와 본문 사이에는 1 px gap을 둔다.                                   */
 /* -------------------------------------------------------------------------- */
 #define UI_STATUSBAR_H           7
-#define UI_STATUSBAR_GAP_H       1
+#define UI_STATUSBAR_GAP_H       0
 #define UI_BOTTOMBAR_H           8
 #define UI_BOTTOMBAR_GAP_H       1
 
