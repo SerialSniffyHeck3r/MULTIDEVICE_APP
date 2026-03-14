@@ -5,6 +5,7 @@
 #include "ui_toast.h"
 #include "ui_popup.h"
 #include "ui_common_icons.h"
+#include "LED_App.h"
 
 #include <stdio.h>
 
@@ -164,21 +165,53 @@ ui_screen_test_action_t UI_ScreenTest_HandleButtonEvent(const button_event_t *ev
   }
 
   /* ---------------------------------------------------------------------- */
-  /* TEST 홈 F1 long press -> 엔진 오일 교체 주기 설정 화면 진입               */
-  /*                                                                        */
-  /* F1 short press의 기존 debug 진입 기능은 그대로 유지해야 하므로,          */
-  /* long press만 별도 action으로 분리해 UI 엔진으로 올린다.                  */
-  /* ---------------------------------------------------------------------- */
-  if ((event->id == BUTTON_ID_1) &&
-      (event->type == BUTTON_EVENT_LONG_PRESS))
-  {
-    return UI_SCREEN_TEST_ACTION_ENTER_ENGINE_OIL;
-  }
+   /* TEST 홈 F1 long press -> 엔진 오일 교체 주기 설정 화면 진입               */
+   /*                                                                        */
+   /* F1 short press의 기존 debug 진입 기능은 그대로 유지해야 하므로,          */
+   /* long press만 별도 action으로 분리해 UI 엔진으로 올린다.                  */
+   /* ---------------------------------------------------------------------- */
+   if ((event->id == BUTTON_ID_1) &&
+       (event->type == BUTTON_EVENT_LONG_PRESS))
+   {
+     return UI_SCREEN_TEST_ACTION_ENTER_ENGINE_OIL;
+   }
 
-  if (event->type != BUTTON_EVENT_SHORT_PRESS)
-  {
-    return UI_SCREEN_TEST_ACTION_NONE;
-  }
+   /* ---------------------------------------------------------------------- */
+   /* TEST 홈 F2 long press -> LED test pattern advance                       */
+   /*                                                                        */
+   /* 화면 의미                                                               */
+   /* - 현재 TEST 홈 위에 작은 toast message를 잠깐 띄워서                     */
+   /*   방금 선택된 LED test mode 이름을 사용자에게 보여 준다.                 */
+   /* - 동시에 LED_App 내부 test pattern index가 다음 상태로 넘어가고,         */
+   /*   LED 출력도 즉시 그 패턴으로 전환된다.                                  */
+   /*                                                                        */
+   /* UI 위치 설명                                                            */
+   /* - toast는 기존 UI_Toast_Draw()가 그리던 위치/스타일을 그대로 사용한다.  */
+   /* - 즉, 이 함수는 "무슨 그림을 어느 좌표에 찍을지"를 직접 그리지 않고,     */
+   /*   텍스트와 아이콘만 toast 모듈에 전달한다.                               */
+   /* ---------------------------------------------------------------------- */
+   if ((event->id == BUTTON_ID_2) &&
+       (event->type == BUTTON_EVENT_LONG_PRESS))
+   {
+     const char *led_mode_text;
+
+     led_mode_text = LED_App_AdvanceTestPattern();
+
+     UI_Toast_Show(led_mode_text,
+                   icon_ui_info_8x8,
+                   ICON8_W,
+                   ICON8_H,
+                   now_ms,
+                   1100u);
+
+     return UI_SCREEN_TEST_ACTION_NONE;
+   }
+
+   if (event->type != BUTTON_EVENT_SHORT_PRESS)
+   {
+     return UI_SCREEN_TEST_ACTION_NONE;
+   }
+
 
   switch (event->id)
   {

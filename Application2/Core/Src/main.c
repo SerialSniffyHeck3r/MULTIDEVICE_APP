@@ -2695,7 +2695,6 @@ int main(void)
   /*  - sweep 완료 후에는 LED_App 내부에서 자동으로 Idle breath로 전환된다.    */
   /* ------------------------------------------------------------------------ */
   LED_App_Init();
-  LED_WelcomeSweep();
 
 
 
@@ -2969,11 +2968,14 @@ int main(void)
 	        /* ------------------------------------------------------------------ */
 	        /*  LED App task                                                       */
 	        /*                                                                    */
-	        /*  이 함수는 내부적으로 10ms 주기로만 실제 프레임을 갱신하므로         */
-	        /*  while loop에서 매번 호출해도 부담이 거의 없다.                     */
+	        /*  main loop는 이 함수를 매번 호출한다.                               */
 	        /*                                                                    */
-	        /*  앞으로 상위 app 모듈은 LED_Speedometer(), LED_BreathIdle() 같은     */
-	        /*  모드 함수만 호출하고, 실제 지속 동작은 여기 LED_App_Task가 맡는다.  */
+	        /*  실제 frame rate 제한(17ms 간격, 60fps 이하 cap),                   */
+	        /*  perceptual brightness remap, target/current frame smoothing,       */
+	        /*  PWM compare 갱신은 내부 LED_Driver가 맡는다.                       */
+	        /*                                                                    */
+	        /*  상위 app / UI 계층은 LED_Off(), LED_BreathIdle(),                  */
+	        /*  LED_App_SetTestPattern() 같은 mode setter만 호출하면 된다.         */
 	        /* ------------------------------------------------------------------ */
 	        LED_App_Task(now_ms);
 
