@@ -176,35 +176,19 @@ static uint16_t LED_App_GetTransitionTimeMs(void)
 /* -------------------------------------------------------------------------- */
 /*  테스트 패턴별 transition time                                               */
 /*                                                                            */
-/*  패턴 의도                                                                  */
-/*  - 순서 확인용 도트/분할 패턴은 또렷해야 하므로 즉시 전환                    */
-/*  - breath 계열만 부드러운 전환을 허용                                       */
+/*  현재 TEST 모드는 PWM duty 고정값 / PWM sweep / 밝기 linear sweep 중심이다. */
+/*  따라서 패턴 자체가 곧 검사용 출력이므로 별도 smoothing을 두지 않는다.      */
 /* -------------------------------------------------------------------------- */
 static uint16_t LED_App_GetTestPatternTransitionTimeMs(LED_AppTestPattern_t pattern)
 {
-    switch (pattern)
-    {
-        case LED_APP_TEST_PATTERN_OFF:
-        case LED_APP_TEST_PATTERN_ALL_ON:
-        case LED_APP_TEST_PATTERN_WALK_LEFT_TO_RIGHT:
-        case LED_APP_TEST_PATTERN_WALK_RIGHT_TO_LEFT:
-        case LED_APP_TEST_PATTERN_SCANNER:
-        case LED_APP_TEST_PATTERN_CENTER_OUT:
-        case LED_APP_TEST_PATTERN_EDGE_IN:
-        case LED_APP_TEST_PATTERN_ODD_EVEN:
-        case LED_APP_TEST_PATTERN_HALF_SWAP:
-        case LED_APP_TEST_PATTERN_BAR_FILL:
-        case LED_APP_TEST_PATTERN_STROBE_SLOW:
-            return 0u;
+    (void)pattern;
 
-        case LED_APP_TEST_PATTERN_BREATH_ALL:
-        case LED_APP_TEST_PATTERN_BREATH_CENTER:
-            return 35u;
-
-        case LED_APP_TEST_PATTERN_COUNT:
-        default:
-            return 0u;
-    }
+    /* ---------------------------------------------------------------------- */
+    /*  PWM/밝기 검증용 테스트는 target 값 자체가 이미 시간축을 포함한다.         */
+    /*  따라서 추가 smoothing을 넣지 않고, 패턴이 의도한 duty/밝기를            */
+    /*  그대로 바로 보이게 한다.                                               */
+    /* ---------------------------------------------------------------------- */
+    return 0u;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -220,40 +204,40 @@ const char *LED_App_GetTestPatternName(LED_AppTestPattern_t pattern)
             return "LED TEST: OFF";
 
         case LED_APP_TEST_PATTERN_ALL_ON:
-            return "LED TEST: ALL ON";
+            return "LED TEST: PWM100%";
 
         case LED_APP_TEST_PATTERN_WALK_LEFT_TO_RIGHT:
-            return "LED TEST: WALK >";
+            return "LED TEST: PWM1%";
 
         case LED_APP_TEST_PATTERN_WALK_RIGHT_TO_LEFT:
-            return "LED TEST: WALK <";
+            return "LED TEST: PWM5%";
 
         case LED_APP_TEST_PATTERN_SCANNER:
-            return "LED TEST: SCAN";
+            return "LED TEST: PWM10%";
 
         case LED_APP_TEST_PATTERN_CENTER_OUT:
-            return "LED TEST: CTR OUT";
+            return "LED TEST: PWM25%";
 
         case LED_APP_TEST_PATTERN_EDGE_IN:
-            return "LED TEST: EDGE IN";
+            return "LED TEST: PWM50%";
 
         case LED_APP_TEST_PATTERN_ODD_EVEN:
-            return "LED TEST: ODD/EVN";
+            return "LED TEST: PWM75%";
 
         case LED_APP_TEST_PATTERN_HALF_SWAP:
-            return "LED TEST: HALF";
+            return "LED TEST: PWM90%";
 
         case LED_APP_TEST_PATTERN_BREATH_ALL:
             return "LED TEST: BR ALL";
 
         case LED_APP_TEST_PATTERN_BREATH_CENTER:
-            return "LED TEST: BR CTR";
+            return "LED TEST: PWM SWP";
 
         case LED_APP_TEST_PATTERN_BAR_FILL:
-            return "LED TEST: BAR";
+            return "LED TEST: LIN SWP";
 
         case LED_APP_TEST_PATTERN_STROBE_SLOW:
-            return "LED TEST: STROBE";
+            return "LED TEST: PWM99%";
 
         case LED_APP_TEST_PATTERN_COUNT:
         default:
@@ -364,6 +348,9 @@ static void LED_App_BuildDriverCommand(LED_DriverCommand_t *command)
                     command->pattern = LED_DRIVER_PATTERN_TEST_ALL_ON;
                     break;
 
+                /* ---------------------------------------------------------- */
+                /*  legacy slot 재사용: 순서/스캔 패턴 대신 PWM duty 고정값 테스트 */
+                /* ---------------------------------------------------------- */
                 case LED_APP_TEST_PATTERN_WALK_LEFT_TO_RIGHT:
                     command->pattern = LED_DRIVER_PATTERN_TEST_WALK_LEFT_TO_RIGHT;
                     break;

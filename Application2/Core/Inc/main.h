@@ -57,8 +57,8 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
-#define POWER_HOLD_Pin GPIO_PIN_2
-#define POWER_HOLD_GPIO_Port GPIOE
+#define BACKLIGHT_Pin GPIO_PIN_2
+#define BACKLIGHT_GPIO_Port GPIOE
 #define BEEP_SOUND_Pin GPIO_PIN_5
 #define BEEP_SOUND_GPIO_Port GPIOE
 #define LED11_Pin GPIO_PIN_6

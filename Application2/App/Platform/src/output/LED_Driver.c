@@ -17,14 +17,15 @@
 /*                                                                            */
 /*  3) frame rate 제한                                                         */
 /*     - 현재 프로젝트의 공통 tick은 HAL_GetTick() 1ms 기반이다.              */
-/*     - 1ms tick만으로 정확히 16.666...ms를 표현할 수 없으므로,               */
-/*       17ms 간격으로 제한해 실제 갱신 빈도를 58.82fps 이하로 묶는다.         */
-/*     - 즉, "60fps를 넘지 않게 제한" 하는 목적에는 맞고,                    */
-/*       추가 하드웨어 타이머 없이 Cube 영향 최소화가 가능하다.               */
+/*     - 기존 17ms(약 58.8fps)는 motion pattern에는 충분했지만,               */
+/*       BR ALL 같은 전체 밝기 스윕에서는 계단감이 눈에 띌 수 있다.           */
+/*     - 그래서 추가 타이머는 건드리지 않고, render 간격만 5ms로 낮춰        */
+/*       밝기 time-axis 양자화를 줄인다.                                      */
 /*                                                                            */
 /*  4) 테스트 패턴 철학                                                         */
-/*     - 생산 / 수리 / bring-up 시 눈으로 확인 가능한 패턴을 다수 제공한다.   */
-/*     - 순서 확인, 대칭 확인, 밝기 보간 확인, 전체 점등 확인을 모두 포함한다. */
+/*     - 생산 / 수리 / bring-up 시 PWM duty/brightness 제어가 정상인지         */
+/*       바로 눈으로 확인할 수 있는 패턴을 우선 제공한다.                     */
+/*     - 고정 duty, raw PWM sweep, 눈 기준 linear sweep, BR ALL을 포함한다.   */
 /* ========================================================================== */
 
 #ifndef LED_DRIVER_OUTPUT_ACTIVE_HIGH
@@ -40,7 +41,7 @@
 #endif
 
 #ifndef LED_DRIVER_FRAME_INTERVAL_MS
-#define LED_DRIVER_FRAME_INTERVAL_MS        (17u)
+#define LED_DRIVER_FRAME_INTERVAL_MS        (5u)
 #endif
 
 #ifndef LED_DRIVER_BREATH_PERIOD_MS
@@ -322,6 +323,52 @@ static uint16_t LED_Driver_VisualQ16ToElectricalQ16(uint16_t brightness_q16)
 }
 
 /* -------------------------------------------------------------------------- */
+/*  raw electrical duty -> visual Q16                                          */
+/*                                                                            */
+/*  PWM duty n% 고정 테스트는 perceptual remap 이후의 실제 전기적 duty가       */
+/*  n%가 되도록 맞춰야 한다.                                                   */
+/*  따라서 테스트 패턴 전용으로는 inverse mapping의 반대 방향 helper를 쓴다.  */
+/* -------------------------------------------------------------------------- */
+static uint16_t LED_Driver_ElectricalQ16ToVisualQ16(uint16_t electrical_q16)
+{
+    float electrical_0_to_1;
+    float visual_0_to_1;
+
+    electrical_0_to_1 = (float)electrical_q16 / 65535.0f;
+
+#if (LED_DRIVER_USE_CIE_LSTAR == 1u)
+    if (electrical_0_to_1 <= (216.0f / 24389.0f))
+    {
+        visual_0_to_1 = (903.3f * electrical_0_to_1) / 100.0f;
+    }
+    else
+    {
+        visual_0_to_1 = (116.0f * cbrtf(electrical_0_to_1) - 16.0f) / 100.0f;
+    }
+#else
+    if (electrical_0_to_1 <= 0.0f)
+    {
+        visual_0_to_1 = 0.0f;
+    }
+    else
+    {
+        visual_0_to_1 = powf(electrical_0_to_1, 1.0f / LED_DRIVER_GAMMA_VALUE);
+    }
+#endif
+
+    if (visual_0_to_1 < 0.0f)
+    {
+        visual_0_to_1 = 0.0f;
+    }
+    else if (visual_0_to_1 > 1.0f)
+    {
+        visual_0_to_1 = 1.0f;
+    }
+
+    return (uint16_t)(visual_0_to_1 * 65535.0f + 0.5f);
+}
+
+/* -------------------------------------------------------------------------- */
 /*  현재 logical channel의 ARR를 읽어 compare 값으로 변환                       */
 /*                                                                            */
 /*  이 변환은 channel별 ARR가 같지 않아도 동작한다.                            */
@@ -477,6 +524,56 @@ static void LED_Driver_SetSymmetricPair(uint16_t frame_q16[LED_DRIVER_CHANNEL_CO
 {
     LED_Driver_SetOneLed(frame_q16, left_index, level_q16);
     LED_Driver_SetOneLed(frame_q16, right_index, level_q16);
+}
+
+static uint16_t LED_Driver_BuildTriangleQ16(uint32_t elapsed_ms,
+                                           uint32_t period_ms)
+{
+    uint32_t phase_ms;
+    uint32_t phase_q16;
+
+    if (period_ms == 0u)
+    {
+        return 0u;
+    }
+
+    phase_ms = elapsed_ms % period_ms;
+    phase_q16 = (phase_ms * LED_DRIVER_Q16_MAX) / period_ms;
+
+    if (phase_q16 < 32768u)
+    {
+        return LED_Driver_ClampQ16(phase_q16 * 2u);
+    }
+
+    return LED_Driver_ClampQ16((LED_DRIVER_Q16_MAX - phase_q16) * 2u);
+}
+
+static void LED_Driver_BuildPattern_TestFixedElectricalDuty(
+    uint16_t frame_q16[LED_DRIVER_CHANNEL_COUNT],
+    uint16_t duty_q16)
+{
+    LED_Driver_FillFrame(frame_q16,
+                         LED_Driver_ElectricalQ16ToVisualQ16(duty_q16));
+}
+
+static void LED_Driver_BuildPattern_TestDutySweep(
+    uint16_t frame_q16[LED_DRIVER_CHANNEL_COUNT],
+    uint32_t elapsed_ms)
+{
+    uint16_t duty_q16;
+
+    duty_q16 = LED_Driver_BuildTriangleQ16(elapsed_ms,
+                                           LED_DRIVER_BREATH_PERIOD_MS);
+    LED_Driver_BuildPattern_TestFixedElectricalDuty(frame_q16, duty_q16);
+}
+
+static void LED_Driver_BuildPattern_TestLinearBrightnessSweep(
+    uint16_t frame_q16[LED_DRIVER_CHANNEL_COUNT],
+    uint32_t elapsed_ms)
+{
+    LED_Driver_FillFrame(frame_q16,
+                         LED_Driver_BuildTriangleQ16(elapsed_ms,
+                                                     LED_DRIVER_BREATH_PERIOD_MS));
 }
 
 static uint16_t LED_Driver_BuildBreathEnvelopeQ16(uint32_t elapsed_ms)
@@ -717,113 +814,62 @@ static void LED_Driver_BuildPattern_TestWalkLeftToRight(
     uint16_t frame_q16[LED_DRIVER_CHANNEL_COUNT],
     uint32_t elapsed_ms)
 {
-    uint8_t active_index;
+    (void)elapsed_ms;
 
-    active_index = (uint8_t)((elapsed_ms / LED_DRIVER_TEST_STEP_MS) % LED_DRIVER_CHANNEL_COUNT);
-    LED_Driver_ClearFrame(frame_q16);
-    LED_Driver_SetOneLed(frame_q16, active_index, LED_DRIVER_Q16_MAX);
+    /* legacy slot 재사용: PWM duty 1% 고정 */
+    LED_Driver_BuildPattern_TestFixedElectricalDuty(frame_q16,
+                                                    LED_Driver_PermilleToQ16(10u));
 }
 
 static void LED_Driver_BuildPattern_TestWalkRightToLeft(
     uint16_t frame_q16[LED_DRIVER_CHANNEL_COUNT],
     uint32_t elapsed_ms)
 {
-    uint8_t active_index;
+    (void)elapsed_ms;
 
-    active_index = (uint8_t)((elapsed_ms / LED_DRIVER_TEST_STEP_MS) % LED_DRIVER_CHANNEL_COUNT);
-    active_index = (uint8_t)((LED_DRIVER_CHANNEL_COUNT - 1u) - active_index);
-
-    LED_Driver_ClearFrame(frame_q16);
-    LED_Driver_SetOneLed(frame_q16, active_index, LED_DRIVER_Q16_MAX);
+    /* legacy slot 재사용: PWM duty 5% 고정 */
+    LED_Driver_BuildPattern_TestFixedElectricalDuty(frame_q16,
+                                                    LED_Driver_PermilleToQ16(50u));
 }
 
 static void LED_Driver_BuildPattern_TestCenterOut(uint16_t frame_q16[LED_DRIVER_CHANNEL_COUNT],
                                                   uint32_t elapsed_ms)
 {
-    static const uint8_t left_index_table[LED_DRIVER_CENTER_INDEX + 1u] =
-    {
-        5u, 4u, 3u, 2u, 1u, 0u
-    };
-    static const uint8_t right_index_table[LED_DRIVER_CENTER_INDEX + 1u] =
-    {
-        5u, 6u, 7u, 8u, 9u, 10u
-    };
-    uint8_t step_index;
+    (void)elapsed_ms;
 
-    step_index = (uint8_t)((elapsed_ms / LED_DRIVER_TEST_STEP_MS) %
-                           (LED_DRIVER_CENTER_INDEX + 1u));
-
-    LED_Driver_ClearFrame(frame_q16);
-    LED_Driver_SetSymmetricPair(frame_q16,
-                                left_index_table[step_index],
-                                right_index_table[step_index],
-                                LED_DRIVER_Q16_MAX);
+    /* legacy slot 재사용: PWM duty 25% 고정 */
+    LED_Driver_BuildPattern_TestFixedElectricalDuty(frame_q16,
+                                                    LED_Driver_PermilleToQ16(250u));
 }
 
 static void LED_Driver_BuildPattern_TestEdgeIn(uint16_t frame_q16[LED_DRIVER_CHANNEL_COUNT],
                                                uint32_t elapsed_ms)
 {
-    static const uint8_t left_index_table[LED_DRIVER_CENTER_INDEX + 1u] =
-    {
-        0u, 1u, 2u, 3u, 4u, 5u
-    };
-    static const uint8_t right_index_table[LED_DRIVER_CENTER_INDEX + 1u] =
-    {
-        10u, 9u, 8u, 7u, 6u, 5u
-    };
-    uint8_t step_index;
+    (void)elapsed_ms;
 
-    step_index = (uint8_t)((elapsed_ms / LED_DRIVER_TEST_STEP_MS) %
-                           (LED_DRIVER_CENTER_INDEX + 1u));
-
-    LED_Driver_ClearFrame(frame_q16);
-    LED_Driver_SetSymmetricPair(frame_q16,
-                                left_index_table[step_index],
-                                right_index_table[step_index],
-                                LED_DRIVER_Q16_MAX);
+    /* legacy slot 재사용: PWM duty 50% 고정 */
+    LED_Driver_BuildPattern_TestFixedElectricalDuty(frame_q16,
+                                                    LED_Driver_PermilleToQ16(500u));
 }
 
 static void LED_Driver_BuildPattern_TestOddEven(uint16_t frame_q16[LED_DRIVER_CHANNEL_COUNT],
                                                 uint32_t elapsed_ms)
 {
-    uint8_t phase;
-    uint8_t index;
+    (void)elapsed_ms;
 
-    phase = (uint8_t)((elapsed_ms / LED_DRIVER_TEST_PHASE_MS) & 0x01u);
-    LED_Driver_ClearFrame(frame_q16);
-
-    for (index = 0u; index < LED_DRIVER_CHANNEL_COUNT; ++index)
-    {
-        if (((index & 0x01u) == 0u) == (phase == 0u))
-        {
-            frame_q16[index] = LED_DRIVER_Q16_MAX;
-        }
-    }
+    /* legacy slot 재사용: PWM duty 75% 고정 */
+    LED_Driver_BuildPattern_TestFixedElectricalDuty(frame_q16,
+                                                    LED_Driver_PermilleToQ16(750u));
 }
 
 static void LED_Driver_BuildPattern_TestHalfSwap(uint16_t frame_q16[LED_DRIVER_CHANNEL_COUNT],
                                                  uint32_t elapsed_ms)
 {
-    uint8_t phase;
-    uint8_t index;
+    (void)elapsed_ms;
 
-    phase = (uint8_t)((elapsed_ms / LED_DRIVER_TEST_PHASE_MS) & 0x01u);
-    LED_Driver_ClearFrame(frame_q16);
-
-    if (phase == 0u)
-    {
-        for (index = 0u; index <= LED_DRIVER_CENTER_INDEX; ++index)
-        {
-            frame_q16[index] = LED_DRIVER_Q16_MAX;
-        }
-    }
-    else
-    {
-        for (index = LED_DRIVER_CENTER_INDEX; index < LED_DRIVER_CHANNEL_COUNT; ++index)
-        {
-            frame_q16[index] = LED_DRIVER_Q16_MAX;
-        }
-    }
+    /* legacy slot 재사용: PWM duty 90% 고정 */
+    LED_Driver_BuildPattern_TestFixedElectricalDuty(frame_q16,
+                                                    LED_Driver_PermilleToQ16(900u));
 }
 
 static void LED_Driver_BuildPattern_TestBreathAll(uint16_t frame_q16[LED_DRIVER_CHANNEL_COUNT],
@@ -838,35 +884,18 @@ static void LED_Driver_BuildPattern_TestBreathAll(uint16_t frame_q16[LED_DRIVER_
 static void LED_Driver_BuildPattern_TestBarFill(uint16_t frame_q16[LED_DRIVER_CHANNEL_COUNT],
                                                 uint32_t elapsed_ms)
 {
-    uint8_t filled_led_count;
-    uint8_t index;
-
-    filled_led_count = (uint8_t)((elapsed_ms / LED_DRIVER_TEST_STEP_MS) %
-                                 (LED_DRIVER_CHANNEL_COUNT + 1u));
-
-    LED_Driver_ClearFrame(frame_q16);
-
-    for (index = 0u; index < filled_led_count; ++index)
-    {
-        frame_q16[index] = LED_DRIVER_Q16_MAX;
-    }
+    /* legacy slot 재사용: 사람 눈 기준 linear brightness sweep */
+    LED_Driver_BuildPattern_TestLinearBrightnessSweep(frame_q16, elapsed_ms);
 }
 
 static void LED_Driver_BuildPattern_TestStrobeSlow(uint16_t frame_q16[LED_DRIVER_CHANNEL_COUNT],
                                                    uint32_t elapsed_ms)
 {
-    uint8_t phase;
+    (void)elapsed_ms;
 
-    phase = (uint8_t)((elapsed_ms / LED_DRIVER_TEST_STROBE_MS) & 0x01u);
-
-    if (phase == 0u)
-    {
-        LED_Driver_FillFrame(frame_q16, LED_DRIVER_Q16_MAX);
-    }
-    else
-    {
-        LED_Driver_ClearFrame(frame_q16);
-    }
+    /* legacy slot 재사용: PWM duty 99% 고정 */
+    LED_Driver_BuildPattern_TestFixedElectricalDuty(frame_q16,
+                                                    LED_Driver_PermilleToQ16(990u));
 }
 
 /* -------------------------------------------------------------------------- */
@@ -921,7 +950,8 @@ static void LED_Driver_BuildTargetFrame(uint16_t frame_q16[LED_DRIVER_CHANNEL_CO
             break;
 
         case LED_DRIVER_PATTERN_TEST_ALL_ON:
-            LED_Driver_BuildPattern_SolidAll(frame_q16, LED_DRIVER_Q16_MAX);
+            LED_Driver_BuildPattern_TestFixedElectricalDuty(frame_q16,
+                                                            LED_DRIVER_Q16_MAX);
             break;
 
         case LED_DRIVER_PATTERN_TEST_WALK_LEFT_TO_RIGHT:
@@ -933,7 +963,8 @@ static void LED_Driver_BuildTargetFrame(uint16_t frame_q16[LED_DRIVER_CHANNEL_CO
             break;
 
         case LED_DRIVER_PATTERN_TEST_SCANNER:
-            LED_Driver_BuildPattern_Scanner(frame_q16, elapsed_ms);
+            LED_Driver_BuildPattern_TestFixedElectricalDuty(frame_q16,
+                                                            LED_Driver_PermilleToQ16(100u));
             break;
 
         case LED_DRIVER_PATTERN_TEST_CENTER_OUT:
@@ -957,7 +988,7 @@ static void LED_Driver_BuildTargetFrame(uint16_t frame_q16[LED_DRIVER_CHANNEL_CO
             break;
 
         case LED_DRIVER_PATTERN_TEST_BREATH_CENTER:
-            LED_Driver_BuildPattern_BreathCenter(frame_q16, elapsed_ms);
+            LED_Driver_BuildPattern_TestDutySweep(frame_q16, elapsed_ms);
             break;
 
         case LED_DRIVER_PATTERN_TEST_BAR_FILL:
@@ -1015,7 +1046,7 @@ void LED_Driver_RenderCommand(uint32_t now_ms, const LED_DriverCommand_t *comman
     /*  frame rate limiter                                                     */
     /*                                                                        */
     /*  now_ms는 HAL_GetTick() 1ms 단위이므로                                   */
-    /*  17ms 미만이면 이번 loop에서는 렌더링을 생략한다.                        */
+    /*  5ms 미만이면 이번 loop에서는 렌더링을 생략한다.                         */
     /* ---------------------------------------------------------------------- */
     if ((now_ms - s_led_driver.last_frame_ms) < LED_DRIVER_FRAME_INTERVAL_MS)
     {

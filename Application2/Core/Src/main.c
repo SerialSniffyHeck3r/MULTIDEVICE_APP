@@ -83,6 +83,8 @@
 
 #include "LED_App.h"
 
+#include "BACKLIGHT_App.h"
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -2695,7 +2697,17 @@ int main(void)
   /*  - sweep 완료 후에는 LED_App 내부에서 자동으로 Idle breath로 전환된다.    */
   /* ------------------------------------------------------------------------ */
   LED_App_Init();
-
+  /* ------------------------------------------------------------------------ */
+  /*  LCD 백라이트 자동 밝기 서브시스템 초기화                                  */
+  /*                                                                          */
+  /*  중요                                                                    */
+  /*  - gpio.c는 LCD_BACKLIGHT 핀을 일반 GPIO low로 만들어 둔다.               */
+  /*  - 따라서 디스플레이 초기화/부트 로고/직전 fault 표시가 실제로 보이려면     */
+  /*    U8G2_UC1608_Init()보다 앞서 백라이트 PWM을 먼저 살려야 한다.           */
+  /*  - 이 init는 PB1을 runtime에서 TIM8_CH3N PWM 핀으로 다시 묶기 때문에      */
+  /*    CubeMX 재생성으로 gpio/tim 자동 생성 코드가 바뀌어도 비교적 안전하다.  */
+  /* ------------------------------------------------------------------------ */
+  Backlight_App_Init();
 
 
 
@@ -2948,6 +2960,8 @@ int main(void)
 	        GY86_IMU_Task(now_ms);
 	        DS18B20_DRIVER_Task(now_ms);
 	        Brightness_Sensor_Task(now_ms);
+
+	        Backlight_App_Task(now_ms);
 
 	        /* SPI flash는 상태 머신 기반이라 loop마다 한 번씩만 진전시킨다. */
 	        SPI_Flash_Task(now_ms);

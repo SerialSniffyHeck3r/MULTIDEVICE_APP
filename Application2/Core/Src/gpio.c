@@ -53,13 +53,10 @@ void MX_GPIO_Init(void)
   __HAL_RCC_GPIOD_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOE, POWER_HOLD_Pin|DS18B20_OW_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOE, BACKLIGHT_Pin|DS18B20_OW_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(BOARD_LED_GPIO_Port, BOARD_LED_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(LCD_BACKLIGHT_GPIO_Port, LCD_BACKLIGHT_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LCD_CS_GPIO_Port, LCD_CS_Pin, GPIO_PIN_SET);
@@ -67,12 +64,12 @@ void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(WINBOND_CS_GPIO_Port, WINBOND_CS_Pin, GPIO_PIN_SET);
 
-  /*Configure GPIO pin : POWER_HOLD_Pin */
-  GPIO_InitStruct.Pin = POWER_HOLD_Pin;
+  /*Configure GPIO pin : BACKLIGHT_Pin */
+  GPIO_InitStruct.Pin = BACKLIGHT_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(POWER_HOLD_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(BACKLIGHT_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : BOARD_DEBUG_BUTTON_Pin */
   GPIO_InitStruct.Pin = BOARD_DEBUG_BUTTON_Pin;
@@ -92,13 +89,6 @@ void MX_GPIO_Init(void)
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(SD_DETECT_GPIO_Port, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : LCD_BACKLIGHT_Pin */
-  GPIO_InitStruct.Pin = LCD_BACKLIGHT_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(LCD_BACKLIGHT_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : BUTTON1_Pin BUTTON2_Pin BUTTON3_Pin BUTTON4_Pin
                            BUTTON5_Pin BUTTON6_Pin */
