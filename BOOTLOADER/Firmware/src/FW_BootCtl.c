@@ -18,27 +18,65 @@ static volatile uint8_t *FW_BOOTCTL_GetStorageBase(void)
 /* -------------------------------------------------------------------------- */
 static void FW_BOOTCTL_EnableBkpsramAccess(void)
 {
+#if defined(PWR_CSR_BRR)
+    uint32_t wait_count;
+#endif
+
+    /* ---------------------------------------------------------------------- */
+    /*  PWR peripheral clock는 DBP / BRE 제어에 필요하다.                     */
+    /*  따라서 backup domain 또는 BKPSRAM에 접근하기 전에 가장 먼저 켠다.      */
+    /* ---------------------------------------------------------------------- */
     RCC->APB1ENR |= RCC_APB1ENR_PWREN;
     (void)RCC->APB1ENR;
 
+    /* ---------------------------------------------------------------------- */
+    /*  backup domain write 보호를 푼다.                                      */
+    /*  DBP bit가 올라가야 backup 영역 제어 레지스터와 BKPSRAM 쪽 준비를       */
+    /*  안정적으로 진행할 수 있다.                                             */
+    /* ---------------------------------------------------------------------- */
     PWR->CR |= PWR_CR_DBP;
     (void)PWR->CR;
 
 #if defined(RCC_AHB1ENR_BKPSRAMEN)
+    /* ---------------------------------------------------------------------- */
+    /*  BKPSRAM AHB clock를 켠다.                                              */
+    /*  clock가 꺼져 있으면 뒤의 byte 단위 load / store 자체가 성립하지 않는다. */
+    /* ---------------------------------------------------------------------- */
     RCC->AHB1ENR |= RCC_AHB1ENR_BKPSRAMEN;
     (void)RCC->AHB1ENR;
 #endif
 
 #if defined(PWR_CSR_BRE)
+    /* ---------------------------------------------------------------------- */
+    /*  backup regulator를 켠다.                                               */
+    /*  VBAT retention이 필요한 경우에도 이 regulator가 켜져 있어야 한다.      */
+    /* ---------------------------------------------------------------------- */
     PWR->CSR |= PWR_CSR_BRE;
     (void)PWR->CSR;
+#endif
 
-    while ((PWR->CSR & PWR_CSR_BRR) == 0u)
+#if defined(PWR_CSR_BRR)
+    /* ---------------------------------------------------------------------- */
+    /*  기존 구현은 BRR ready bit를 timeout 없이 무한 대기했다.                */
+    /*  하지만 bring-up 단계에서 backup domain 상태가 꼬이거나 regulator가     */
+    /*  ready 되지 못하면, boot / app이 fault recovery 이전에 그대로           */
+    /*  영구 정지할 수 있다.                                                    */
+    /*                                                                        */
+    /*  여기서는 APP fault logger와 같은 정책으로 bounded spin을 사용한다.     */
+    /*  최악의 경우 retention 품질이 떨어질 수는 있어도,                       */
+    /*  시스템 전체가 부팅 중 영원히 멈추는 상황은 피하는 것이 더 중요하다.    */
+    /* ---------------------------------------------------------------------- */
+    wait_count = 100000u;
+    while (((PWR->CSR & PWR_CSR_BRR) == 0u) && (wait_count > 0u))
     {
-        /* backup regulator ready 대기 */
+        wait_count--;
     }
 #endif
 
+    /* ---------------------------------------------------------------------- */
+    /*  앞선 clock / regulator write가 실제 하드웨어에 반영된 뒤               */
+    /*  다음 BKPSRAM 접근이 이어지도록 barrier를 건다.                         */
+    /* ---------------------------------------------------------------------- */
     __DSB();
     __ISB();
 }
