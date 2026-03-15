@@ -3,719 +3,616 @@
 #include <string.h>
 
 #include "APP_STATE.h"
-#include "Brightness_Sensor.h"
 #include "BACKLIGHT_DRIVER.h"
+#include "Brightness_Sensor.h"
 
 /* -------------------------------------------------------------------------- */
-/*  기본 tuning 값                                                             */
+/*  기본 fallback 정책                                                        */
 /*                                                                            */
-/*  현재 값의 의미                                                             */
-/*  - sensor_filter_alpha_permille                                             */
-/*      센서 burst 결과가 들어올 때 어느 정도 반영할지 결정                    */
-/*  - ambient_change_threshold_*                                               */
-/*      주변광 변화가 이 정도 이상 누적되어야 retarget 후보로 인정             */
-/*  - target_change_threshold_permille                                         */
-/*      실제 화면 밝기 목표 변화량이 너무 작으면 무시                          */
-/*  - hold_ms                                                                  */
-/*      스마트폰처럼 "유의미한 변화가 잠깐이 아니라 일정 시간 유지되었는가"를   */
-/*      확인하는 시간                                                          */
-/*  - slew_per_sec                                                             */
-/*      목표가 확정된 뒤 화면 밝기가 실제로 따라가는 속도                      */
+/*  주의                                                                      */
+/*  - Backlight_App_Init()는 현재 main.c에서 APP_STATE_Init()보다 먼저 호출된다.*/
+/*  - 따라서 init 시점에는 APP_STATE를 믿지 않고,                             */
+/*    여기 fallback 값으로 먼저 시작한다.                                     */
+/*  - 이후 main loop의 Backlight_App_Task()가 APP_STATE 설정을 읽어            */
+/*    자동으로 실제 정책으로 넘어간다.                                        */
 /* -------------------------------------------------------------------------- */
-#ifndef BACKLIGHT_APP_DEFAULT_AUTO_ENABLED
-#define BACKLIGHT_APP_DEFAULT_AUTO_ENABLED                    1u
+#ifndef BACKLIGHT_APP_STARTUP_FALLBACK_PERCENT
+#define BACKLIGHT_APP_STARTUP_FALLBACK_PERCENT      60u
 #endif
 
-#ifndef BACKLIGHT_APP_DEFAULT_USER_BIAS_STEPS
-#define BACKLIGHT_APP_DEFAULT_USER_BIAS_STEPS                0
+#ifndef BACKLIGHT_APP_SENSOR_FILTER_TAU_MS
+#define BACKLIGHT_APP_SENSOR_FILTER_TAU_MS          120u
 #endif
 
-#ifndef BACKLIGHT_APP_DEFAULT_SENSOR_BIAS_COUNTS
-#define BACKLIGHT_APP_DEFAULT_SENSOR_BIAS_COUNTS             0
+#ifndef BACKLIGHT_APP_SENSOR_STALE_TIMEOUT_MS
+#define BACKLIGHT_APP_SENSOR_STALE_TIMEOUT_MS       450u
 #endif
 
-#ifndef BACKLIGHT_APP_DEFAULT_SENSOR_BIAS_PERMILLE
-#define BACKLIGHT_APP_DEFAULT_SENSOR_BIAS_PERMILLE           0
+#ifndef BACKLIGHT_APP_DIMMER_HYSTERESIS_PERCENT
+#define BACKLIGHT_APP_DIMMER_HYSTERESIS_PERCENT     3u
 #endif
 
-#ifndef BACKLIGHT_APP_DEFAULT_SENSOR_FILTER_ALPHA_PERMILLE
-#define BACKLIGHT_APP_DEFAULT_SENSOR_FILTER_ALPHA_PERMILLE   180u
+#ifndef BACKLIGHT_APP_CONTINUOUS_BIAS_PERCENT_STEP
+#define BACKLIGHT_APP_CONTINUOUS_BIAS_PERCENT_STEP  8
 #endif
 
-#ifndef BACKLIGHT_APP_DEFAULT_AMBIENT_THRESHOLD_UP_PERMILLE
-#define BACKLIGHT_APP_DEFAULT_AMBIENT_THRESHOLD_UP_PERMILLE  70u
-#endif
-
-#ifndef BACKLIGHT_APP_DEFAULT_AMBIENT_THRESHOLD_DOWN_PERMILLE
-#define BACKLIGHT_APP_DEFAULT_AMBIENT_THRESHOLD_DOWN_PERMILLE 55u
-#endif
-
-#ifndef BACKLIGHT_APP_DEFAULT_TARGET_THRESHOLD_PERMILLE
-#define BACKLIGHT_APP_DEFAULT_TARGET_THRESHOLD_PERMILLE      25u
-#endif
-
-#ifndef BACKLIGHT_APP_DEFAULT_BRIGHTEN_HOLD_MS
-#define BACKLIGHT_APP_DEFAULT_BRIGHTEN_HOLD_MS               350u
-#endif
-
-#ifndef BACKLIGHT_APP_DEFAULT_DARKEN_HOLD_MS
-#define BACKLIGHT_APP_DEFAULT_DARKEN_HOLD_MS                 900u
-#endif
-
-#ifndef BACKLIGHT_APP_DEFAULT_BRIGHTEN_SLEW_PER_SEC
-#define BACKLIGHT_APP_DEFAULT_BRIGHTEN_SLEW_PER_SEC          700u
-#endif
-
-#ifndef BACKLIGHT_APP_DEFAULT_DARKEN_SLEW_PER_SEC
-#define BACKLIGHT_APP_DEFAULT_DARKEN_SLEW_PER_SEC            450u
-#endif
-
-#ifndef BACKLIGHT_APP_DEFAULT_MIN_LINEAR_PERMILLE
-#define BACKLIGHT_APP_DEFAULT_MIN_LINEAR_PERMILLE            28u
-#endif
-
-#ifndef BACKLIGHT_APP_DEFAULT_MAX_LINEAR_PERMILLE
-#define BACKLIGHT_APP_DEFAULT_MAX_LINEAR_PERMILLE            1000u
-#endif
-
-#ifndef BACKLIGHT_APP_DEFAULT_STARTUP_LINEAR_PERMILLE
-#define BACKLIGHT_APP_DEFAULT_STARTUP_LINEAR_PERMILLE        220u
-#endif
-
-#ifndef BACKLIGHT_APP_DEFAULT_INVALID_SENSOR_FALLBACK_PERMILLE
-#define BACKLIGHT_APP_DEFAULT_INVALID_SENSOR_FALLBACK_PERMILLE 220u
-#endif
-
-#ifndef BACKLIGHT_APP_DEFAULT_SAMPLE_STALE_TIMEOUT_MS
-#define BACKLIGHT_APP_DEFAULT_SAMPLE_STALE_TIMEOUT_MS        1500u
-#endif
-
-#ifndef BACKLIGHT_APP_DEFAULT_POST_COMMIT_IGNORE_MS
-#define BACKLIGHT_APP_DEFAULT_POST_COMMIT_IGNORE_MS          300u
-#endif
-
-#ifndef BACKLIGHT_APP_DEFAULT_MANUAL_LINEAR_PERMILLE
-#define BACKLIGHT_APP_DEFAULT_MANUAL_LINEAR_PERMILLE         220u
+#ifndef BACKLIGHT_APP_FALLBACK_SMOOTHNESS
+#define BACKLIGHT_APP_FALLBACK_SMOOTHNESS           3u
 #endif
 
 /* -------------------------------------------------------------------------- */
-/*  공개 튜닝 전역                                                             */
+/*  AUTO-CONT 연속 곡선                                                        */
 /*                                                                            */
-/*  향후 settings UI가 붙으면 이 구조체와 테이블을 직접 수정하면 된다.         */
+/*  x축: 주변광 0..100%                                                       */
+/*  y축: 화면 밝기 0..100%                                                    */
+/*                                                                            */
+/*  각 점 사이를 선형 보간하므로 출력은 연속적이다.                           */
+/*  즉, zone jump가 아니라 "곡선 위를 부드럽게 타고 이동"하는 방식이다.      */
 /* -------------------------------------------------------------------------- */
-volatile backlight_app_tuning_t g_backlight_app_tuning =
+#define BACKLIGHT_APP_CONT_CURVE_COUNT  21u
+
+static const uint8_t s_backlight_cont_sensor_percent[BACKLIGHT_APP_CONT_CURVE_COUNT] =
 {
-    BACKLIGHT_APP_DEFAULT_AUTO_ENABLED,                   /* auto_enabled */
-    0u,                                                   /* reserved0 */
-    BACKLIGHT_APP_DEFAULT_USER_BIAS_STEPS,                /* user_bias_steps */
-    0,                                                    /* reserved1 */
-
-    BACKLIGHT_APP_DEFAULT_SENSOR_BIAS_COUNTS,             /* sensor_bias_counts */
-    BACKLIGHT_APP_DEFAULT_SENSOR_BIAS_PERMILLE,           /* sensor_bias_permille */
-
-    BACKLIGHT_APP_DEFAULT_SENSOR_FILTER_ALPHA_PERMILLE,   /* sensor_filter_alpha_permille */
-    BACKLIGHT_APP_DEFAULT_AMBIENT_THRESHOLD_UP_PERMILLE,  /* ambient_change_threshold_up_permille */
-    BACKLIGHT_APP_DEFAULT_AMBIENT_THRESHOLD_DOWN_PERMILLE,/* ambient_change_threshold_down_permille */
-    BACKLIGHT_APP_DEFAULT_TARGET_THRESHOLD_PERMILLE,      /* target_change_threshold_permille */
-
-    BACKLIGHT_APP_DEFAULT_BRIGHTEN_HOLD_MS,               /* brighten_hold_ms */
-    BACKLIGHT_APP_DEFAULT_DARKEN_HOLD_MS,                 /* darken_hold_ms */
-
-    BACKLIGHT_APP_DEFAULT_BRIGHTEN_SLEW_PER_SEC,          /* brighten_slew_permille_per_sec */
-    BACKLIGHT_APP_DEFAULT_DARKEN_SLEW_PER_SEC,            /* darken_slew_permille_per_sec */
-
-    BACKLIGHT_APP_DEFAULT_MIN_LINEAR_PERMILLE,            /* min_linear_permille */
-    BACKLIGHT_APP_DEFAULT_MAX_LINEAR_PERMILLE,            /* max_linear_permille */
-    BACKLIGHT_APP_DEFAULT_STARTUP_LINEAR_PERMILLE,        /* startup_linear_permille */
-    BACKLIGHT_APP_DEFAULT_INVALID_SENSOR_FALLBACK_PERMILLE,/* invalid_sensor_fallback_permille */
-
-    BACKLIGHT_APP_DEFAULT_SAMPLE_STALE_TIMEOUT_MS,        /* sample_stale_timeout_ms */
-    BACKLIGHT_APP_DEFAULT_POST_COMMIT_IGNORE_MS           /* post_commit_ignore_ms */
+      0u,   5u,  10u,  15u,  20u,
+     25u,  30u,  35u,  40u,  45u,
+     50u,  55u,  60u,  65u,  70u,
+     75u,  80u,  85u,  90u,  95u,
+    100u
 };
 
+static const uint8_t s_backlight_cont_brightness_percent[BACKLIGHT_APP_CONT_CURVE_COUNT] =
+{
+     12u,  13u,  15u,  18u,  22u,
+     27u,  33u,  40u,  48u,  56u,
+     64u,  71u,  77u,  83u,  88u,
+     92u,  95u,  97u,  98u,  99u,
+    100u
+};
+
+/* -------------------------------------------------------------------------- */
+/*  smoothness 1..5 -> 출력 time constant(ms)                                 */
+/*                                                                            */
+/*  값이 클수록 target을 더 천천히 따라간다.                                 */
+/* -------------------------------------------------------------------------- */
+static const uint16_t s_backlight_smoothness_tau_ms[5] =
+{
+     180u,
+     350u,
+     700u,
+    1400u,
+    2600u
+};
+
+/* -------------------------------------------------------------------------- */
+/*  공개 runtime                                                               */
+/* -------------------------------------------------------------------------- */
 volatile backlight_app_runtime_t g_backlight_app_runtime;
 
 /* -------------------------------------------------------------------------- */
-/*  사용자 bias 단계별 실제 permille 오프셋                                    */
-/*                                                                            */
-/*  인덱스 매핑                                                                */
-/*  - 0 -> user bias -2                                                        */
-/*  - 1 -> user bias -1                                                        */
-/*  - 2 -> user bias  0                                                        */
-/*  - 3 -> user bias +1                                                        */
-/*  - 4 -> user bias +2                                                        */
+/*  호환용 override 상태                                                       */
 /* -------------------------------------------------------------------------- */
-volatile int16_t g_backlight_app_bias_step_offsets_permille[5] =
-{
-    -180, -90, 0, 90, 180
-};
+static int8_t  s_backlight_bias_override_steps = 0;
+static uint8_t s_backlight_bias_override_valid = 0u;
 
 /* -------------------------------------------------------------------------- */
-/*  주변광 -> 화면 밝기 매핑 커브                                              */
-/*                                                                            */
-/*  x축: 조도 센서 정규화 결과(0~1000)                                         */
-/*  y축: 사람 눈 기준 목표 화면 밝기(0~1000)                                  */
-/*                                                                            */
-/*  의도                                                                      */
-/*  - 완전 저조도에서는 화면을 과도하게 밝게 만들지 않는다.                    */
-/*  - 중간 조도에서는 비교적 천천히 올라간다.                                  */
-/*  - 고조도 구간에 들어서면 가독성을 위해 상승량을 더 크게 준다.              */
-/*                                                                            */
-/*  이는 "주변광 변화가 있다고 항상 즉시 선형 추종"하는 방식이 아니라,         */
-/*  일단 적당한 목표 레벨을 고른 뒤, 그 목표를 hold + hysteresis + slew로      */
-/*  제어하는 구조의 기반 곡선이다.                                             */
+/*  내부 유틸: 0..100 clamp                                                    */
 /* -------------------------------------------------------------------------- */
-volatile uint16_t g_backlight_app_curve_sensor_permille[BACKLIGHT_APP_CURVE_POINT_COUNT] =
+static uint8_t Backlight_App_ClampPercentS32(int32_t value_percent)
 {
-      0u,   15u,   50u,  110u,  190u,  300u,  430u,  580u,  730u,  850u,  930u, 1000u
-};
-
-volatile uint16_t g_backlight_app_curve_target_permille[BACKLIGHT_APP_CURVE_POINT_COUNT] =
-{
-     32u,   38u,   50u,   72u,  110u,  180u,  300u,  470u,  650u,  790u,  910u, 1000u
-};
-
-/* -------------------------------------------------------------------------- */
-/*  내부 유틸: 부호 있는 값을 0~4095 ADC count 범위로 clamp                    */
-/* -------------------------------------------------------------------------- */
-static uint16_t Backlight_App_ClampToU12(int32_t value)
-{
-    if (value < 0)
+    if (value_percent < 0)
     {
         return 0u;
     }
 
-    if (value > 4095)
+    if (value_percent > 100)
     {
-        return 4095u;
+        return 100u;
     }
 
-    return (uint16_t)value;
+    return (uint8_t)value_percent;
 }
 
 /* -------------------------------------------------------------------------- */
-/*  내부 유틸: 0~1000 permille clamp                                           */
+/*  내부 유틸: 0..1000 clamp                                                   */
 /* -------------------------------------------------------------------------- */
-static uint16_t Backlight_App_ClampPermille(int32_t value)
+static uint16_t Backlight_App_ClampPermilleS32(int32_t value_permille)
 {
-    if (value < 0)
+    if (value_permille < 0)
     {
         return 0u;
     }
 
-    if (value > 1000)
+    if (value_permille > 1000)
     {
         return 1000u;
     }
 
-    return (uint16_t)value;
+    return (uint16_t)value_permille;
 }
 
 /* -------------------------------------------------------------------------- */
-/*  내부 유틸: min/max 범위 clamp                                              */
+/*  내부 유틸: -2..+2 clamp                                                    */
 /* -------------------------------------------------------------------------- */
-static uint16_t Backlight_App_ClampLinearRange(int32_t value)
+static int8_t Backlight_App_ClampBiasStepsS32(int32_t value_steps)
 {
-    uint16_t min_value;
-    uint16_t max_value;
-
-    min_value = g_backlight_app_tuning.min_linear_permille;
-    max_value = g_backlight_app_tuning.max_linear_permille;
-
-    if (max_value < min_value)
+    if (value_steps < -2)
     {
-        uint16_t temp_value;
-
-        temp_value = min_value;
-        min_value  = max_value;
-        max_value  = temp_value;
+        return -2;
     }
 
-    if (value < (int32_t)min_value)
+    if (value_steps > 2)
     {
-        return min_value;
+        return 2;
     }
 
-    if (value > (int32_t)max_value)
-    {
-        return max_value;
-    }
-
-    return (uint16_t)value;
+    return (int8_t)value_steps;
 }
 
 /* -------------------------------------------------------------------------- */
-/*  내부 유틸: 두 uint16 차이의 절댓값                                         */
+/*  내부 유틸: smoothness 1..5 clamp                                           */
 /* -------------------------------------------------------------------------- */
-static uint16_t Backlight_App_AbsDiffU16(uint16_t a, uint16_t b)
+static uint8_t Backlight_App_ClampSmoothnessS32(int32_t value_smoothness)
 {
-    if (a >= b)
+    if (value_smoothness < 1)
     {
-        return (uint16_t)(a - b);
+        return 1u;
     }
 
-    return (uint16_t)(b - a);
+    if (value_smoothness > 5)
+    {
+        return 5u;
+    }
+
+    return (uint8_t)value_smoothness;
 }
 
 /* -------------------------------------------------------------------------- */
-/*  내부 유틸: bias step -> bias table index                                   */
+/*  내부 유틸: percent -> Q16                                                  */
 /* -------------------------------------------------------------------------- */
-static uint8_t Backlight_App_BiasIndexFromSteps(int8_t steps)
+static uint16_t Backlight_App_PercentToQ16(uint8_t percent)
 {
-    int32_t index;
-
-    index = (int32_t)steps + 2;
-
-    if (index < 0)
-    {
-        index = 0;
-    }
-
-    if (index > 4)
-    {
-        index = 4;
-    }
-
-    return (uint8_t)index;
+    return (uint16_t)((((uint32_t)percent) * 65535u + 50u) / 100u);
 }
 
 /* -------------------------------------------------------------------------- */
-/*  내부 유틸: 센서 counts -> normalized permille                              */
+/*  내부 유틸: permille -> Q16                                                 */
+/* -------------------------------------------------------------------------- */
+static uint16_t Backlight_App_PermilleToQ16(uint16_t permille)
+{
+    return (uint16_t)((((uint32_t)permille) * 65535u + 500u) / 1000u);
+}
+
+/* -------------------------------------------------------------------------- */
+/*  내부 유틸: Q16 -> percent                                                  */
+/* -------------------------------------------------------------------------- */
+static uint8_t Backlight_App_Q16ToPercent(uint16_t q16)
+{
+    return (uint8_t)((((uint32_t)q16) * 100u + (65535u / 2u)) / 65535u);
+}
+
+/* -------------------------------------------------------------------------- */
+/*  내부 유틸: 절댓값                                                          */
+/* -------------------------------------------------------------------------- */
+static uint32_t Backlight_App_AbsS32(int32_t value)
+{
+    if (value < 0)
+    {
+        return (uint32_t)(-value);
+    }
+
+    return (uint32_t)value;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  내부 유틸: dt/tau 기반 연속 접근                                           */
 /*                                                                            */
-/*  Brightness_Sensor 드라이버와 동일한 기준점 매크로를 사용한다.              */
-/*  즉, App 단에서 counts bias를 넣고 나서 다시 0~1000 정규화를 수행한다.      */
+/*  current += (target-current) * dt / tau                                    */
+/*                                                                            */
+/*  특징                                                                      */
+/*  - dt가 커지면 더 많이 이동하고,                                            */
+/*  - dt가 1ms 수준이면 아주 촘촘히 조금씩 이동한다.                           */
+/*  - 매우 작은 diff에서도 step=0이 되지 않게 1LSB 보장한다.                  */
 /* -------------------------------------------------------------------------- */
-static uint16_t Backlight_App_NormalizeCountsToPermille(uint16_t calibrated_counts)
+static uint16_t Backlight_App_ApproachQ16(uint16_t current_q16,
+                                          uint16_t target_q16,
+                                          uint32_t dt_ms,
+                                          uint32_t tau_ms)
 {
-    int32_t range;
-    int32_t delta;
-    int32_t permille;
+    int32_t diff_q16;
+    int32_t step_q16;
+    int32_t next_q16;
 
-    if (BRIGHTNESS_SENSOR_CAL_RAW_AT_100_PERCENT > BRIGHTNESS_SENSOR_CAL_RAW_AT_0_PERCENT)
+    if ((dt_ms == 0u) || (current_q16 == target_q16))
     {
-        range = (int32_t)BRIGHTNESS_SENSOR_CAL_RAW_AT_100_PERCENT -
-                (int32_t)BRIGHTNESS_SENSOR_CAL_RAW_AT_0_PERCENT;
-        delta = (int32_t)calibrated_counts -
-                (int32_t)BRIGHTNESS_SENSOR_CAL_RAW_AT_0_PERCENT;
-    }
-    else if (BRIGHTNESS_SENSOR_CAL_RAW_AT_100_PERCENT < BRIGHTNESS_SENSOR_CAL_RAW_AT_0_PERCENT)
-    {
-        range = (int32_t)BRIGHTNESS_SENSOR_CAL_RAW_AT_0_PERCENT -
-                (int32_t)BRIGHTNESS_SENSOR_CAL_RAW_AT_100_PERCENT;
-        delta = (int32_t)BRIGHTNESS_SENSOR_CAL_RAW_AT_0_PERCENT -
-                (int32_t)calibrated_counts;
-    }
-    else
-    {
-        return 0u;
+        return current_q16;
     }
 
-    permille = (delta * 1000) / range;
-    return Backlight_App_ClampPermille(permille);
+    if (tau_ms <= 1u)
+    {
+        return target_q16;
+    }
+
+    diff_q16 = (int32_t)target_q16 - (int32_t)current_q16;
+    step_q16 = (int32_t)(((int64_t)diff_q16 * (int64_t)dt_ms) /
+                         (int64_t)tau_ms);
+
+    if (step_q16 == 0)
+    {
+        step_q16 = (diff_q16 > 0) ? 1 : -1;
+    }
+
+    next_q16 = (int32_t)current_q16 + step_q16;
+
+    if (((diff_q16 > 0) && (next_q16 > (int32_t)target_q16)) ||
+        ((diff_q16 < 0) && (next_q16 < (int32_t)target_q16)))
+    {
+        next_q16 = (int32_t)target_q16;
+    }
+
+    if (next_q16 < 0)
+    {
+        next_q16 = 0;
+    }
+    else if (next_q16 > 65535)
+    {
+        next_q16 = 65535;
+    }
+
+    return (uint16_t)next_q16;
 }
 
 /* -------------------------------------------------------------------------- */
-/*  내부 유틸: App 단 센서 보정 적용                                           */
-/*                                                                            */
-/*  순서                                                                      */
-/*  1) APP_STATE.brightness.calibrated_counts를 읽는다.                        */
-/*  2) App-level count bias를 더한다.                                          */
-/*  3) 다시 0~1000 permille로 정규화한다.                                      */
-/*  4) App-level permille bias를 한 번 더 더한다.                              */
-/*                                                                            */
-/*  이렇게 두 단계를 분리해 둔 이유                                            */
-/*  - 현장/기구/광학 편차로 인해 raw counts 기준의 밀어주기가 필요한 경우      */
-/*  - 사용자 설정 메뉴에서 "조금 더 밝게 / 조금 더 어둡게" 같은 UX bias가      */
-/*    필요한 경우                                                             */
-/*  를 서로 분리해서 다루기 위해서다.                                          */
+/*  내부 유틸: AUTO-CONT 곡선 평가                                              */
 /* -------------------------------------------------------------------------- */
-static uint16_t Backlight_App_ComputeCorrectedSensorPermille(uint16_t calibrated_counts)
-{
-    uint16_t biased_counts;
-    uint16_t normalized_permille;
-    int32_t  biased_permille;
-
-    biased_counts = Backlight_App_ClampToU12((int32_t)calibrated_counts +
-                                             (int32_t)g_backlight_app_tuning.sensor_bias_counts);
-
-    normalized_permille = Backlight_App_NormalizeCountsToPermille(biased_counts);
-
-    biased_permille = (int32_t)normalized_permille +
-                      (int32_t)g_backlight_app_tuning.sensor_bias_permille;
-
-    return Backlight_App_ClampPermille(biased_permille);
-}
-
-/* -------------------------------------------------------------------------- */
-/*  내부 유틸: 주변광 mapping curve 평가                                       */
-/*                                                                            */
-/*  두 테이블 사이를 선형 보간한다.                                            */
-/*  curve 포인트를 나중에 settings/calibration 메뉴에서 바꾸고 싶다면          */
-/*  이 함수는 그대로 두고 테이블 값만 바꾸면 된다.                             */
-/* -------------------------------------------------------------------------- */
-static uint16_t Backlight_App_MapAmbientToLinearBrightness(uint16_t sensor_permille)
+static uint8_t Backlight_App_MapContinuousAmbientToBrightnessPercent(uint8_t sensor_percent)
 {
     uint32_t index;
 
-    if (sensor_permille <= g_backlight_app_curve_sensor_permille[0])
+    if (sensor_percent <= s_backlight_cont_sensor_percent[0])
     {
-        return g_backlight_app_curve_target_permille[0];
+        return s_backlight_cont_brightness_percent[0];
     }
 
-    for (index = 0u; index < (BACKLIGHT_APP_CURVE_POINT_COUNT - 1u); index++)
+    for (index = 0u; index < (BACKLIGHT_APP_CONT_CURVE_COUNT - 1u); ++index)
     {
-        uint16_t x0;
-        uint16_t x1;
-        uint16_t y0;
-        uint16_t y1;
-        uint32_t fraction_num;
-        uint32_t fraction_den;
+        uint8_t x0;
+        uint8_t x1;
+        uint8_t y0;
+        uint8_t y1;
+        uint32_t numerator;
+        uint32_t denominator;
         uint32_t interpolated;
 
-        x0 = g_backlight_app_curve_sensor_permille[index];
-        x1 = g_backlight_app_curve_sensor_permille[index + 1u];
+        x0 = s_backlight_cont_sensor_percent[index];
+        x1 = s_backlight_cont_sensor_percent[index + 1u];
 
-        if (sensor_permille > x1)
+        if (sensor_percent > x1)
         {
             continue;
         }
 
-        y0 = g_backlight_app_curve_target_permille[index];
-        y1 = g_backlight_app_curve_target_permille[index + 1u];
+        y0 = s_backlight_cont_brightness_percent[index];
+        y1 = s_backlight_cont_brightness_percent[index + 1u];
 
-        if (x1 <= x0)
+        numerator = ((uint32_t)(sensor_percent - x0) * (uint32_t)(y1 - y0));
+        denominator = (uint32_t)(x1 - x0);
+        interpolated = (uint32_t)y0 + ((numerator + (denominator / 2u)) / denominator);
+
+        if (interpolated > 100u)
         {
-            return y0;
+            interpolated = 100u;
         }
 
-        fraction_num = (uint32_t)(sensor_permille - x0);
-        fraction_den = (uint32_t)(x1 - x0);
-
-        interpolated = ((uint32_t)y0 * (fraction_den - fraction_num)) +
-                       ((uint32_t)y1 * fraction_num);
-        interpolated = (interpolated + (fraction_den / 2u)) / fraction_den;
-
-        return (uint16_t)interpolated;
+        return (uint8_t)interpolated;
     }
 
-    return g_backlight_app_curve_target_permille[BACKLIGHT_APP_CURVE_POINT_COUNT - 1u];
+    return s_backlight_cont_brightness_percent[BACKLIGHT_APP_CONT_CURVE_COUNT - 1u];
 }
 
 /* -------------------------------------------------------------------------- */
-/*  내부 유틸: user bias와 min/max를 최종 반영                                  */
+/*  내부 유틸: smoothness -> tau                                               */
 /* -------------------------------------------------------------------------- */
-static uint16_t Backlight_App_ApplyUserBiasAndLimits(uint16_t base_linear_permille)
+static uint16_t Backlight_App_GetTauFromSmoothness(uint8_t smoothness)
 {
     uint8_t index;
-    int32_t biased_value;
 
-    index = Backlight_App_BiasIndexFromSteps(g_backlight_app_tuning.user_bias_steps);
-
-    biased_value = (int32_t)base_linear_permille +
-                   (int32_t)g_backlight_app_bias_step_offsets_permille[index];
-
-    return Backlight_App_ClampLinearRange(biased_value);
+    index = Backlight_App_ClampSmoothnessS32(smoothness);
+    return s_backlight_smoothness_tau_ms[index - 1u];
 }
 
 /* -------------------------------------------------------------------------- */
-/*  내부 유틸: 센서 필터                                                       */
+/*  내부 유틸: AUTO-DIMMER zone 계산                                            */
 /*                                                                            */
-/*  alpha = 0   -> 이전값 유지                                                 */
-/*  alpha = 1000-> 새 값 즉시 반영                                             */
-/*                                                                            */
-/*  여기서 필터는 "노이즈를 줄이는 1차 필터"일 뿐이다.                         */
-/*  실제로 화면 밝기가 바뀌는지 여부는 아래 target decision 로직이             */
-/*  따로 한 번 더 판단한다.                                                    */
+/*  zone 경계는 3% 히스테리시스를 넣어 flicker를 방지한다.                     */
 /* -------------------------------------------------------------------------- */
-static uint16_t Backlight_App_FilterSensorPermille(uint16_t previous_permille,
-                                                   uint16_t current_permille)
+static uint8_t Backlight_App_DetermineDimmerZone(
+    uint8_t previous_zone,
+    uint8_t sensor_percent,
+    uint8_t night_threshold_percent,
+    uint8_t super_night_threshold_percent)
 {
-    uint16_t alpha;
-    int32_t  delta;
-    int32_t  filtered;
+    uint8_t hysteresis;
+    uint8_t night_thr;
+    uint8_t super_thr;
 
-    alpha = g_backlight_app_tuning.sensor_filter_alpha_permille;
+    hysteresis = BACKLIGHT_APP_DIMMER_HYSTERESIS_PERCENT;
+    night_thr = Backlight_App_ClampPercentS32((int32_t)night_threshold_percent);
+    super_thr = Backlight_App_ClampPercentS32((int32_t)super_night_threshold_percent);
 
-    if (alpha >= 1000u)
+    if (super_thr > night_thr)
     {
-        return current_permille;
+        super_thr = night_thr;
     }
 
-    delta = (int32_t)current_permille - (int32_t)previous_permille;
-    filtered = (int32_t)previous_permille + ((delta * (int32_t)alpha) / 1000);
+    switch (previous_zone)
+    {
+        case BACKLIGHT_APP_DIMMER_ZONE_SUPER_NIGHT:
+            if (sensor_percent > (uint8_t)(super_thr + hysteresis))
+            {
+                if (sensor_percent > (uint8_t)(night_thr + hysteresis))
+                {
+                    return BACKLIGHT_APP_DIMMER_ZONE_DAY;
+                }
+                return BACKLIGHT_APP_DIMMER_ZONE_NIGHT;
+            }
+            return BACKLIGHT_APP_DIMMER_ZONE_SUPER_NIGHT;
 
-    return Backlight_App_ClampPermille(filtered);
+        case BACKLIGHT_APP_DIMMER_ZONE_NIGHT:
+            if (sensor_percent <= (uint8_t)((super_thr > hysteresis) ?
+                                            (super_thr - hysteresis) : 0u))
+            {
+                return BACKLIGHT_APP_DIMMER_ZONE_SUPER_NIGHT;
+            }
+            if (sensor_percent > (uint8_t)(night_thr + hysteresis))
+            {
+                return BACKLIGHT_APP_DIMMER_ZONE_DAY;
+            }
+            return BACKLIGHT_APP_DIMMER_ZONE_NIGHT;
+
+        case BACKLIGHT_APP_DIMMER_ZONE_DAY:
+        default:
+            if (sensor_percent <= (uint8_t)((super_thr > hysteresis) ?
+                                            (super_thr - hysteresis) : 0u))
+            {
+                return BACKLIGHT_APP_DIMMER_ZONE_SUPER_NIGHT;
+            }
+            if (sensor_percent <= (uint8_t)((night_thr > hysteresis) ?
+                                            (night_thr - hysteresis) : 0u))
+            {
+                return BACKLIGHT_APP_DIMMER_ZONE_NIGHT;
+            }
+            return BACKLIGHT_APP_DIMMER_ZONE_DAY;
+    }
 }
 
 /* -------------------------------------------------------------------------- */
-/*  내부 유틸: 실제 화면 밝기 slew                                             */
-/*                                                                            */
-/*  target이 이미 확정된 뒤에도, 화면 밝기가 순간이동처럼 바뀌지 않도록         */
-/*  별도의 올라감/내려감 속도를 둔다.                                          */
+/*  내부 유틸: settings 정규화                                                 */
 /* -------------------------------------------------------------------------- */
-static uint16_t Backlight_App_SlewLinearBrightness(uint16_t current_linear,
-                                                   uint16_t target_linear,
-                                                   uint32_t dt_ms)
+static void Backlight_App_NormalizeSettings(app_settings_t *settings)
 {
-    uint32_t rate_per_sec;
-    uint32_t step;
-
-    if (current_linear == target_linear)
+    if (settings == 0)
     {
-        return current_linear;
+        return;
     }
 
-    if (dt_ms == 0u)
+    if (settings->backlight.auto_mode > (uint8_t)APP_BACKLIGHT_AUTO_MODE_DIMMER)
     {
-        dt_ms = 1u;
+        settings->backlight.auto_mode = (uint8_t)APP_BACKLIGHT_AUTO_MODE_CONTINUOUS;
     }
 
-    /* ---------------------------------------------------------------------- */
-    /*  디버깅 중 breakpoint로 멈췄다가 돌아오면 dt가 매우 커질 수 있으므로      */
-    /*  한 번에 과도하게 점프하지 않게 상한을 둔다.                             */
-    /* ---------------------------------------------------------------------- */
-    if (dt_ms > 250u)
+    settings->backlight.continuous_bias_steps =
+        Backlight_App_ClampBiasStepsS32(settings->backlight.continuous_bias_steps);
+    settings->backlight.transition_smoothness =
+        Backlight_App_ClampSmoothnessS32(settings->backlight.transition_smoothness);
+    settings->backlight.night_threshold_percent =
+        Backlight_App_ClampPercentS32(settings->backlight.night_threshold_percent);
+    settings->backlight.super_night_threshold_percent =
+        Backlight_App_ClampPercentS32(settings->backlight.super_night_threshold_percent);
+    settings->backlight.night_brightness_percent =
+        Backlight_App_ClampPercentS32(settings->backlight.night_brightness_percent);
+    settings->backlight.super_night_brightness_percent =
+        Backlight_App_ClampPercentS32(settings->backlight.super_night_brightness_percent);
+
+    if (settings->backlight.super_night_threshold_percent >
+        settings->backlight.night_threshold_percent)
     {
-        dt_ms = 250u;
+        settings->backlight.super_night_threshold_percent =
+            settings->backlight.night_threshold_percent;
+    }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  내부 유틸: 현재 settings에서 bias 결정                                     */
+/* -------------------------------------------------------------------------- */
+static int8_t Backlight_App_GetEffectiveBiasSteps(
+    const app_settings_t *settings)
+{
+    if (s_backlight_bias_override_valid != 0u)
+    {
+        return Backlight_App_ClampBiasStepsS32(s_backlight_bias_override_steps);
     }
 
-    if (target_linear > current_linear)
+    if (settings == 0)
     {
-        rate_per_sec = g_backlight_app_tuning.brighten_slew_permille_per_sec;
+        return 0;
+    }
+
+    return Backlight_App_ClampBiasStepsS32(
+        settings->backlight.continuous_bias_steps);
+}
+
+/* -------------------------------------------------------------------------- */
+/*  내부 유틸: first valid sensor / stale 판정                                 */
+/* -------------------------------------------------------------------------- */
+static bool Backlight_App_IsSensorFresh(const app_brightness_state_t *brightness,
+                                        uint32_t now_ms)
+{
+    if (brightness == 0)
+    {
+        return false;
+    }
+
+    if (brightness->valid == false)
+    {
+        return false;
+    }
+
+    if ((now_ms - brightness->last_update_ms) > BACKLIGHT_APP_SENSOR_STALE_TIMEOUT_MS)
+    {
+        return false;
+    }
+
+    return true;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  내부 유틸: runtime에 sensor snapshot 반영                                  */
+/* -------------------------------------------------------------------------- */
+static void Backlight_App_UpdateSensorRuntime(const app_brightness_state_t *brightness,
+                                              uint32_t now_ms,
+                                              uint32_t dt_ms)
+{
+    uint16_t raw_sensor_permille;
+    uint16_t current_filtered_q16;
+    uint16_t target_filtered_q16;
+    uint16_t next_filtered_q16;
+
+    if ((brightness == 0) ||
+        (Backlight_App_IsSensorFresh(brightness, now_ms) == false))
+    {
+        g_backlight_app_runtime.sensor_valid = false;
+        return;
+    }
+
+    raw_sensor_permille = brightness->normalized_permille;
+    if (raw_sensor_permille > 1000u)
+    {
+        raw_sensor_permille = 1000u;
+    }
+
+    g_backlight_app_runtime.sensor_valid = true;
+    g_backlight_app_runtime.last_sensor_update_ms = brightness->last_update_ms;
+    g_backlight_app_runtime.sensor_raw_permille = raw_sensor_permille;
+    g_backlight_app_runtime.sensor_percent = brightness->brightness_percent;
+
+    current_filtered_q16 = Backlight_App_PermilleToQ16(
+        g_backlight_app_runtime.sensor_filtered_permille);
+    target_filtered_q16 = Backlight_App_PermilleToQ16(raw_sensor_permille);
+
+    if (g_backlight_app_runtime.sensor_filtered_permille == 0u &&
+        g_backlight_app_runtime.last_update_ms == 0u)
+    {
+        next_filtered_q16 = target_filtered_q16;
     }
     else
     {
-        rate_per_sec = g_backlight_app_tuning.darken_slew_permille_per_sec;
+        next_filtered_q16 = Backlight_App_ApproachQ16(current_filtered_q16,
+                                                      target_filtered_q16,
+                                                      dt_ms,
+                                                      BACKLIGHT_APP_SENSOR_FILTER_TAU_MS);
     }
 
-    step = (rate_per_sec * dt_ms) / 1000u;
-    if (step == 0u)
-    {
-        step = 1u;
-    }
-
-    if (target_linear > current_linear)
-    {
-        uint32_t next_value;
-
-        next_value = (uint32_t)current_linear + step;
-        if (next_value > (uint32_t)target_linear)
-        {
-            next_value = (uint32_t)target_linear;
-        }
-
-        return (uint16_t)next_value;
-    }
-    else
-    {
-        int32_t next_value;
-
-        next_value = (int32_t)current_linear - (int32_t)step;
-        if (next_value < (int32_t)target_linear)
-        {
-            next_value = (int32_t)target_linear;
-        }
-
-        return (uint16_t)next_value;
-    }
+    g_backlight_app_runtime.sensor_filtered_permille =
+        (uint16_t)((((uint32_t)next_filtered_q16) * 1000u + (65535u / 2u)) / 65535u);
 }
 
 /* -------------------------------------------------------------------------- */
-/*  내부 유틸: 첫 유효 센서값으로 상태 seed                                     */
-/*                                                                            */
-/*  중요                                                                      */
-/*  - "첫 valid sample"은 noise 억제용 기준점이 아직 없으므로                   */
-/*    그 값을 바로 filter/commit의 출발점으로 사용한다.                        */
-/*  - 다만 applied_linear_permille은 startup brightness에서 출발해도 되므로,    */
-/*    여기서는 target만 확정하고 실제 적용은 slew가 맡는다.                    */
+/*  내부 유틸: AUTO-CONT target 계산                                           */
 /* -------------------------------------------------------------------------- */
-static void Backlight_App_SeedFromFirstValidSensor(uint32_t now_ms,
-                                                   uint16_t corrected_sensor_permille)
+static uint16_t Backlight_App_ComputeContinuousTargetQ16(const app_settings_t *settings)
 {
-    uint16_t candidate_linear;
-    uint16_t target_linear;
+    uint8_t filtered_sensor_percent;
+    uint8_t base_brightness_percent;
+    int8_t bias_steps;
+    int32_t biased_percent;
 
-    g_backlight_app_runtime.sensor_seeded             = true;
-    g_backlight_app_runtime.sensor_valid              = true;
-    g_backlight_app_runtime.last_sensor_sample_ms     = now_ms;
+    filtered_sensor_percent =
+        (uint8_t)((g_backlight_app_runtime.sensor_filtered_permille + 5u) / 10u);
+    base_brightness_percent =
+        Backlight_App_MapContinuousAmbientToBrightnessPercent(filtered_sensor_percent);
 
-    g_backlight_app_runtime.sensor_corrected_permille = corrected_sensor_permille;
-    g_backlight_app_runtime.sensor_filtered_permille  = corrected_sensor_permille;
-    g_backlight_app_runtime.committed_ambient_permille = corrected_sensor_permille;
-    g_backlight_app_runtime.pending_ambient_permille   = corrected_sensor_permille;
+    bias_steps = Backlight_App_GetEffectiveBiasSteps(settings);
+    biased_percent = (int32_t)base_brightness_percent +
+                     ((int32_t)bias_steps * BACKLIGHT_APP_CONTINUOUS_BIAS_PERCENT_STEP);
 
-    candidate_linear = Backlight_App_MapAmbientToLinearBrightness(corrected_sensor_permille);
-    target_linear    = Backlight_App_ApplyUserBiasAndLimits(candidate_linear);
-
-    g_backlight_app_runtime.candidate_linear_permille      = target_linear;
-    g_backlight_app_runtime.pending_target_linear_permille = target_linear;
-    g_backlight_app_runtime.target_linear_permille         = target_linear;
-    g_backlight_app_runtime.pending_retarget               = false;
-    g_backlight_app_runtime.pending_direction              = 0;
-    g_backlight_app_runtime.last_target_commit_ms          = now_ms;
+    g_backlight_app_runtime.active_bias_steps = bias_steps;
+    return Backlight_App_PercentToQ16(Backlight_App_ClampPercentS32(biased_percent));
 }
 
 /* -------------------------------------------------------------------------- */
-/*  내부 유틸: 현재 filtered ambient 기준으로 후보 밝기 계산                    */
+/*  내부 유틸: AUTO-DIMMER target 계산                                          */
 /* -------------------------------------------------------------------------- */
-static uint16_t Backlight_App_RebuildCandidateFromFilteredAmbient(void)
+static uint16_t Backlight_App_ComputeDimmerTargetQ16(const app_settings_t *settings)
 {
-    uint16_t curve_target;
+    uint8_t sensor_percent;
+    uint8_t zone;
+    uint8_t brightness_percent;
 
-    curve_target = Backlight_App_MapAmbientToLinearBrightness(
-                       g_backlight_app_runtime.sensor_filtered_permille);
+    sensor_percent =
+        (uint8_t)((g_backlight_app_runtime.sensor_filtered_permille + 5u) / 10u);
 
-    return Backlight_App_ApplyUserBiasAndLimits(curve_target);
-}
+    zone = Backlight_App_DetermineDimmerZone(
+        g_backlight_app_runtime.active_zone,
+        sensor_percent,
+        settings->backlight.night_threshold_percent,
+        settings->backlight.super_night_threshold_percent);
 
-/* -------------------------------------------------------------------------- */
-/*  내부 유틸: 자동 밝기 target 결정 정책                                       */
-/*                                                                            */
-/*  이 함수가 스마트폰류 UX와 가장 가까운 부분이다.                            */
-/*                                                                            */
-/*  규칙                                                                      */
-/*  1) 작은 주변광 변화는 무시                                                  */
-/*  2) 의미 있는 변화라도 hold time 동안 유지되어야 함                         */
-/*  3) 밝아질 때 / 어두워질 때 임계치와 hold를 분리                            */
-/*  4) target 확정 직후에는 잠깐 재판정을 쉬어 chattering 방지                 */
-/* -------------------------------------------------------------------------- */
-static void Backlight_App_UpdateAutoTargetPolicy(uint32_t now_ms)
-{
-    uint16_t candidate_linear;
-    uint16_t target_delta;
-    uint16_t ambient_delta;
-    uint16_t threshold_permille;
-    uint16_t hold_ms;
-    int8_t   direction;
+    g_backlight_app_runtime.active_zone = zone;
+    g_backlight_app_runtime.active_bias_steps = 0;
 
-    candidate_linear = Backlight_App_RebuildCandidateFromFilteredAmbient();
-    g_backlight_app_runtime.candidate_linear_permille = candidate_linear;
-
-    direction = 0;
-    if (candidate_linear > g_backlight_app_runtime.target_linear_permille)
+    switch (zone)
     {
-        direction = 1;
-    }
-    else if (candidate_linear < g_backlight_app_runtime.target_linear_permille)
-    {
-        direction = -1;
+        case BACKLIGHT_APP_DIMMER_ZONE_SUPER_NIGHT:
+            brightness_percent = settings->backlight.super_night_brightness_percent;
+            break;
+
+        case BACKLIGHT_APP_DIMMER_ZONE_NIGHT:
+            brightness_percent = settings->backlight.night_brightness_percent;
+            break;
+
+        case BACKLIGHT_APP_DIMMER_ZONE_DAY:
+        default:
+            brightness_percent = 100u;
+            break;
     }
 
-    /* ---------------------------------------------------------------------- */
-    /*  사용자가 settings에서 bias 단계를 바꾼 경우                             */
-    /*  - 주변광 변화와 무관하게 현재 ambient 기준 후보를 즉시 반영한다.        */
-    /* ---------------------------------------------------------------------- */
-    if (g_backlight_app_runtime.applied_user_bias_steps !=
-        g_backlight_app_tuning.user_bias_steps)
-    {
-        g_backlight_app_runtime.target_linear_permille          = candidate_linear;
-        g_backlight_app_runtime.pending_target_linear_permille  = candidate_linear;
-        g_backlight_app_runtime.pending_retarget                = false;
-        g_backlight_app_runtime.pending_direction               = 0;
-        g_backlight_app_runtime.last_target_commit_ms           = now_ms;
-        g_backlight_app_runtime.committed_ambient_permille      =
-            g_backlight_app_runtime.sensor_filtered_permille;
-        return;
-    }
-
-    if ((now_ms - g_backlight_app_runtime.last_target_commit_ms) <
-        g_backlight_app_tuning.post_commit_ignore_ms)
-    {
-        g_backlight_app_runtime.pending_retarget  = false;
-        g_backlight_app_runtime.pending_direction = 0;
-        return;
-    }
-
-    target_delta = Backlight_App_AbsDiffU16(candidate_linear,
-                                            g_backlight_app_runtime.target_linear_permille);
-    ambient_delta = Backlight_App_AbsDiffU16(g_backlight_app_runtime.sensor_filtered_permille,
-                                             g_backlight_app_runtime.committed_ambient_permille);
-
-    if (direction > 0)
-    {
-        threshold_permille = g_backlight_app_tuning.ambient_change_threshold_up_permille;
-        hold_ms            = g_backlight_app_tuning.brighten_hold_ms;
-    }
-    else if (direction < 0)
-    {
-        threshold_permille = g_backlight_app_tuning.ambient_change_threshold_down_permille;
-        hold_ms            = g_backlight_app_tuning.darken_hold_ms;
-    }
-    else
-    {
-        g_backlight_app_runtime.pending_retarget  = false;
-        g_backlight_app_runtime.pending_direction = 0;
-        return;
-    }
-
-    if ((ambient_delta < threshold_permille) ||
-        (target_delta < g_backlight_app_tuning.target_change_threshold_permille))
-    {
-        g_backlight_app_runtime.pending_retarget  = false;
-        g_backlight_app_runtime.pending_direction = 0;
-        return;
-    }
-
-    if ((g_backlight_app_runtime.pending_retarget == false) ||
-        (g_backlight_app_runtime.pending_direction != direction))
-    {
-        g_backlight_app_runtime.pending_retarget  = true;
-        g_backlight_app_runtime.pending_direction = direction;
-        g_backlight_app_runtime.pending_since_ms  = now_ms;
-    }
-
-    g_backlight_app_runtime.pending_ambient_permille       =
-        g_backlight_app_runtime.sensor_filtered_permille;
-    g_backlight_app_runtime.pending_target_linear_permille = candidate_linear;
-
-    if ((now_ms - g_backlight_app_runtime.pending_since_ms) >= hold_ms)
-    {
-        g_backlight_app_runtime.target_linear_permille    =
-            g_backlight_app_runtime.pending_target_linear_permille;
-        g_backlight_app_runtime.committed_ambient_permille =
-            g_backlight_app_runtime.pending_ambient_permille;
-        g_backlight_app_runtime.pending_retarget          = false;
-        g_backlight_app_runtime.pending_direction         = 0;
-        g_backlight_app_runtime.last_target_commit_ms     = now_ms;
-    }
+    return Backlight_App_PercentToQ16(brightness_percent);
 }
 
 /* -------------------------------------------------------------------------- */
 /*  공개 API: init                                                             */
-/*                                                                            */
-/*  main.c에서 가능한 한 이른 시점에 호출하는 것을 권장한다.                   */
-/*  이유                                                                      */
-/*  - gpio.c가 LCD_BACKLIGHT 핀을 low로 내려둔 상태이므로                       */
-/*  - 화면 초기화/부트 로고/에러 화면이 실제로 보이려면                         */
-/*    백라이트 PWM이 먼저 올라와야 한다.                                       */
 /* -------------------------------------------------------------------------- */
 void Backlight_App_Init(void)
 {
-    uint16_t startup_linear;
+    uint16_t startup_q16;
 
     memset((void *)&g_backlight_app_runtime, 0, sizeof(g_backlight_app_runtime));
 
-    startup_linear = Backlight_App_ClampLinearRange(
-                         (int32_t)g_backlight_app_tuning.startup_linear_permille);
-
-    g_backlight_app_runtime.initialized            = true;
-    g_backlight_app_runtime.sensor_seeded          = false;
-    g_backlight_app_runtime.sensor_valid           = false;
-    g_backlight_app_runtime.pending_retarget       = false;
-    g_backlight_app_runtime.pending_direction      = 0;
-    g_backlight_app_runtime.auto_mode_active       =
-        (g_backlight_app_tuning.auto_enabled != 0u) ? 1u : 0u;
-    g_backlight_app_runtime.manual_linear_permille =
-        Backlight_App_ClampLinearRange((int32_t)BACKLIGHT_APP_DEFAULT_MANUAL_LINEAR_PERMILLE);
-
-    g_backlight_app_runtime.target_linear_permille  = startup_linear;
-    g_backlight_app_runtime.applied_linear_permille = startup_linear;
-    g_backlight_app_runtime.applied_user_bias_steps = g_backlight_app_tuning.user_bias_steps;
-    g_backlight_app_runtime.last_update_ms          = HAL_GetTick();
-    g_backlight_app_runtime.last_target_commit_ms   = HAL_GetTick();
-
     Backlight_Driver_Init();
-    Backlight_Driver_SetLinearPermille(startup_linear);
+
+    startup_q16 = Backlight_App_PercentToQ16(BACKLIGHT_APP_STARTUP_FALLBACK_PERCENT);
+
+    g_backlight_app_runtime.initialized = true;
+    g_backlight_app_runtime.sensor_valid = false;
+    g_backlight_app_runtime.manual_override_enabled = false;
+    g_backlight_app_runtime.active_mode = (uint8_t)BACKLIGHT_APP_ACTIVE_MODE_AUTO_CONTINUOUS;
+    g_backlight_app_runtime.active_zone = (uint8_t)BACKLIGHT_APP_DIMMER_ZONE_DAY;
+    g_backlight_app_runtime.active_bias_steps = 0;
+    g_backlight_app_runtime.active_smoothness = BACKLIGHT_APP_FALLBACK_SMOOTHNESS;
+    g_backlight_app_runtime.last_update_ms = 0u;
+    g_backlight_app_runtime.last_sensor_update_ms = 0u;
+    g_backlight_app_runtime.sensor_raw_permille = 0u;
+    g_backlight_app_runtime.sensor_filtered_permille = 0u;
+    g_backlight_app_runtime.sensor_percent = 0u;
+    g_backlight_app_runtime.target_linear_q16 = startup_q16;
+    g_backlight_app_runtime.applied_linear_q16 = startup_q16;
+    g_backlight_app_runtime.manual_override_q16 = startup_q16;
+    g_backlight_app_runtime.target_linear_percent =
+        Backlight_App_Q16ToPercent(startup_q16);
+    g_backlight_app_runtime.applied_linear_percent =
+        Backlight_App_Q16ToPercent(startup_q16);
+
+    Backlight_Driver_SetLinearQ16(startup_q16);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -723,162 +620,127 @@ void Backlight_App_Init(void)
 /* -------------------------------------------------------------------------- */
 void Backlight_App_SetAutoEnabled(bool enable)
 {
-    g_backlight_app_tuning.auto_enabled = (enable == true) ? 1u : 0u;
+    if (enable != false)
+    {
+        g_backlight_app_runtime.manual_override_enabled = false;
+        return;
+    }
+
+    g_backlight_app_runtime.manual_override_enabled = true;
+    g_backlight_app_runtime.active_mode =
+        (uint8_t)BACKLIGHT_APP_ACTIVE_MODE_MANUAL_OVERRIDE;
 }
 
 /* -------------------------------------------------------------------------- */
-/*  공개 API: manual brightness 설정                                           */
+/*  공개 API: manual brightness                                                */
 /* -------------------------------------------------------------------------- */
 void Backlight_App_SetManualBrightnessPermille(uint16_t linear_permille)
 {
-    g_backlight_app_runtime.manual_linear_permille =
-        Backlight_App_ClampLinearRange((int32_t)linear_permille);
+    g_backlight_app_runtime.manual_override_q16 =
+        Backlight_App_PermilleToQ16(Backlight_App_ClampPermilleS32(linear_permille));
+    g_backlight_app_runtime.manual_override_enabled = true;
+    g_backlight_app_runtime.active_mode =
+        (uint8_t)BACKLIGHT_APP_ACTIVE_MODE_MANUAL_OVERRIDE;
 }
 
 /* -------------------------------------------------------------------------- */
-/*  공개 API: user bias 단계 설정                                              */
+/*  공개 API: user bias override                                               */
 /* -------------------------------------------------------------------------- */
 void Backlight_App_SetUserBiasSteps(int8_t bias_steps)
 {
-    if (bias_steps < -2)
-    {
-        bias_steps = -2;
-    }
-
-    if (bias_steps > 2)
-    {
-        bias_steps = 2;
-    }
-
-    g_backlight_app_tuning.user_bias_steps = bias_steps;
+    s_backlight_bias_override_steps = Backlight_App_ClampBiasStepsS32(bias_steps);
+    s_backlight_bias_override_valid = 1u;
 }
 
 /* -------------------------------------------------------------------------- */
-/*  공개 API: periodic task                                                    */
-/*                                                                            */
-/*  main loop 권장 호출 위치                                                   */
-/*  - Brightness_Sensor_Task(now_ms) 바로 뒤                                   */
-/*  이유                                                                      */
-/*  - 같은 loop에서 갱신된 APP_STATE.brightness를                              */
-/*    최대한 신선한 상태로 읽기 위함                                           */
+/*  공개 API: task                                                             */
 /* -------------------------------------------------------------------------- */
 void Backlight_App_Task(uint32_t now_ms)
 {
+    app_settings_t         settings_snapshot;
     app_brightness_state_t brightness_snapshot;
-    uint32_t dt_ms;
-    bool     auto_enabled;
-    bool     sensor_fresh;
+    uint32_t               dt_ms;
+    uint16_t               tau_ms;
+    uint16_t               target_q16;
 
     if (g_backlight_app_runtime.initialized == false)
     {
         Backlight_App_Init();
     }
 
-    dt_ms = now_ms - g_backlight_app_runtime.last_update_ms;
-    g_backlight_app_runtime.last_update_ms = now_ms;
-
-    auto_enabled = (g_backlight_app_tuning.auto_enabled != 0u) ? true : false;
-    g_backlight_app_runtime.auto_mode_active = auto_enabled ? 1u : 0u;
-
-    sensor_fresh = false;
-    memset(&brightness_snapshot, 0, sizeof(brightness_snapshot));
-
-    if (auto_enabled == true)
+    if (g_backlight_app_runtime.last_update_ms == 0u)
     {
-        APP_STATE_CopyBrightnessSnapshot(&brightness_snapshot);
-
-        if ((brightness_snapshot.valid == true) &&
-            ((now_ms - brightness_snapshot.last_update_ms) <=
-             g_backlight_app_tuning.sample_stale_timeout_ms))
-        {
-            uint16_t corrected_sensor_permille;
-            uint16_t filtered_sensor_permille;
-
-            sensor_fresh = true;
-            g_backlight_app_runtime.sensor_valid = true;
-            g_backlight_app_runtime.last_sensor_sample_ms = brightness_snapshot.last_update_ms;
-            g_backlight_app_runtime.sensor_raw_counts = brightness_snapshot.calibrated_counts;
-
-            corrected_sensor_permille =
-                Backlight_App_ComputeCorrectedSensorPermille(
-                    brightness_snapshot.calibrated_counts);
-
-            g_backlight_app_runtime.sensor_corrected_permille = corrected_sensor_permille;
-
-            if (g_backlight_app_runtime.sensor_seeded == false)
-            {
-                Backlight_App_SeedFromFirstValidSensor(now_ms,
-                                                      corrected_sensor_permille);
-            }
-            else
-            {
-                filtered_sensor_permille =
-                    Backlight_App_FilterSensorPermille(
-                        g_backlight_app_runtime.sensor_filtered_permille,
-                        corrected_sensor_permille);
-
-                g_backlight_app_runtime.sensor_filtered_permille = filtered_sensor_permille;
-            }
-        }
-        else
-        {
-            g_backlight_app_runtime.sensor_valid = false;
-        }
-
-        if (g_backlight_app_runtime.sensor_seeded == true)
-        {
-            /* ------------------------------------------------------------------ */
-            /*  첫 유효 센서값을 한 번이라도 받은 뒤에는                           */
-            /*  새 샘플이 잠깐 끊기더라도 마지막 filtered ambient를 유지한다.      */
-            /*  즉, 센서 공백 때문에 화면이 갑자기 fallback으로 튀지 않는다.       */
-            /* ------------------------------------------------------------------ */
-            Backlight_App_UpdateAutoTargetPolicy(now_ms);
-        }
-        else
-        {
-            /* ------------------------------------------------------------------ */
-            /*  아직 센서를 한 번도 믿을 수 없을 때의 임시 목표 밝기               */
-            /* ------------------------------------------------------------------ */
-            g_backlight_app_runtime.target_linear_permille =
-                Backlight_App_ApplyUserBiasAndLimits(
-                    g_backlight_app_tuning.invalid_sensor_fallback_permille);
-            g_backlight_app_runtime.candidate_linear_permille =
-                g_backlight_app_runtime.target_linear_permille;
-            g_backlight_app_runtime.pending_retarget  = false;
-            g_backlight_app_runtime.pending_direction = 0;
-        }
+        dt_ms = 1u;
     }
     else
     {
-        /* ---------------------------------------------------------------------- */
-        /*  auto off면 주변광 정책을 모두 멈추고                                  */
-        /*  manual brightness를 목표값으로 사용한다.                              */
-        /* ---------------------------------------------------------------------- */
-        g_backlight_app_runtime.sensor_valid              = false;
-        g_backlight_app_runtime.pending_retarget          = false;
-        g_backlight_app_runtime.pending_direction         = 0;
-        g_backlight_app_runtime.candidate_linear_permille =
-            Backlight_App_ClampLinearRange(
-                (int32_t)g_backlight_app_runtime.manual_linear_permille);
-        g_backlight_app_runtime.target_linear_permille =
-            g_backlight_app_runtime.candidate_linear_permille;
+        dt_ms = now_ms - g_backlight_app_runtime.last_update_ms;
+        if (dt_ms == 0u)
+        {
+            return;
+        }
     }
 
-    g_backlight_app_runtime.applied_linear_permille =
-        Backlight_App_SlewLinearBrightness(
-            g_backlight_app_runtime.applied_linear_permille,
-            g_backlight_app_runtime.target_linear_permille,
-            dt_ms);
+    APP_STATE_CopySettingsSnapshot(&settings_snapshot);
+    APP_STATE_CopyBrightnessSnapshot(&brightness_snapshot);
 
-    Backlight_Driver_SetLinearPermille(
-        g_backlight_app_runtime.applied_linear_permille);
+    Backlight_App_NormalizeSettings(&settings_snapshot);
+    Backlight_App_UpdateSensorRuntime(&brightness_snapshot, now_ms, dt_ms);
 
-    g_backlight_app_runtime.applied_user_bias_steps =
-        g_backlight_app_tuning.user_bias_steps;
+    if (g_backlight_app_runtime.manual_override_enabled != false)
+    {
+        target_q16 = g_backlight_app_runtime.manual_override_q16;
+        g_backlight_app_runtime.active_mode =
+            (uint8_t)BACKLIGHT_APP_ACTIVE_MODE_MANUAL_OVERRIDE;
+        g_backlight_app_runtime.active_smoothness = BACKLIGHT_APP_FALLBACK_SMOOTHNESS;
+    }
+    else if (g_backlight_app_runtime.sensor_valid == false)
+    {
+        /* ------------------------------------------------------------------ */
+        /*  센서가 아직 없거나 stale이면 현재 목표를 유지한다.                  */
+        /*  초기 부팅 직후라면 startup fallback이 그대로 유지된다.             */
+        /* ------------------------------------------------------------------ */
+        target_q16 = g_backlight_app_runtime.target_linear_q16;
+        g_backlight_app_runtime.active_mode =
+            (settings_snapshot.backlight.auto_mode == (uint8_t)APP_BACKLIGHT_AUTO_MODE_DIMMER) ?
+            (uint8_t)BACKLIGHT_APP_ACTIVE_MODE_AUTO_DIMMER :
+            (uint8_t)BACKLIGHT_APP_ACTIVE_MODE_AUTO_CONTINUOUS;
+        g_backlight_app_runtime.active_smoothness =
+            settings_snapshot.backlight.transition_smoothness;
+    }
+    else if (settings_snapshot.backlight.auto_mode ==
+             (uint8_t)APP_BACKLIGHT_AUTO_MODE_DIMMER)
+    {
+        target_q16 = Backlight_App_ComputeDimmerTargetQ16(&settings_snapshot);
+        g_backlight_app_runtime.active_mode =
+            (uint8_t)BACKLIGHT_APP_ACTIVE_MODE_AUTO_DIMMER;
+        g_backlight_app_runtime.active_smoothness =
+            settings_snapshot.backlight.transition_smoothness;
+    }
+    else
+    {
+        target_q16 = Backlight_App_ComputeContinuousTargetQ16(&settings_snapshot);
+        g_backlight_app_runtime.active_mode =
+            (uint8_t)BACKLIGHT_APP_ACTIVE_MODE_AUTO_CONTINUOUS;
+        g_backlight_app_runtime.active_smoothness =
+            settings_snapshot.backlight.transition_smoothness;
+        g_backlight_app_runtime.active_zone =
+            (uint8_t)BACKLIGHT_APP_DIMMER_ZONE_DAY;
+    }
 
-    /* -------------------------------------------------------------------------- */
-    /*  sensor_fresh 변수는 현재 로직에서 분기 보조용으로만 쓰인다.              */
-    /*  나중에 디버그 카운터/통계가 필요하면 여기서 활용하면 된다.               */
-    /* -------------------------------------------------------------------------- */
-    (void)sensor_fresh;
+    g_backlight_app_runtime.target_linear_q16 = target_q16;
+    g_backlight_app_runtime.target_linear_percent = Backlight_App_Q16ToPercent(target_q16);
+
+    tau_ms = Backlight_App_GetTauFromSmoothness(
+        g_backlight_app_runtime.active_smoothness);
+    g_backlight_app_runtime.applied_linear_q16 =
+        Backlight_App_ApproachQ16(g_backlight_app_runtime.applied_linear_q16,
+                                  g_backlight_app_runtime.target_linear_q16,
+                                  dt_ms,
+                                  tau_ms);
+    g_backlight_app_runtime.applied_linear_percent =
+        Backlight_App_Q16ToPercent(g_backlight_app_runtime.applied_linear_q16);
+
+    Backlight_Driver_SetLinearQ16(g_backlight_app_runtime.applied_linear_q16);
+    g_backlight_app_runtime.last_update_ms = now_ms;
 }

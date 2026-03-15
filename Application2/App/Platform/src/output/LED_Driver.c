@@ -19,7 +19,7 @@
 /*     - 현재 프로젝트의 공통 tick은 HAL_GetTick() 1ms 기반이다.              */
 /*     - 기존 17ms(약 58.8fps)는 motion pattern에는 충분했지만,               */
 /*       BR ALL 같은 전체 밝기 스윕에서는 계단감이 눈에 띌 수 있다.           */
-/*     - 그래서 추가 타이머는 건드리지 않고, render 간격만 5ms로 낮춰        */
+/*     - 그래서 추가 타이머는 건드리지 않고, render 간격을 1ms로 끌어내려        */
 /*       밝기 time-axis 양자화를 줄인다.                                      */
 /*                                                                            */
 /*  4) 테스트 패턴 철학                                                         */
@@ -40,8 +40,12 @@
 #define LED_DRIVER_GAMMA_VALUE              (2.20f)
 #endif
 
+#ifndef LED_DRIVER_VISUAL_LUT_RESOLUTION
+#define LED_DRIVER_VISUAL_LUT_RESOLUTION    (4096u)
+#endif
+
 #ifndef LED_DRIVER_FRAME_INTERVAL_MS
-#define LED_DRIVER_FRAME_INTERVAL_MS        (5u)
+#define LED_DRIVER_FRAME_INTERVAL_MS        (1u)
 #endif
 
 #ifndef LED_DRIVER_BREATH_PERIOD_MS
@@ -150,6 +154,16 @@ static const uint16_t s_center_spatial_weight_q16[LED_DRIVER_CHANNEL_COUNT] =
 };
 
 static LED_DriverState_t s_led_driver;
+
+/* -------------------------------------------------------------------------- */
+/*  visual -> electrical LUT                                                  */
+/*                                                                            */
+/*  render path를 1ms로 끌어내리면 perceptual remap 함수 호출 횟수도 늘어난다. */
+/*  그래서 float / cbrtf / powf 연산은 init 시 LUT 생성 1회로 몰아 두고,     */
+/*  실시간 렌더 경로에서는 보간만 수행한다.                                    */
+/* -------------------------------------------------------------------------- */
+static uint16_t s_visual_to_electrical_lut_q16[LED_DRIVER_VISUAL_LUT_RESOLUTION + 1u];
+static uint8_t  s_visual_to_electrical_lut_ready = 0u;
 
 static uint16_t LED_Driver_ClampQ16(uint32_t value_q16)
 {
@@ -281,45 +295,91 @@ static uint16_t LED_Driver_EaseInOutQuadQ16(uint16_t x_q16)
 /*  - LED_DRIVER_USE_CIE_LSTAR == 0 이면                                      */
 /*    단순 power-law gamma(기본 2.2) 방식으로 fallback 가능                   */
 /* -------------------------------------------------------------------------- */
-static uint16_t LED_Driver_VisualQ16ToElectricalQ16(uint16_t brightness_q16)
+static void LED_Driver_BuildVisualToElectricalLutIfNeeded(void)
 {
-    float visual_0_to_1;
-    float electrical_0_to_1;
+    uint32_t index;
 
-    visual_0_to_1 = (float)brightness_q16 / 65535.0f;
+    if (s_visual_to_electrical_lut_ready != 0u)
+    {
+        return;
+    }
+
+    for (index = 0u; index <= LED_DRIVER_VISUAL_LUT_RESOLUTION; ++index)
+    {
+        float visual_0_to_1;
+        float electrical_0_to_1;
+
+        visual_0_to_1 = (float)index / (float)LED_DRIVER_VISUAL_LUT_RESOLUTION;
 
 #if (LED_DRIVER_USE_CIE_LSTAR == 1u)
-    {
-        float l_star;
-
-        l_star = visual_0_to_1 * 100.0f;
-
-        if (l_star <= 8.0f)
         {
-            electrical_0_to_1 = l_star / 903.3f;
-        }
-        else
-        {
-            float f_value;
+            float l_star;
 
-            f_value = (l_star + 16.0f) / 116.0f;
-            electrical_0_to_1 = f_value * f_value * f_value;
+            l_star = visual_0_to_1 * 100.0f;
+
+            if (l_star <= 8.0f)
+            {
+                electrical_0_to_1 = l_star / 903.3f;
+            }
+            else
+            {
+                float f_value;
+
+                f_value = (l_star + 16.0f) / 116.0f;
+                electrical_0_to_1 = f_value * f_value * f_value;
+            }
         }
-    }
 #else
-    electrical_0_to_1 = powf(visual_0_to_1, LED_DRIVER_GAMMA_VALUE);
+        electrical_0_to_1 = powf(visual_0_to_1, LED_DRIVER_GAMMA_VALUE);
 #endif
 
-    if (electrical_0_to_1 < 0.0f)
-    {
-        electrical_0_to_1 = 0.0f;
-    }
-    else if (electrical_0_to_1 > 1.0f)
-    {
-        electrical_0_to_1 = 1.0f;
+        if (electrical_0_to_1 < 0.0f)
+        {
+            electrical_0_to_1 = 0.0f;
+        }
+        else if (electrical_0_to_1 > 1.0f)
+        {
+            electrical_0_to_1 = 1.0f;
+        }
+
+        s_visual_to_electrical_lut_q16[index] =
+            (uint16_t)(electrical_0_to_1 * 65535.0f + 0.5f);
     }
 
-    return (uint16_t)(electrical_0_to_1 * 65535.0f + 0.5f);
+    s_visual_to_electrical_lut_ready = 1u;
+}
+
+static uint16_t LED_Driver_VisualQ16ToElectricalQ16(uint16_t brightness_q16)
+{
+    uint32_t scaled_index_q16;
+    uint32_t index;
+    uint32_t frac_q16;
+    uint32_t y0;
+    uint32_t y1;
+
+    LED_Driver_BuildVisualToElectricalLutIfNeeded();
+
+    if (brightness_q16 >= LED_DRIVER_Q16_MAX)
+    {
+        return (uint16_t)LED_DRIVER_Q16_MAX;
+    }
+
+    scaled_index_q16 = ((uint32_t)brightness_q16 * LED_DRIVER_VISUAL_LUT_RESOLUTION);
+    index = scaled_index_q16 / LED_DRIVER_Q16_MAX;
+    frac_q16 = scaled_index_q16 % LED_DRIVER_Q16_MAX;
+
+    if (index >= LED_DRIVER_VISUAL_LUT_RESOLUTION)
+    {
+        index = LED_DRIVER_VISUAL_LUT_RESOLUTION - 1u;
+        frac_q16 = LED_DRIVER_Q16_MAX;
+    }
+
+    y0 = s_visual_to_electrical_lut_q16[index];
+    y1 = s_visual_to_electrical_lut_q16[index + 1u];
+
+    return (uint16_t)(y0 + (((uint64_t)(y1 - y0) * (uint64_t)frac_q16 +
+                             (LED_DRIVER_Q16_MAX / 2u)) /
+                            LED_DRIVER_Q16_MAX));
 }
 
 /* -------------------------------------------------------------------------- */
@@ -443,10 +503,11 @@ static void LED_Driver_StartChannel(uint8_t logical_index)
 /*  - 즉시 target과 동일하게 맞춤                                              */
 /*                                                                            */
 /*  transition_ms > 0                                                          */
-/*  - 17ms tick마다 diff의 일부만 이동                                         */
+/*  - 실제 elapsed_ms만큼 diff의 일부만 이동                                   */
 /*  - step이 0이 되는 미세 diff 구간은 최소 1 LSB 이동 보장                   */
 /* -------------------------------------------------------------------------- */
-static void LED_Driver_AdvanceCurrentFrameTowardTarget(uint16_t transition_ms)
+static void LED_Driver_AdvanceCurrentFrameTowardTarget(uint16_t transition_ms,
+                                                     uint32_t elapsed_ms)
 {
     uint8_t index;
 
@@ -473,8 +534,8 @@ static void LED_Driver_AdvanceCurrentFrameTowardTarget(uint16_t transition_ms)
             continue;
         }
 
-        step_value = (diff_value * (int32_t)LED_DRIVER_FRAME_INTERVAL_MS) /
-                     (int32_t)transition_ms;
+        step_value = (int32_t)(((int64_t)diff_value * (int64_t)elapsed_ms) /
+                                  (int64_t)transition_ms);
 
         if (step_value == 0)
         {
@@ -1020,6 +1081,8 @@ void LED_Driver_Init(void)
     memset(&s_led_driver, 0, sizeof(s_led_driver));
     s_led_driver.last_pattern = LED_DRIVER_PATTERN_OFF;
 
+    LED_Driver_BuildVisualToElectricalLutIfNeeded();
+
     for (logical_index = 0u; logical_index < LED_DRIVER_CHANNEL_COUNT; ++logical_index)
     {
         LED_Driver_StartChannel(logical_index);
@@ -1032,6 +1095,8 @@ void LED_Driver_Init(void)
 
 void LED_Driver_RenderCommand(uint32_t now_ms, const LED_DriverCommand_t *command)
 {
+    uint32_t elapsed_ms;
+
     if (s_led_driver.initialized == 0u)
     {
         return;
@@ -1046,9 +1111,10 @@ void LED_Driver_RenderCommand(uint32_t now_ms, const LED_DriverCommand_t *comman
     /*  frame rate limiter                                                     */
     /*                                                                        */
     /*  now_ms는 HAL_GetTick() 1ms 단위이므로                                   */
-    /*  5ms 미만이면 이번 loop에서는 렌더링을 생략한다.                         */
+    /*  1ms 미만이면 이번 loop에서는 렌더링을 생략한다.                         */
     /* ---------------------------------------------------------------------- */
-    if ((now_ms - s_led_driver.last_frame_ms) < LED_DRIVER_FRAME_INTERVAL_MS)
+    elapsed_ms = (now_ms - s_led_driver.last_frame_ms);
+    if (elapsed_ms < LED_DRIVER_FRAME_INTERVAL_MS)
     {
         return;
     }
@@ -1058,7 +1124,7 @@ void LED_Driver_RenderCommand(uint32_t now_ms, const LED_DriverCommand_t *comman
     s_led_driver.last_mode_started_ms = command->mode_started_ms;
 
     LED_Driver_BuildTargetFrame(s_led_driver.target_frame_q16, now_ms, command);
-    LED_Driver_AdvanceCurrentFrameTowardTarget(command->transition_ms);
+    LED_Driver_AdvanceCurrentFrameTowardTarget(command->transition_ms, elapsed_ms);
     LED_Driver_WriteLinearFrameQ16(s_led_driver.current_frame_q16);
 }
 

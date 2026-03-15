@@ -36,6 +36,40 @@ static void APP_STATE_ApplyDefaultSettingsUnlocked(void)
     g_app_state.settings.clock.gps_auto_sync_enabled = 1u;
     g_app_state.settings.clock.gps_sync_interval_minutes = APP_CLOCK_GPS_SYNC_INTERVAL_MIN_DEFAULT;
     g_app_state.settings.clock.reserved0 = 0u;
+
+    /* ---------------------------------------------------------------------- */
+        /*  백라이트 기본 정책                                                     */
+        /*                                                                        */
+        /*  기본값 의도                                                            */
+        /*  - 부팅 직후에는 주변광을 연속 추종하는 AUTO-CONT 모드로 시작한다.      */
+        /*  - bias는 0, smoothness는 3(중간값)으로 둔다.                          */
+        /*  - AUTO-DIMMER의 존 값도 함께 기본값을 넣어 두어,                       */
+        /*    나중에 모드만 바꿔도 즉시 동작하게 만든다.                           */
+        /* ---------------------------------------------------------------------- */
+        g_app_state.settings.backlight.auto_mode                      =
+            (uint8_t)APP_BACKLIGHT_AUTO_MODE_CONTINUOUS;
+        g_app_state.settings.backlight.continuous_bias_steps         = 0;
+        g_app_state.settings.backlight.transition_smoothness         = 3u;
+        g_app_state.settings.backlight.reserved0                     = 0u;
+        g_app_state.settings.backlight.night_threshold_percent       = 32u;
+        g_app_state.settings.backlight.super_night_threshold_percent = 12u;
+        g_app_state.settings.backlight.night_brightness_percent      = 42u;
+        g_app_state.settings.backlight.super_night_brightness_percent = 18u;
+
+        /* ---------------------------------------------------------------------- */
+        /*  UC1608 기본 패널 값                                                    */
+        /*                                                                        */
+        /*  이 값들은 현재 코드/참조 시퀀스의 안전한 기본값을 APP_STATE에도         */
+        /*  그대로 저장해 두는 용도다.                                            */
+        /* ---------------------------------------------------------------------- */
+        g_app_state.settings.uc1608.contrast                 = 120u;
+        g_app_state.settings.uc1608.temperature_compensation = 2u;
+        g_app_state.settings.uc1608.bias_ratio               = 2u;
+        g_app_state.settings.uc1608.ram_access_mode          = 1u;
+        g_app_state.settings.uc1608.start_line_raw           = 0u;
+        g_app_state.settings.uc1608.fixed_line_raw           = 0u;
+        g_app_state.settings.uc1608.power_control_raw        = 7u;
+        g_app_state.settings.uc1608.flip_mode                = 1u;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -508,6 +542,18 @@ void APP_STATE_CopySettingsSnapshot(app_settings_t *dst)
     /*  settings는 ISR에서 갱신하지 않는 정적 정책 저장소다.                    */
     /* ---------------------------------------------------------------------- */
     memcpy(dst, (const void *)&g_app_state.settings, sizeof(*dst));
+}
+
+void APP_STATE_StoreSettingsSnapshot(const app_settings_t *src)
+{
+    if (src == 0)
+    {
+        return;
+    }
+
+    __disable_irq();
+    memcpy((void *)&g_app_state.settings, (const void *)src, sizeof(*src));
+    __enable_irq();
 }
 
 /* -------------------------------------------------------------------------- */

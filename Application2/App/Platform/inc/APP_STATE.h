@@ -87,11 +87,82 @@ typedef struct
     uint8_t reserved0;                  /* 정렬/향후 확장용                           */
 } app_clock_settings_t;
 
+typedef enum
+{
+    APP_BACKLIGHT_AUTO_MODE_CONTINUOUS = 0u,
+    APP_BACKLIGHT_AUTO_MODE_DIMMER     = 1u
+} app_backlight_auto_mode_t;
+
 typedef struct
 {
-    app_gps_settings_t   gps;
-    app_clock_settings_t clock;
+    /* ---------------------------------------------------------------------- */
+    /*  자동 밝기 동작 모드                                                    */
+    /*                                                                        */
+    /*  CONTINUOUS                                                             */
+    /*  - 주변광 값 전체를 연속 곡선으로 해석해서 화면 밝기를 연속적으로 추종  */
+    /*                                                                        */
+    /*  DIMMER                                                                 */
+    /*  - DAY / NIGHT / SUPER NIGHT 3개 존으로만 target을 고른다.             */
+    /*  - 단, 실제 target으로 넘어가는 출력 전환 자체는 부드럽게 이어진다.    */
+    /* ---------------------------------------------------------------------- */
+    uint8_t auto_mode;                      /* app_backlight_auto_mode_t raw         */
+    int8_t  continuous_bias_steps;         /* AUTO-CONT 전용 -2..+2 bias 단계        */
+    uint8_t transition_smoothness;         /* 1..5, 높을수록 더 천천히 따라감        */
+    uint8_t reserved0;                     /* 정렬/향후 확장용                       */
+
+    /* ---------------------------------------------------------------------- */
+    /*  AUTO-DIMMER 존 기준/밝기                                               */
+    /*                                                                        */
+    /*  sensor 기준은 Brightness_Sensor의 normalized percent(0..100) 기준이다. */
+    /*  - night_threshold_percent        : DAY ↔ NIGHT 경계                    */
+    /*  - super_night_threshold_percent  : NIGHT ↔ SUPER NIGHT 경계            */
+    /*  - *_brightness_percent           : 해당 존의 목표 화면 밝기            */
+    /*                                                                        */
+    /*  DAY 밝기는 요구사항대로 100% 고정이므로 별도 저장하지 않는다.          */
+    /* ---------------------------------------------------------------------- */
+    uint8_t night_threshold_percent;       /* 0..100                               */
+    uint8_t super_night_threshold_percent; /* 0..100                               */
+    uint8_t night_brightness_percent;      /* 0..100                               */
+    uint8_t super_night_brightness_percent;/* 0..100                               */
+} app_backlight_settings_t;
+
+typedef struct
+{
+    /* ---------------------------------------------------------------------- */
+    /*  UC1608 패널 설정                                                       */
+    /*                                                                        */
+    /*  이 구조체는 "실제 패널 레지스터에 바로 반영 가능한 값"을 의도적으로     */
+    /*  raw에 가깝게 보관한다.                                                 */
+    /*                                                                        */
+    /*  contrast                 -> CMD 0x81 + arg                             */
+    /*  temperature_compensation -> CMD 0x24..0x27 (240x128에서는 mux128 고정) */
+    /*  bias_ratio               -> CMD 0xE8..0xEB                             */
+    /*  ram_access_mode          -> CMD 0x88..0x8B                             */
+    /*  start_line_raw           -> CMD 0x40..0x7F 의 하위 raw 값(0..63)       */
+    /*  fixed_line_raw           -> CMD 0x90..0x9F 의 하위 raw 값(0..15)       */
+    /*  power_control_raw        -> CMD 0x28..0x2F 의 하위 raw 값(0..7)        */
+    /*  flip_mode                -> U8G2 flip mode 0/1                         */
+    /* ---------------------------------------------------------------------- */
+    uint8_t contrast;                     /* 0..255                               */
+    uint8_t temperature_compensation;     /* 0..3                                 */
+    uint8_t bias_ratio;                   /* 0..3                                 */
+    uint8_t ram_access_mode;              /* 0..3                                 */
+
+    uint8_t start_line_raw;               /* 0..63                                */
+    uint8_t fixed_line_raw;               /* 0..15                                */
+    uint8_t power_control_raw;            /* 0..7                                 */
+    uint8_t flip_mode;                    /* 0..1                                 */
+} app_uc1608_settings_t;
+
+typedef struct
+{
+    app_gps_settings_t       gps;
+    app_clock_settings_t     clock;
+    app_backlight_settings_t backlight;
+    app_uc1608_settings_t    uc1608;
 } app_settings_t;
+
+
 
 /* -------------------------------------------------------------------------- */
 /*  RTC / CLOCK 공개 상태                                                      */
@@ -1248,6 +1319,8 @@ void APP_STATE_CopySdSnapshot(app_sd_state_t *dst);
 void APP_STATE_CopyClockSnapshot(app_clock_state_t *dst);
 
 void APP_STATE_CopySettingsSnapshot(app_settings_t *dst);
+void APP_STATE_StoreSettingsSnapshot(const app_settings_t *src);
+
 
 #ifdef __cplusplus
 }

@@ -6,6 +6,10 @@
 #include "ui_popup.h"
 #include "ui_common_icons.h"
 #include "LED_App.h"
+#include "APP_STATE.h"
+#include "BACKLIGHT_App.h"
+#include "BACKLIGHT_DRIVER.h"
+#include "u8g2_uc1608_stm32.h"
 
 #include <stdio.h>
 
@@ -37,6 +41,89 @@ static uint32_t         s_test_bottom_overlay_until_ms = 0u;
 static void ui_screen_test_request_overlay(uint32_t now_ms);
 static void ui_screen_test_configure_bottom_bar(void);
 static const uint8_t *ui_screen_test_get_cute_icon(uint8_t index);
+
+/* -------------------------------------------------------------------------- */
+/*  TEST setting sub-mode state                                               */
+/* -------------------------------------------------------------------------- */
+typedef enum
+{
+  UI_TEST_SETTINGS_CATEGORY_BACKLIGHT = 0u,
+  UI_TEST_SETTINGS_CATEGORY_UC1608    = 1u
+} ui_test_settings_category_t;
+
+typedef enum
+{
+  UI_TEST_SETTINGS_ITEM_BL_MODE = 0u,
+  UI_TEST_SETTINGS_ITEM_BL_CONT_BIAS,
+  UI_TEST_SETTINGS_ITEM_BL_SMOOTHNESS,
+  UI_TEST_SETTINGS_ITEM_BL_NIGHT_THRESHOLD,
+  UI_TEST_SETTINGS_ITEM_BL_SUPER_THRESHOLD,
+  UI_TEST_SETTINGS_ITEM_BL_NIGHT_LEVEL,
+  UI_TEST_SETTINGS_ITEM_BL_SUPER_LEVEL,
+  UI_TEST_SETTINGS_ITEM_DISP_CONTRAST,
+  UI_TEST_SETTINGS_ITEM_DISP_TEMP_COMP,
+  UI_TEST_SETTINGS_ITEM_DISP_BIAS,
+  UI_TEST_SETTINGS_ITEM_DISP_RAM_ACCESS,
+  UI_TEST_SETTINGS_ITEM_DISP_START_LINE,
+  UI_TEST_SETTINGS_ITEM_DISP_FIXED_LINE,
+  UI_TEST_SETTINGS_ITEM_DISP_POWER_CTRL,
+  UI_TEST_SETTINGS_ITEM_DISP_FLIP_MODE,
+  UI_TEST_SETTINGS_ITEM_COUNT
+} ui_test_settings_item_t;
+
+typedef struct
+{
+  uint8_t     category;
+  const char *title;
+  const char *subtitle;
+} ui_test_settings_item_meta_t;
+
+static uint8_t       s_test_settings_active = 0u;
+static uint8_t       s_test_settings_item_index = 0u;
+static app_settings_t s_test_settings_original;
+static app_settings_t s_test_settings_draft;
+
+static const ui_test_settings_item_meta_t s_test_settings_meta[UI_TEST_SETTINGS_ITEM_COUNT] =
+{
+  { UI_TEST_SETTINGS_CATEGORY_BACKLIGHT, "AUTO MODE",       "AUTO-CONT / AUTO-DIMMER policy selector" },
+  { UI_TEST_SETTINGS_CATEGORY_BACKLIGHT, "CONT BIAS",       "Continuous mode brightness offset -2..+2" },
+  { UI_TEST_SETTINGS_CATEGORY_BACKLIGHT, "SMOOTHNESS",      "Higher value follows ambient more slowly" },
+  { UI_TEST_SETTINGS_CATEGORY_BACKLIGHT, "NIGHT THRESHOLD", "DAY -> NIGHT boundary in ambient percent" },
+  { UI_TEST_SETTINGS_CATEGORY_BACKLIGHT, "SUPER THRESHOLD", "NIGHT -> SUPER boundary in ambient percent" },
+  { UI_TEST_SETTINGS_CATEGORY_BACKLIGHT, "NIGHT LEVEL",     "AUTO-DIMMER night output brightness" },
+  { UI_TEST_SETTINGS_CATEGORY_BACKLIGHT, "SUPER LEVEL",     "AUTO-DIMMER super night brightness" },
+  { UI_TEST_SETTINGS_CATEGORY_UC1608,    "CONTRAST",        "UC1608 command 0x81 raw contrast value" },
+  { UI_TEST_SETTINGS_CATEGORY_UC1608,    "TEMP COMP",       "UC1608 temperature compensation bits" },
+  { UI_TEST_SETTINGS_CATEGORY_UC1608,    "BIAS RATIO",      "UC1608 LCD bias ratio bits" },
+  { UI_TEST_SETTINGS_CATEGORY_UC1608,    "RAM ACCESS",      "UC1608 RAM access mode bits" },
+  { UI_TEST_SETTINGS_CATEGORY_UC1608,    "START LINE",      "UC1608 display start line raw value" },
+  { UI_TEST_SETTINGS_CATEGORY_UC1608,    "FIXED LINE",      "UC1608 fixed line raw value" },
+  { UI_TEST_SETTINGS_CATEGORY_UC1608,    "POWER CTRL",      "UC1608 power control raw bits" },
+  { UI_TEST_SETTINGS_CATEGORY_UC1608,    "FLIP MODE",       "U8G2 / UC1608 panel flip selection" }
+};
+
+static void ui_screen_test_configure_settings_bottom_bar(void);
+static ui_screen_test_action_t ui_screen_test_handle_settings_button_event(const button_event_t *event,
+                                                                           uint32_t now_ms);
+static void ui_screen_test_settings_enter(uint32_t now_ms);
+static void ui_screen_test_settings_cancel(uint32_t now_ms);
+static void ui_screen_test_settings_save(uint32_t now_ms);
+static void ui_screen_test_settings_apply_preview(const app_settings_t *settings);
+static void ui_screen_test_settings_normalize(app_settings_t *settings);
+static void ui_screen_test_settings_adjust_current_item(int8_t direction,
+                                                        bool fast_step,
+                                                        uint32_t now_ms);
+static void ui_screen_test_settings_get_value_text(uint8_t item_index,
+                                                   const app_settings_t *settings,
+                                                   char *out_text,
+                                                   size_t out_size);
+static uint8_t ui_screen_test_settings_get_value_bar_percent(uint8_t item_index,
+                                                             const app_settings_t *settings);
+static const char *ui_screen_test_settings_category_text(uint8_t category);
+static const char *ui_screen_test_backlight_mode_text(uint8_t mode_raw);
+static const char *ui_screen_test_dimmer_zone_text(uint8_t zone_raw);
+static void ui_screen_test_draw_settings_screen(u8g2_t *u8g2,
+                                                const ui_rect_t *viewport);
 
 /* -------------------------------------------------------------------------- */
 /*  Overlay request                                                           */
@@ -79,6 +166,29 @@ static void ui_screen_test_configure_bottom_bar(void)
 }
 
 /* -------------------------------------------------------------------------- */
+/*  TEST setting bottom bar                                                   */
+/*                                                                            */
+/*  요구사항 매핑                                                              */
+/*  - F1 : back / cancel                                                      */
+/*  - F2 : previous item                                                      */
+/*  - F3 : next item                                                          */
+/*  - F4 : value decrement                                                    */
+/*  - F5 : value increment                                                    */
+/*  - F6 : save / confirm                                                     */
+/* -------------------------------------------------------------------------- */
+static void ui_screen_test_configure_settings_bottom_bar(void)
+{
+  UI_BottomBar_SetMode(UI_BOTTOMBAR_MODE_BUTTONS);
+
+  UI_BottomBar_SetButton(UI_FKEY_1, "BACK", UI_BOTTOMBAR_FLAG_DIVIDER);
+  UI_BottomBar_SetButton(UI_FKEY_2, "<", UI_BOTTOMBAR_FLAG_DIVIDER);
+  UI_BottomBar_SetButton(UI_FKEY_3, ">", UI_BOTTOMBAR_FLAG_DIVIDER);
+  UI_BottomBar_SetButton(UI_FKEY_4, "-", UI_BOTTOMBAR_FLAG_DIVIDER);
+  UI_BottomBar_SetButton(UI_FKEY_5, "+", UI_BOTTOMBAR_FLAG_DIVIDER);
+  UI_BottomBar_SetButton(UI_FKEY_6, "SAVE", 0u);
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Public init                                                               */
 /* -------------------------------------------------------------------------- */
 void UI_ScreenTest_Init(uint32_t ui_tick_20hz)
@@ -90,6 +200,10 @@ void UI_ScreenTest_Init(uint32_t ui_tick_20hz)
   s_test_live_counter_20hz = 0u;
   s_test_last_processed_tick_20hz = ui_tick_20hz;
   s_test_bottom_overlay_until_ms = 0u;
+  s_test_settings_active = 0u;
+  s_test_settings_item_index = 0u;
+  memset(&s_test_settings_original, 0, sizeof(s_test_settings_original));
+  memset(&s_test_settings_draft, 0, sizeof(s_test_settings_draft));
 
   ui_screen_test_configure_bottom_bar();
 }
@@ -102,6 +216,8 @@ void UI_ScreenTest_Init(uint32_t ui_tick_20hz)
 /* -------------------------------------------------------------------------- */
 void UI_ScreenTest_OnEnter(void)
 {
+  s_test_settings_active = 0u;
+  s_test_settings_item_index = 0u;
   ui_screen_test_configure_bottom_bar();
 }
 
@@ -145,6 +261,17 @@ ui_screen_test_action_t UI_ScreenTest_HandleButtonEvent(const button_event_t *ev
   }
 
   /* ---------------------------------------------------------------------- */
+  /* settings sub-mode가 active이면 여기서 버튼 의미를 완전히 바꿔 잡는다.    */
+  /*                                                                        */
+  /* 홈 화면과 설정 화면이 같은 root screen을 공유하더라도                    */
+  /* F-key 의미가 서로 섞이지 않도록 가장 먼저 분기한다.                      */
+  /* ---------------------------------------------------------------------- */
+  if (s_test_settings_active != 0u)
+  {
+    return ui_screen_test_handle_settings_button_event(event, now_ms);
+  }
+
+  /* ---------------------------------------------------------------------- */
   /* overlay mode에서 들어오는 모든 버튼 event는 하단 overlay 표시를 연장한다. */
   /* ---------------------------------------------------------------------- */
   if (s_test_layout_mode == UI_LAYOUT_MODE_TOP_EXTENDED_OVERLAY)
@@ -178,17 +305,6 @@ ui_screen_test_action_t UI_ScreenTest_HandleButtonEvent(const button_event_t *ev
 
    /* ---------------------------------------------------------------------- */
    /* TEST 홈 F2 long press -> LED test pattern advance                       */
-   /*                                                                        */
-   /* 화면 의미                                                               */
-   /* - 현재 TEST 홈 위에 작은 toast message를 잠깐 띄워서                     */
-   /*   방금 선택된 LED test mode 이름을 사용자에게 보여 준다.                 */
-   /* - 동시에 LED_App 내부 test pattern index가 다음 상태로 넘어가고,         */
-   /*   LED 출력도 즉시 그 패턴으로 전환된다.                                  */
-   /*                                                                        */
-   /* UI 위치 설명                                                            */
-   /* - toast는 기존 UI_Toast_Draw()가 그리던 위치/스타일을 그대로 사용한다.  */
-   /* - 즉, 이 함수는 "무슨 그림을 어느 좌표에 찍을지"를 직접 그리지 않고,     */
-   /*   텍스트와 아이콘만 toast 모듈에 전달한다.                               */
    /* ---------------------------------------------------------------------- */
    if ((event->id == BUTTON_ID_2) &&
        (event->type == BUTTON_EVENT_LONG_PRESS))
@@ -204,6 +320,20 @@ ui_screen_test_action_t UI_ScreenTest_HandleButtonEvent(const button_event_t *ev
                    now_ms,
                    1100u);
 
+     return UI_SCREEN_TEST_ACTION_NONE;
+   }
+
+   /* ---------------------------------------------------------------------- */
+   /* TEST 홈 F3 long press -> SCREEN TEST 설정창 진입                        */
+   /*                                                                        */
+   /* 요구사항                                                                */
+   /* - 진입 즉시 TOP+BOT 고정처럼 동작                                       */
+   /* - viewport 안에 설정창을 꽉 맞춰 렌더                                   */
+   /* ---------------------------------------------------------------------- */
+   if ((event->id == BUTTON_ID_3) &&
+       (event->type == BUTTON_EVENT_LONG_PRESS))
+   {
+     ui_screen_test_settings_enter(now_ms);
      return UI_SCREEN_TEST_ACTION_NONE;
    }
 
@@ -290,20 +420,591 @@ ui_screen_test_action_t UI_ScreenTest_HandleButtonEvent(const button_event_t *ev
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Local helper: settings mode text helpers                                  */
+/* -------------------------------------------------------------------------- */
+static const char *ui_screen_test_backlight_mode_text(uint8_t mode_raw)
+{
+  return (mode_raw == (uint8_t)APP_BACKLIGHT_AUTO_MODE_DIMMER) ?
+         "AUTO-DIMMER" : "AUTO-CONT";
+}
+
+static const char *ui_screen_test_dimmer_zone_text(uint8_t zone_raw)
+{
+  switch (zone_raw)
+  {
+    case BACKLIGHT_APP_DIMMER_ZONE_SUPER_NIGHT:
+      return "SUPER";
+
+    case BACKLIGHT_APP_DIMMER_ZONE_NIGHT:
+      return "NIGHT";
+
+    case BACKLIGHT_APP_DIMMER_ZONE_DAY:
+    default:
+      return "DAY";
+  }
+}
+
+static const char *ui_screen_test_settings_category_text(uint8_t category)
+{
+  return (category == UI_TEST_SETTINGS_CATEGORY_UC1608) ? "UC1608" : "BACKLIGHT";
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Local helper: settings normalize                                           */
+/* -------------------------------------------------------------------------- */
+static void ui_screen_test_settings_normalize(app_settings_t *settings)
+{
+  if (settings == 0)
+  {
+    return;
+  }
+
+  if (settings->backlight.auto_mode > (uint8_t)APP_BACKLIGHT_AUTO_MODE_DIMMER)
+  {
+    settings->backlight.auto_mode = (uint8_t)APP_BACKLIGHT_AUTO_MODE_CONTINUOUS;
+  }
+
+  if (settings->backlight.continuous_bias_steps < -2)
+  {
+    settings->backlight.continuous_bias_steps = -2;
+  }
+  else if (settings->backlight.continuous_bias_steps > 2)
+  {
+    settings->backlight.continuous_bias_steps = 2;
+  }
+
+  if (settings->backlight.transition_smoothness < 1u)
+  {
+    settings->backlight.transition_smoothness = 1u;
+  }
+  else if (settings->backlight.transition_smoothness > 5u)
+  {
+    settings->backlight.transition_smoothness = 5u;
+  }
+
+  if (settings->backlight.night_threshold_percent > 100u)
+  {
+    settings->backlight.night_threshold_percent = 100u;
+  }
+
+  if (settings->backlight.super_night_threshold_percent > 100u)
+  {
+    settings->backlight.super_night_threshold_percent = 100u;
+  }
+
+  if (settings->backlight.super_night_threshold_percent >
+      settings->backlight.night_threshold_percent)
+  {
+    settings->backlight.super_night_threshold_percent =
+      settings->backlight.night_threshold_percent;
+  }
+
+  if (settings->backlight.night_brightness_percent > 100u)
+  {
+    settings->backlight.night_brightness_percent = 100u;
+  }
+
+  if (settings->backlight.super_night_brightness_percent > 100u)
+  {
+    settings->backlight.super_night_brightness_percent = 100u;
+  }
+
+  if (settings->uc1608.temperature_compensation > 3u)
+  {
+    settings->uc1608.temperature_compensation = 3u;
+  }
+
+  if (settings->uc1608.bias_ratio > 3u)
+  {
+    settings->uc1608.bias_ratio = 3u;
+  }
+
+  if (settings->uc1608.ram_access_mode > 3u)
+  {
+    settings->uc1608.ram_access_mode = 3u;
+  }
+
+  if (settings->uc1608.start_line_raw > 63u)
+  {
+    settings->uc1608.start_line_raw = 63u;
+  }
+
+  if (settings->uc1608.fixed_line_raw > 15u)
+  {
+    settings->uc1608.fixed_line_raw = 15u;
+  }
+
+  if (settings->uc1608.power_control_raw > 7u)
+  {
+    settings->uc1608.power_control_raw = 7u;
+  }
+
+  if (settings->uc1608.flip_mode > 1u)
+  {
+    settings->uc1608.flip_mode = 1u;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Local helper: settings live preview apply                                  */
+/* -------------------------------------------------------------------------- */
+static void ui_screen_test_settings_apply_preview(const app_settings_t *settings)
+{
+  if (settings == 0)
+  {
+    return;
+  }
+
+  APP_STATE_StoreSettingsSnapshot(settings);
+  U8G2_UC1608_ApplyPanelSettings(&settings->uc1608);
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Local helper: settings enter / cancel / save                               */
+/* -------------------------------------------------------------------------- */
+static void ui_screen_test_settings_enter(uint32_t now_ms)
+{
+  APP_STATE_CopySettingsSnapshot(&s_test_settings_original);
+  s_test_settings_draft = s_test_settings_original;
+  ui_screen_test_settings_normalize(&s_test_settings_draft);
+
+  s_test_settings_item_index = 0u;
+  s_test_settings_active = 1u;
+  ui_screen_test_configure_settings_bottom_bar();
+
+  UI_Toast_Show("SCREEN SETTINGS",
+                icon_ui_folder_8x8,
+                ICON8_W,
+                ICON8_H,
+                now_ms,
+                900u);
+}
+
+static void ui_screen_test_settings_cancel(uint32_t now_ms)
+{
+  ui_screen_test_settings_apply_preview(&s_test_settings_original);
+  s_test_settings_draft = s_test_settings_original;
+  s_test_settings_active = 0u;
+  ui_screen_test_configure_bottom_bar();
+
+  UI_Toast_Show("SETTINGS CANCELED",
+                icon_ui_warn_8x8,
+                ICON8_W,
+                ICON8_H,
+                now_ms,
+                900u);
+}
+
+static void ui_screen_test_settings_save(uint32_t now_ms)
+{
+  ui_screen_test_settings_normalize(&s_test_settings_draft);
+  ui_screen_test_settings_apply_preview(&s_test_settings_draft);
+  s_test_settings_original = s_test_settings_draft;
+  s_test_settings_active = 0u;
+  ui_screen_test_configure_bottom_bar();
+
+  UI_Toast_Show("SETTINGS SAVED",
+                icon_ui_ok_8x8,
+                ICON8_W,
+                ICON8_H,
+                now_ms,
+                900u);
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Local helper: item value formatter                                          */
+/* -------------------------------------------------------------------------- */
+static void ui_screen_test_settings_get_value_text(uint8_t item_index,
+                                                   const app_settings_t *settings,
+                                                   char *out_text,
+                                                   size_t out_size)
+{
+  if ((out_text == 0) || (out_size == 0u) || (settings == 0))
+  {
+    return;
+  }
+
+  switch (item_index)
+  {
+    case UI_TEST_SETTINGS_ITEM_BL_MODE:
+      snprintf(out_text, out_size, "%s",
+               ui_screen_test_backlight_mode_text(settings->backlight.auto_mode));
+      break;
+
+    case UI_TEST_SETTINGS_ITEM_BL_CONT_BIAS:
+      snprintf(out_text, out_size, "%d",
+               (int)settings->backlight.continuous_bias_steps);
+      break;
+
+    case UI_TEST_SETTINGS_ITEM_BL_SMOOTHNESS:
+      snprintf(out_text, out_size, "%u",
+               (unsigned)settings->backlight.transition_smoothness);
+      break;
+
+    case UI_TEST_SETTINGS_ITEM_BL_NIGHT_THRESHOLD:
+      snprintf(out_text, out_size, "%u%%",
+               (unsigned)settings->backlight.night_threshold_percent);
+      break;
+
+    case UI_TEST_SETTINGS_ITEM_BL_SUPER_THRESHOLD:
+      snprintf(out_text, out_size, "%u%%",
+               (unsigned)settings->backlight.super_night_threshold_percent);
+      break;
+
+    case UI_TEST_SETTINGS_ITEM_BL_NIGHT_LEVEL:
+      snprintf(out_text, out_size, "%u%%",
+               (unsigned)settings->backlight.night_brightness_percent);
+      break;
+
+    case UI_TEST_SETTINGS_ITEM_BL_SUPER_LEVEL:
+      snprintf(out_text, out_size, "%u%%",
+               (unsigned)settings->backlight.super_night_brightness_percent);
+      break;
+
+    case UI_TEST_SETTINGS_ITEM_DISP_CONTRAST:
+      snprintf(out_text, out_size, "%u", (unsigned)settings->uc1608.contrast);
+      break;
+
+    case UI_TEST_SETTINGS_ITEM_DISP_TEMP_COMP:
+      snprintf(out_text, out_size, "TC%u",
+               (unsigned)settings->uc1608.temperature_compensation);
+      break;
+
+    case UI_TEST_SETTINGS_ITEM_DISP_BIAS:
+      switch (settings->uc1608.bias_ratio)
+      {
+        case 0u: snprintf(out_text, out_size, "10.7"); break;
+        case 1u: snprintf(out_text, out_size, "10.3"); break;
+        case 2u: snprintf(out_text, out_size, "12.0"); break;
+        default: snprintf(out_text, out_size, "12.7"); break;
+      }
+      break;
+
+    case UI_TEST_SETTINGS_ITEM_DISP_RAM_ACCESS:
+      snprintf(out_text, out_size, "RAM%u",
+               (unsigned)settings->uc1608.ram_access_mode);
+      break;
+
+    case UI_TEST_SETTINGS_ITEM_DISP_START_LINE:
+      snprintf(out_text, out_size, "%u",
+               (unsigned)settings->uc1608.start_line_raw);
+      break;
+
+    case UI_TEST_SETTINGS_ITEM_DISP_FIXED_LINE:
+      snprintf(out_text, out_size, "%u",
+               (unsigned)settings->uc1608.fixed_line_raw);
+      break;
+
+    case UI_TEST_SETTINGS_ITEM_DISP_POWER_CTRL:
+      snprintf(out_text, out_size, "%u",
+               (unsigned)settings->uc1608.power_control_raw);
+      break;
+
+    case UI_TEST_SETTINGS_ITEM_DISP_FLIP_MODE:
+      snprintf(out_text, out_size, "%s",
+               (settings->uc1608.flip_mode != 0u) ? "FLIPPED" : "NORMAL");
+      break;
+
+    default:
+      snprintf(out_text, out_size, "-");
+      break;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Local helper: item value -> slider percent                                 */
+/* -------------------------------------------------------------------------- */
+static uint8_t ui_screen_test_settings_get_value_bar_percent(uint8_t item_index,
+                                                             const app_settings_t *settings)
+{
+  if (settings == 0)
+  {
+    return 0u;
+  }
+
+  switch (item_index)
+  {
+    case UI_TEST_SETTINGS_ITEM_BL_MODE:
+      return (settings->backlight.auto_mode == (uint8_t)APP_BACKLIGHT_AUTO_MODE_DIMMER) ? 100u : 0u;
+
+    case UI_TEST_SETTINGS_ITEM_BL_CONT_BIAS:
+      return (uint8_t)(((int32_t)settings->backlight.continuous_bias_steps + 2) * 25);
+
+    case UI_TEST_SETTINGS_ITEM_BL_SMOOTHNESS:
+      return (uint8_t)((settings->backlight.transition_smoothness - 1u) * 25u);
+
+    case UI_TEST_SETTINGS_ITEM_BL_NIGHT_THRESHOLD:
+      return settings->backlight.night_threshold_percent;
+
+    case UI_TEST_SETTINGS_ITEM_BL_SUPER_THRESHOLD:
+      return settings->backlight.super_night_threshold_percent;
+
+    case UI_TEST_SETTINGS_ITEM_BL_NIGHT_LEVEL:
+      return settings->backlight.night_brightness_percent;
+
+    case UI_TEST_SETTINGS_ITEM_BL_SUPER_LEVEL:
+      return settings->backlight.super_night_brightness_percent;
+
+    case UI_TEST_SETTINGS_ITEM_DISP_CONTRAST:
+      return (uint8_t)((settings->uc1608.contrast * 100u) / 255u);
+
+    case UI_TEST_SETTINGS_ITEM_DISP_TEMP_COMP:
+      return (uint8_t)((settings->uc1608.temperature_compensation * 100u) / 3u);
+
+    case UI_TEST_SETTINGS_ITEM_DISP_BIAS:
+      return (uint8_t)((settings->uc1608.bias_ratio * 100u) / 3u);
+
+    case UI_TEST_SETTINGS_ITEM_DISP_RAM_ACCESS:
+      return (uint8_t)((settings->uc1608.ram_access_mode * 100u) / 3u);
+
+    case UI_TEST_SETTINGS_ITEM_DISP_START_LINE:
+      return (uint8_t)((settings->uc1608.start_line_raw * 100u) / 63u);
+
+    case UI_TEST_SETTINGS_ITEM_DISP_FIXED_LINE:
+      return (uint8_t)((settings->uc1608.fixed_line_raw * 100u) / 15u);
+
+    case UI_TEST_SETTINGS_ITEM_DISP_POWER_CTRL:
+      return (uint8_t)((settings->uc1608.power_control_raw * 100u) / 7u);
+
+    case UI_TEST_SETTINGS_ITEM_DISP_FLIP_MODE:
+      return (settings->uc1608.flip_mode != 0u) ? 100u : 0u;
+
+    default:
+      return 0u;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Local helper: current item value adjust                                    */
+/* -------------------------------------------------------------------------- */
+static void ui_screen_test_settings_adjust_current_item(int8_t direction,
+                                                        bool fast_step,
+                                                        uint32_t now_ms)
+{
+  int32_t step_small;
+  int32_t step_large;
+  int32_t delta;
+  int32_t value_temp;
+
+  step_small = (direction >= 0) ? 1 : -1;
+  step_large = (direction >= 0) ? 5 : -5;
+  delta = fast_step ? step_large : step_small;
+
+  switch (s_test_settings_item_index)
+  {
+    case UI_TEST_SETTINGS_ITEM_BL_MODE:
+      s_test_settings_draft.backlight.auto_mode =
+        (s_test_settings_draft.backlight.auto_mode == (uint8_t)APP_BACKLIGHT_AUTO_MODE_DIMMER) ?
+        (uint8_t)APP_BACKLIGHT_AUTO_MODE_CONTINUOUS :
+        (uint8_t)APP_BACKLIGHT_AUTO_MODE_DIMMER;
+      break;
+
+    case UI_TEST_SETTINGS_ITEM_BL_CONT_BIAS:
+      value_temp = (int32_t)s_test_settings_draft.backlight.continuous_bias_steps + step_small;
+      if (value_temp < -2) value_temp = -2;
+      if (value_temp > 2)  value_temp = 2;
+      s_test_settings_draft.backlight.continuous_bias_steps = (int8_t)value_temp;
+      break;
+
+    case UI_TEST_SETTINGS_ITEM_BL_SMOOTHNESS:
+      value_temp = (int32_t)s_test_settings_draft.backlight.transition_smoothness + step_small;
+      if (value_temp < 1) value_temp = 1;
+      if (value_temp > 5) value_temp = 5;
+      s_test_settings_draft.backlight.transition_smoothness = (uint8_t)value_temp;
+      break;
+
+    case UI_TEST_SETTINGS_ITEM_BL_NIGHT_THRESHOLD:
+      value_temp = (int32_t)s_test_settings_draft.backlight.night_threshold_percent + delta;
+      if (value_temp < 0) value_temp = 0;
+      if (value_temp > 100) value_temp = 100;
+      s_test_settings_draft.backlight.night_threshold_percent = (uint8_t)value_temp;
+      break;
+
+    case UI_TEST_SETTINGS_ITEM_BL_SUPER_THRESHOLD:
+      value_temp = (int32_t)s_test_settings_draft.backlight.super_night_threshold_percent + delta;
+      if (value_temp < 0) value_temp = 0;
+      if (value_temp > 100) value_temp = 100;
+      s_test_settings_draft.backlight.super_night_threshold_percent = (uint8_t)value_temp;
+      break;
+
+    case UI_TEST_SETTINGS_ITEM_BL_NIGHT_LEVEL:
+      value_temp = (int32_t)s_test_settings_draft.backlight.night_brightness_percent + delta;
+      if (value_temp < 0) value_temp = 0;
+      if (value_temp > 100) value_temp = 100;
+      s_test_settings_draft.backlight.night_brightness_percent = (uint8_t)value_temp;
+      break;
+
+    case UI_TEST_SETTINGS_ITEM_BL_SUPER_LEVEL:
+      value_temp = (int32_t)s_test_settings_draft.backlight.super_night_brightness_percent + delta;
+      if (value_temp < 0) value_temp = 0;
+      if (value_temp > 100) value_temp = 100;
+      s_test_settings_draft.backlight.super_night_brightness_percent = (uint8_t)value_temp;
+      break;
+
+    case UI_TEST_SETTINGS_ITEM_DISP_CONTRAST:
+      value_temp = (int32_t)s_test_settings_draft.uc1608.contrast +
+                   (fast_step ? ((direction >= 0) ? 16 : -16) : step_small);
+      if (value_temp < 0) value_temp = 0;
+      if (value_temp > 255) value_temp = 255;
+      s_test_settings_draft.uc1608.contrast = (uint8_t)value_temp;
+      break;
+
+    case UI_TEST_SETTINGS_ITEM_DISP_TEMP_COMP:
+      value_temp = (int32_t)s_test_settings_draft.uc1608.temperature_compensation + step_small;
+      if (value_temp < 0) value_temp = 0;
+      if (value_temp > 3) value_temp = 3;
+      s_test_settings_draft.uc1608.temperature_compensation = (uint8_t)value_temp;
+      break;
+
+    case UI_TEST_SETTINGS_ITEM_DISP_BIAS:
+      value_temp = (int32_t)s_test_settings_draft.uc1608.bias_ratio + step_small;
+      if (value_temp < 0) value_temp = 0;
+      if (value_temp > 3) value_temp = 3;
+      s_test_settings_draft.uc1608.bias_ratio = (uint8_t)value_temp;
+      break;
+
+    case UI_TEST_SETTINGS_ITEM_DISP_RAM_ACCESS:
+      value_temp = (int32_t)s_test_settings_draft.uc1608.ram_access_mode + step_small;
+      if (value_temp < 0) value_temp = 0;
+      if (value_temp > 3) value_temp = 3;
+      s_test_settings_draft.uc1608.ram_access_mode = (uint8_t)value_temp;
+      break;
+
+    case UI_TEST_SETTINGS_ITEM_DISP_START_LINE:
+      value_temp = (int32_t)s_test_settings_draft.uc1608.start_line_raw +
+                   (fast_step ? ((direction >= 0) ? 8 : -8) : step_small);
+      if (value_temp < 0) value_temp = 0;
+      if (value_temp > 63) value_temp = 63;
+      s_test_settings_draft.uc1608.start_line_raw = (uint8_t)value_temp;
+      break;
+
+    case UI_TEST_SETTINGS_ITEM_DISP_FIXED_LINE:
+      value_temp = (int32_t)s_test_settings_draft.uc1608.fixed_line_raw + step_small;
+      if (value_temp < 0) value_temp = 0;
+      if (value_temp > 15) value_temp = 15;
+      s_test_settings_draft.uc1608.fixed_line_raw = (uint8_t)value_temp;
+      break;
+
+    case UI_TEST_SETTINGS_ITEM_DISP_POWER_CTRL:
+      value_temp = (int32_t)s_test_settings_draft.uc1608.power_control_raw + step_small;
+      if (value_temp < 0) value_temp = 0;
+      if (value_temp > 7) value_temp = 7;
+      s_test_settings_draft.uc1608.power_control_raw = (uint8_t)value_temp;
+      break;
+
+    case UI_TEST_SETTINGS_ITEM_DISP_FLIP_MODE:
+      s_test_settings_draft.uc1608.flip_mode =
+        (s_test_settings_draft.uc1608.flip_mode == 0u) ? 1u : 0u;
+      break;
+
+    default:
+      break;
+  }
+
+  ui_screen_test_settings_normalize(&s_test_settings_draft);
+  ui_screen_test_settings_apply_preview(&s_test_settings_draft);
+
+  UI_Toast_Show(s_test_settings_meta[s_test_settings_item_index].title,
+                icon_ui_info_8x8,
+                ICON8_W,
+                ICON8_H,
+                now_ms,
+                500u);
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Local helper: settings mode button handler                                 */
+/* -------------------------------------------------------------------------- */
+static ui_screen_test_action_t ui_screen_test_handle_settings_button_event(const button_event_t *event,
+                                                                           uint32_t now_ms)
+{
+  if (event == 0)
+  {
+    return UI_SCREEN_TEST_ACTION_NONE;
+  }
+
+  if ((event->type != BUTTON_EVENT_SHORT_PRESS) &&
+      (event->type != BUTTON_EVENT_LONG_PRESS))
+  {
+    return UI_SCREEN_TEST_ACTION_NONE;
+  }
+
+  switch (event->id)
+  {
+    case BUTTON_ID_1:
+      ui_screen_test_settings_cancel(now_ms);
+      break;
+
+    case BUTTON_ID_2:
+      if (s_test_settings_item_index == 0u)
+      {
+        s_test_settings_item_index = (UI_TEST_SETTINGS_ITEM_COUNT - 1u);
+      }
+      else
+      {
+        s_test_settings_item_index--;
+      }
+      break;
+
+    case BUTTON_ID_3:
+      s_test_settings_item_index =
+        (uint8_t)((s_test_settings_item_index + 1u) % UI_TEST_SETTINGS_ITEM_COUNT);
+      break;
+
+    case BUTTON_ID_4:
+      ui_screen_test_settings_adjust_current_item(-1,
+                                                  (event->type == BUTTON_EVENT_LONG_PRESS),
+                                                  now_ms);
+      break;
+
+    case BUTTON_ID_5:
+      ui_screen_test_settings_adjust_current_item(1,
+                                                  (event->type == BUTTON_EVENT_LONG_PRESS),
+                                                  now_ms);
+      break;
+
+    case BUTTON_ID_6:
+      ui_screen_test_settings_save(now_ms);
+      break;
+
+    case BUTTON_ID_NONE:
+    default:
+      break;
+  }
+
+  return UI_SCREEN_TEST_ACTION_NONE;
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Compose getters                                                           */
 /* -------------------------------------------------------------------------- */
 ui_layout_mode_t UI_ScreenTest_GetLayoutMode(void)
 {
+  if (s_test_settings_active != 0u)
+  {
+    return UI_LAYOUT_MODE_TOP_BOTTOM_FIXED;
+  }
+
   return s_test_layout_mode;
 }
 
 bool UI_ScreenTest_IsStatusBarVisible(void)
 {
+  if (s_test_settings_active != 0u)
+  {
+    return true;
+  }
+
   return (s_test_layout_mode != UI_LAYOUT_MODE_FULLSCREEN);
 }
 
 bool UI_ScreenTest_IsBottomBarVisible(uint32_t now_ms, uint32_t pressed_mask)
 {
+  if (s_test_settings_active != 0u)
+  {
+    return true;
+  }
+
   switch (s_test_layout_mode)
   {
     case UI_LAYOUT_MODE_TOP_BOTTOM_FIXED:
@@ -960,6 +1661,261 @@ static void ui_screen_test_draw_footer_info(u8g2_t *u8g2,
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Local helper: settings screen draw                                        */
+/*                                                                            */
+/*  그림 설명                                                                  */
+/*  - viewport 바깥 1px 테두리: TEST screen 본문 영역 외곽                     */
+/*  - 그 안쪽 상단: SCREEN TEST SETTINGS title bar                            */
+/*  - title bar 아래 2개 탭: BACKLIGHT / UC1608                               */
+/*  - 중앙 큰 카드: 현재 선택된 setting item 상세                             */
+/*  - 우측 skinny panel: live runtime diagnostics                             */
+/*  - 카드 하단 slider: 현재 값의 상대 위치                                   */
+/*                                                                            */
+/*  이 화면은 status bar와 bottom bar가 이미 외부에서 따로 그려지고 있다는     */
+/*  전제 아래, viewport 내부만 정확히 채운다.                                 */
+/* -------------------------------------------------------------------------- */
+static void ui_screen_test_draw_settings_screen(u8g2_t *u8g2,
+                                                const ui_rect_t *viewport)
+{
+  ui_rect_t inner_rect;
+  uint8_t current_category;
+  char value_text[24];
+  char line[40];
+  int16_t card_x;
+  int16_t card_y;
+  int16_t card_w;
+  int16_t card_h;
+  int16_t diag_x;
+  int16_t diag_y;
+  int16_t diag_w;
+  int16_t diag_h;
+  uint8_t bar_percent;
+  uint8_t fill_w;
+
+  if ((u8g2 == 0) || (viewport == 0))
+  {
+    return;
+  }
+
+  ui_screen_test_draw_viewport_boundary(u8g2, viewport);
+
+  inner_rect = *viewport;
+  inner_rect.x = (int16_t)(inner_rect.x + 2);
+  inner_rect.y = (int16_t)(inner_rect.y + 2);
+  inner_rect.w = (int16_t)(inner_rect.w - 4);
+  inner_rect.h = (int16_t)(inner_rect.h - 4);
+
+  current_category = s_test_settings_meta[s_test_settings_item_index].category;
+  ui_screen_test_settings_get_value_text(s_test_settings_item_index,
+                                         &s_test_settings_draft,
+                                         value_text,
+                                         sizeof(value_text));
+  bar_percent = ui_screen_test_settings_get_value_bar_percent(s_test_settings_item_index,
+                                                              &s_test_settings_draft);
+
+  /* title bar */
+  u8g2_SetDrawColor(u8g2, 1);
+  u8g2_DrawFrame(u8g2,
+                 (u8g2_uint_t)inner_rect.x,
+                 (u8g2_uint_t)inner_rect.y,
+                 (u8g2_uint_t)inner_rect.w,
+                 20u);
+  u8g2_SetFont(u8g2, u8g2_font_7x13_mf);
+  u8g2_DrawStr(u8g2,
+               (u8g2_uint_t)(inner_rect.x + 6),
+               (u8g2_uint_t)(inner_rect.y + 13),
+               "SCREEN TEST SETTINGS");
+
+  /* category tabs */
+  {
+    int16_t tab_y = (int16_t)(inner_rect.y + 24);
+    int16_t tab_w = 72;
+
+    if (current_category == UI_TEST_SETTINGS_CATEGORY_BACKLIGHT)
+    {
+      u8g2_DrawBox(u8g2, (u8g2_uint_t)(inner_rect.x + 4), (u8g2_uint_t)tab_y, (u8g2_uint_t)tab_w, 12u);
+      u8g2_SetDrawColor(u8g2, 0);
+      u8g2_DrawStr(u8g2, (u8g2_uint_t)(inner_rect.x + 10), (u8g2_uint_t)(tab_y + 9), "BACKLIGHT");
+      u8g2_SetDrawColor(u8g2, 1);
+      u8g2_DrawFrame(u8g2, (u8g2_uint_t)(inner_rect.x + 84), (u8g2_uint_t)tab_y, (u8g2_uint_t)tab_w, 12u);
+      u8g2_DrawStr(u8g2, (u8g2_uint_t)(inner_rect.x + 104), (u8g2_uint_t)(tab_y + 9), "UC1608");
+    }
+    else
+    {
+      u8g2_DrawFrame(u8g2, (u8g2_uint_t)(inner_rect.x + 4), (u8g2_uint_t)tab_y, (u8g2_uint_t)tab_w, 12u);
+      u8g2_DrawStr(u8g2, (u8g2_uint_t)(inner_rect.x + 10), (u8g2_uint_t)(tab_y + 9), "BACKLIGHT");
+      u8g2_DrawBox(u8g2, (u8g2_uint_t)(inner_rect.x + 84), (u8g2_uint_t)tab_y, (u8g2_uint_t)tab_w, 12u);
+      u8g2_SetDrawColor(u8g2, 0);
+      u8g2_DrawStr(u8g2, (u8g2_uint_t)(inner_rect.x + 104), (u8g2_uint_t)(tab_y + 9), "UC1608");
+      u8g2_SetDrawColor(u8g2, 1);
+    }
+  }
+
+  /* main card + diagnostic panel */
+  card_x = (int16_t)(inner_rect.x + 4);
+  card_y = (int16_t)(inner_rect.y + 40);
+  card_w = (int16_t)(inner_rect.w - 86);
+  card_h = (int16_t)(inner_rect.h - 44);
+  diag_x = (int16_t)(inner_rect.x + inner_rect.w - 78);
+  diag_y = card_y;
+  diag_w = 74;
+  diag_h = card_h;
+
+  if (card_w < 80)
+  {
+    card_w = (int16_t)(inner_rect.w - 8);
+    diag_w = 0;
+  }
+
+  u8g2_DrawFrame(u8g2, (u8g2_uint_t)card_x, (u8g2_uint_t)card_y, (u8g2_uint_t)card_w, (u8g2_uint_t)card_h);
+  if (diag_w > 0)
+  {
+    u8g2_DrawFrame(u8g2, (u8g2_uint_t)diag_x, (u8g2_uint_t)diag_y, (u8g2_uint_t)diag_w, (u8g2_uint_t)diag_h);
+  }
+
+  u8g2_SetFont(u8g2, u8g2_font_5x8_tr);
+  snprintf(line, sizeof(line), "%s  %u/%u",
+           ui_screen_test_settings_category_text(current_category),
+           (unsigned)(s_test_settings_item_index + 1u),
+           (unsigned)UI_TEST_SETTINGS_ITEM_COUNT);
+  u8g2_DrawStr(u8g2, (u8g2_uint_t)(card_x + 4), (u8g2_uint_t)(card_y + 8), line);
+
+  u8g2_SetFont(u8g2, u8g2_font_7x13_mf);
+  u8g2_DrawStr(u8g2,
+               (u8g2_uint_t)(card_x + 4),
+               (u8g2_uint_t)(card_y + 22),
+               s_test_settings_meta[s_test_settings_item_index].title);
+
+  u8g2_SetFont(u8g2, u8g2_font_5x8_tr);
+  u8g2_DrawStr(u8g2,
+               (u8g2_uint_t)(card_x + 4),
+               (u8g2_uint_t)(card_y + 31),
+               s_test_settings_meta[s_test_settings_item_index].subtitle);
+
+  u8g2_SetFont(u8g2, u8g2_font_7x13_mf);
+  u8g2_DrawFrame(u8g2,
+                 (u8g2_uint_t)(card_x + 6),
+                 (u8g2_uint_t)(card_y + 38),
+                 (u8g2_uint_t)(card_w - 12),
+                 22u);
+  u8g2_DrawStr(u8g2,
+               (u8g2_uint_t)(card_x + 12),
+               (u8g2_uint_t)(card_y + 53),
+               value_text);
+
+  /* slider */
+  u8g2_SetFont(u8g2, u8g2_font_5x8_tr);
+  u8g2_DrawStr(u8g2,
+               (u8g2_uint_t)(card_x + 4),
+               (u8g2_uint_t)(card_y + 70),
+               "VALUE POSITION");
+  u8g2_DrawFrame(u8g2,
+                 (u8g2_uint_t)(card_x + 6),
+                 (u8g2_uint_t)(card_y + 74),
+                 (u8g2_uint_t)(card_w - 12),
+                 8u);
+  fill_w = (uint8_t)((((uint32_t)(card_w - 14)) * bar_percent) / 100u);
+  if (fill_w > 0u)
+  {
+    u8g2_DrawBox(u8g2,
+                 (u8g2_uint_t)(card_x + 7),
+                 (u8g2_uint_t)(card_y + 75),
+                 (u8g2_uint_t)fill_w,
+                 6u);
+  }
+
+  snprintf(line, sizeof(line), "F2/F3 ITEM  F4/F5 VALUE");
+  u8g2_DrawStr(u8g2,
+               (u8g2_uint_t)(card_x + 4),
+               (u8g2_uint_t)(card_y + card_h - 16),
+               line);
+  snprintf(line, sizeof(line), "F1 CANCEL  F6 SAVE");
+  u8g2_DrawStr(u8g2,
+               (u8g2_uint_t)(card_x + 4),
+               (u8g2_uint_t)(card_y + card_h - 6),
+               line);
+
+  if (diag_w > 0)
+  {
+    int16_t y = (int16_t)(diag_y + 8);
+
+    u8g2_SetFont(u8g2, u8g2_font_5x8_tr);
+    u8g2_DrawStr(u8g2, (u8g2_uint_t)(diag_x + 4), (u8g2_uint_t)y, "LIVE PREVIEW");
+    y = (int16_t)(y + 10);
+
+    if (current_category == UI_TEST_SETTINGS_CATEGORY_BACKLIGHT)
+    {
+      snprintf(line, sizeof(line), "MODE %s",
+               (g_backlight_app_runtime.active_mode == BACKLIGHT_APP_ACTIVE_MODE_AUTO_DIMMER) ? "DIM" :
+               ((g_backlight_app_runtime.active_mode == BACKLIGHT_APP_ACTIVE_MODE_MANUAL_OVERRIDE) ? "MAN" : "CONT"));
+      u8g2_DrawStr(u8g2, (u8g2_uint_t)(diag_x + 4), (u8g2_uint_t)y, line);
+      y = (int16_t)(y + 9);
+
+      snprintf(line, sizeof(line), "ZONE %s",
+               ui_screen_test_dimmer_zone_text(g_backlight_app_runtime.active_zone));
+      u8g2_DrawStr(u8g2, (u8g2_uint_t)(diag_x + 4), (u8g2_uint_t)y, line);
+      y = (int16_t)(y + 9);
+
+      snprintf(line, sizeof(line), "SNS %u%%", (unsigned)g_backlight_app_runtime.sensor_percent);
+      u8g2_DrawStr(u8g2, (u8g2_uint_t)(diag_x + 4), (u8g2_uint_t)y, line);
+      y = (int16_t)(y + 9);
+
+      snprintf(line, sizeof(line), "FIL %u%%",
+               (unsigned)((g_backlight_app_runtime.sensor_filtered_permille + 5u) / 10u));
+      u8g2_DrawStr(u8g2, (u8g2_uint_t)(diag_x + 4), (u8g2_uint_t)y, line);
+      y = (int16_t)(y + 9);
+
+      snprintf(line, sizeof(line), "TGT %u%%", (unsigned)g_backlight_app_runtime.target_linear_percent);
+      u8g2_DrawStr(u8g2, (u8g2_uint_t)(diag_x + 4), (u8g2_uint_t)y, line);
+      y = (int16_t)(y + 9);
+
+      snprintf(line, sizeof(line), "OUT %u%%", (unsigned)g_backlight_app_runtime.applied_linear_percent);
+      u8g2_DrawStr(u8g2, (u8g2_uint_t)(diag_x + 4), (u8g2_uint_t)y, line);
+      y = (int16_t)(y + 9);
+
+      snprintf(line, sizeof(line), "CCR %lu", (unsigned long)g_backlight_driver_state.last_compare_counts);
+      u8g2_DrawStr(u8g2, (u8g2_uint_t)(diag_x + 4), (u8g2_uint_t)y, line);
+      y = (int16_t)(y + 9);
+
+      u8g2_DrawStr(u8g2, (u8g2_uint_t)(diag_x + 4), (u8g2_uint_t)y, "PB1 TIM3C4");
+    }
+    else
+    {
+      snprintf(line, sizeof(line), "CTR %u", (unsigned)g_u8g2_uc1608_runtime.applied.contrast);
+      u8g2_DrawStr(u8g2, (u8g2_uint_t)(diag_x + 4), (u8g2_uint_t)y, line);
+      y = (int16_t)(y + 9);
+
+      snprintf(line, sizeof(line), "TC %u", (unsigned)g_u8g2_uc1608_runtime.applied.temperature_compensation);
+      u8g2_DrawStr(u8g2, (u8g2_uint_t)(diag_x + 4), (u8g2_uint_t)y, line);
+      y = (int16_t)(y + 9);
+
+      snprintf(line, sizeof(line), "BIA %u", (unsigned)g_u8g2_uc1608_runtime.applied.bias_ratio);
+      u8g2_DrawStr(u8g2, (u8g2_uint_t)(diag_x + 4), (u8g2_uint_t)y, line);
+      y = (int16_t)(y + 9);
+
+      snprintf(line, sizeof(line), "RAM %u", (unsigned)g_u8g2_uc1608_runtime.applied.ram_access_mode);
+      u8g2_DrawStr(u8g2, (u8g2_uint_t)(diag_x + 4), (u8g2_uint_t)y, line);
+      y = (int16_t)(y + 9);
+
+      snprintf(line, sizeof(line), "SL %u", (unsigned)g_u8g2_uc1608_runtime.applied.start_line_raw);
+      u8g2_DrawStr(u8g2, (u8g2_uint_t)(diag_x + 4), (u8g2_uint_t)y, line);
+      y = (int16_t)(y + 9);
+
+      snprintf(line, sizeof(line), "FL %u", (unsigned)g_u8g2_uc1608_runtime.applied.fixed_line_raw);
+      u8g2_DrawStr(u8g2, (u8g2_uint_t)(diag_x + 4), (u8g2_uint_t)y, line);
+      y = (int16_t)(y + 9);
+
+      snprintf(line, sizeof(line), "PWR %u", (unsigned)g_u8g2_uc1608_runtime.applied.power_control_raw);
+      u8g2_DrawStr(u8g2, (u8g2_uint_t)(diag_x + 4), (u8g2_uint_t)y, line);
+      y = (int16_t)(y + 9);
+
+      snprintf(line, sizeof(line), "FLIP %u", (unsigned)g_u8g2_uc1608_runtime.applied.flip_mode);
+      u8g2_DrawStr(u8g2, (u8g2_uint_t)(diag_x + 4), (u8g2_uint_t)y, line);
+    }
+  }
+}
+
+/* -------------------------------------------------------------------------- */
 /* Public draw: UI test screen                                                */
 /*                                                                            */
 /* 설계 원칙                                                                  */
@@ -990,6 +1946,12 @@ void UI_ScreenTest_Draw(u8g2_t *u8g2,
 
   if ((viewport->w <= 2) || (viewport->h <= 2))
   {
+    return;
+  }
+
+  if (s_test_settings_active != 0u)
+  {
+    ui_screen_test_draw_settings_screen(u8g2, viewport);
     return;
   }
 
