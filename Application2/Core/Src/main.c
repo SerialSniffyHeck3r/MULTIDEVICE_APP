@@ -46,6 +46,7 @@
 
 /* 데이터 창고 APP_STATE. 모든 함수는 앱스테이트를 보고 거기서 복사해 와야 한다. */
 #include "APP_STATE.h"
+#include "APP_ALTITUDE.h"
 
 /* 유블록스 NEO_M10 GPS 드라이버 */
 #include "Ublox_GPS.h"
@@ -2719,6 +2720,7 @@ int main(void)
 
 
   APP_STATE_Init();
+  APP_ALTITUDE_Init(HAL_GetTick());
 
   /* ------------------------------------------------------------------------ */
   /*  RTC / timezone / GPS sync service bring-up                               */
@@ -2965,6 +2967,7 @@ int main(void)
 
 	        /* 새 센서 드라이버들 */
 	        GY86_IMU_Task(now_ms);
+	        APP_ALTITUDE_Task(now_ms);
 	        DS18B20_DRIVER_Task(now_ms);
 	        Brightness_Sensor_Task(now_ms);
 
