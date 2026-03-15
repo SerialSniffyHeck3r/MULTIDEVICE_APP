@@ -2,6 +2,7 @@
 
 #include "APP_STATE.h"
 #include "APP_CLOCK.h"
+#include "APP_ALTITUDE.h"
 #include "button.h"
 #include "Bluetooth.h"
 #include "Audio_App.h"
@@ -376,7 +377,8 @@
       APP_UI_PAGE_AUDIO       = 5u,
       APP_UI_PAGE_SPI_FLASH   = 6u,
       APP_UI_PAGE_CLOCK       = 7u,
-      APP_UI_PAGE_COUNT       = 8u
+      APP_UI_PAGE_ALTITUDE    = 8u,
+      APP_UI_PAGE_COUNT       = 9u
   } app_ui_page_t;
 
   /* -------------------------------------------------------------------------- */
@@ -2058,6 +2060,580 @@
       }
   }
 
+
+
+  /* -------------------------------------------------------------------------- */
+  /*  ALTITUDE debug page 편집 파라미터                                           */
+  /* -------------------------------------------------------------------------- */
+  typedef enum
+  {
+      APP_ALT_PARAM_MANUAL_QNH = 0u,
+      APP_ALT_PARAM_GPS_EQ_QNH_ENABLE,
+      APP_ALT_PARAM_GPS_BIAS_ENABLE,
+      APP_ALT_PARAM_IMU_AID_ENABLE,
+      APP_ALT_PARAM_AUTO_HOME_ENABLE,
+      APP_ALT_PARAM_IMU_SIGN,
+      APP_ALT_PARAM_PRESSURE_LPF_TAU,
+      APP_ALT_PARAM_VARIO_FAST_TAU,
+      APP_ALT_PARAM_VARIO_SLOW_TAU,
+      APP_ALT_PARAM_DISPLAY_LPF_TAU,
+      APP_ALT_PARAM_GPS_MAX_VACC,
+      APP_ALT_PARAM_GPS_MAX_PDOP,
+      APP_ALT_PARAM_GPS_MIN_SATS,
+      APP_ALT_PARAM_GPS_BIAS_TAU,
+      APP_ALT_PARAM_IMU_GRAVITY_TAU,
+      APP_ALT_PARAM_IMU_ACCEL_TAU,
+      APP_ALT_PARAM_IMU_DEADBAND,
+      APP_ALT_PARAM_IMU_CLIP,
+      APP_ALT_PARAM_AUDIO_ENABLE,
+      APP_ALT_PARAM_AUDIO_DEADBAND,
+      APP_ALT_PARAM_AUDIO_MIN_FREQ,
+      APP_ALT_PARAM_AUDIO_MAX_FREQ,
+      APP_ALT_PARAM_AUDIO_REPEAT_MS,
+      APP_ALT_PARAM_AUDIO_BEEP_MS,
+      APP_ALT_PARAM_KF_Q_H,
+      APP_ALT_PARAM_KF_Q_V,
+      APP_ALT_PARAM_KF_Q_B,
+      APP_ALT_PARAM_KF_Q_A,
+      APP_ALT_PARAM_BARO_R,
+      APP_ALT_PARAM_GPS_R,
+      APP_ALT_PARAM_COUNT
+  } app_altitude_param_t;
+
+  static app_altitude_state_t g_altitude_snapshot;
+  static app_settings_t       g_settings_snapshot;
+  static uint8_t              g_altitude_selected_param = 0u;
+
+  #ifndef APP_UI_ALTITUDE_MIN_REFRESH_MS
+  #define APP_UI_ALTITUDE_MIN_REFRESH_MS 100u
+  #endif
+
+  static int32_t APP_ClampS32(int32_t value, int32_t min_value, int32_t max_value)
+  {
+      if (value < min_value)
+      {
+          return min_value;
+      }
+      if (value > max_value)
+      {
+          return max_value;
+      }
+      return value;
+  }
+
+  static uint16_t APP_ClampToU16(int32_t value, int32_t min_value, int32_t max_value)
+  {
+      return (uint16_t)APP_ClampS32(value, min_value, max_value);
+  }
+
+  static uint8_t APP_ClampToU8(int32_t value, int32_t min_value, int32_t max_value)
+  {
+      return (uint8_t)APP_ClampS32(value, min_value, max_value);
+  }
+
+  static void APP_DrawTextLineAtX(u8g2_t *u8g2, uint8_t x, uint8_t *y, const char *text)
+  {
+      if ((u8g2 == 0) || (y == 0) || (text == 0))
+      {
+          return;
+      }
+
+      u8g2_DrawStr(u8g2, x, *y, text);
+      *y = (uint8_t)(*y + 6u);
+  }
+
+  static void APP_FormatSignedCmAsMeterText(char *out, size_t out_size, int32_t value_cm)
+  {
+      APP_FormatSignedCentiText(out, out_size, value_cm);
+  }
+
+  static void APP_FormatSignedCmsAsMpsText(char *out, size_t out_size, int32_t value_cms)
+  {
+      APP_FormatSignedCentiText(out, out_size, value_cms);
+  }
+
+  static void APP_FormatSignedX10Text(char *out, size_t out_size, int32_t value_x10)
+  {
+      uint32_t abs_value;
+
+      if ((out == 0) || (out_size == 0u))
+      {
+          return;
+      }
+
+      if (value_x10 < 0)
+      {
+          abs_value = (uint32_t)(-value_x10);
+          snprintf(out, out_size, "-%lu.%01lu",
+                   (unsigned long)(abs_value / 10u),
+                   (unsigned long)(abs_value % 10u));
+      }
+      else
+      {
+          abs_value = (uint32_t)value_x10;
+          snprintf(out, out_size, "%lu.%01lu",
+                   (unsigned long)(abs_value / 10u),
+                   (unsigned long)(abs_value % 10u));
+      }
+  }
+
+  static const char *APP_AltitudeParamName(app_altitude_param_t param)
+  {
+      switch (param)
+      {
+      case APP_ALT_PARAM_MANUAL_QNH:        return "QNH_MAN";
+      case APP_ALT_PARAM_GPS_EQ_QNH_ENABLE: return "GPS_EQQ";
+      case APP_ALT_PARAM_GPS_BIAS_ENABLE:   return "GPS_BIAS";
+      case APP_ALT_PARAM_IMU_AID_ENABLE:    return "IMU_AID";
+      case APP_ALT_PARAM_AUTO_HOME_ENABLE:  return "AUTO_HOME";
+      case APP_ALT_PARAM_IMU_SIGN:          return "IMU_SIGN";
+      case APP_ALT_PARAM_PRESSURE_LPF_TAU:  return "P_TAU";
+      case APP_ALT_PARAM_VARIO_FAST_TAU:    return "VF_TAU";
+      case APP_ALT_PARAM_VARIO_SLOW_TAU:    return "VS_TAU";
+      case APP_ALT_PARAM_DISPLAY_LPF_TAU:   return "DSP_TAU";
+      case APP_ALT_PARAM_GPS_MAX_VACC:      return "GPS_VACC";
+      case APP_ALT_PARAM_GPS_MAX_PDOP:      return "GPS_PDOP";
+      case APP_ALT_PARAM_GPS_MIN_SATS:      return "GPS_SATS";
+      case APP_ALT_PARAM_GPS_BIAS_TAU:      return "GBIAS_T";
+      case APP_ALT_PARAM_IMU_GRAVITY_TAU:   return "G_TAU";
+      case APP_ALT_PARAM_IMU_ACCEL_TAU:     return "A_TAU";
+      case APP_ALT_PARAM_IMU_DEADBAND:      return "A_DBMG";
+      case APP_ALT_PARAM_IMU_CLIP:          return "A_CLIP";
+      case APP_ALT_PARAM_AUDIO_ENABLE:      return "AUD_EN";
+      case APP_ALT_PARAM_AUDIO_DEADBAND:    return "AUD_DB";
+      case APP_ALT_PARAM_AUDIO_MIN_FREQ:    return "AUD_FMN";
+      case APP_ALT_PARAM_AUDIO_MAX_FREQ:    return "AUD_FMX";
+      case APP_ALT_PARAM_AUDIO_REPEAT_MS:   return "AUD_RPT";
+      case APP_ALT_PARAM_AUDIO_BEEP_MS:     return "AUD_BEEP";
+      case APP_ALT_PARAM_KF_Q_H:            return "KF_Q_H";
+      case APP_ALT_PARAM_KF_Q_V:            return "KF_Q_V";
+      case APP_ALT_PARAM_KF_Q_B:            return "KF_Q_B";
+      case APP_ALT_PARAM_KF_Q_A:            return "KF_Q_A";
+      case APP_ALT_PARAM_BARO_R:            return "BARO_R";
+      case APP_ALT_PARAM_GPS_R:             return "GPS_R";
+      case APP_ALT_PARAM_COUNT:
+      default:                              return "UNKNOWN";
+      }
+  }
+
+  static void APP_AltitudeDebugFormatSelectedValue(const app_settings_t *settings,
+                                                   char *out,
+                                                   size_t out_size)
+  {
+      const app_altitude_settings_t *alt;
+      char text[24];
+
+      if ((settings == 0) || (out == 0) || (out_size == 0u))
+      {
+          return;
+      }
+
+      alt = &settings->altitude;
+      out[0] = '\0';
+
+      switch ((app_altitude_param_t)g_altitude_selected_param)
+      {
+      case APP_ALT_PARAM_MANUAL_QNH:
+          APP_FormatSignedCentiText(text, sizeof(text), alt->manual_qnh_hpa_x100);
+          snprintf(out, out_size, "%s hPa", text);
+          break;
+      case APP_ALT_PARAM_GPS_EQ_QNH_ENABLE:
+          snprintf(out, out_size, "%u", alt->gps_auto_equiv_qnh_enabled ? 1u : 0u);
+          break;
+      case APP_ALT_PARAM_GPS_BIAS_ENABLE:
+          snprintf(out, out_size, "%u", alt->gps_bias_correction_enabled ? 1u : 0u);
+          break;
+      case APP_ALT_PARAM_IMU_AID_ENABLE:
+          snprintf(out, out_size, "%u", alt->imu_aid_enabled ? 1u : 0u);
+          break;
+      case APP_ALT_PARAM_AUTO_HOME_ENABLE:
+          snprintf(out, out_size, "%u", alt->auto_home_capture_enabled ? 1u : 0u);
+          break;
+      case APP_ALT_PARAM_IMU_SIGN:
+          snprintf(out, out_size, "%d", (int)alt->imu_vertical_sign);
+          break;
+      case APP_ALT_PARAM_PRESSURE_LPF_TAU:
+          snprintf(out, out_size, "%u ms", (unsigned)alt->pressure_lpf_tau_ms);
+          break;
+      case APP_ALT_PARAM_VARIO_FAST_TAU:
+          snprintf(out, out_size, "%u ms", (unsigned)alt->vario_fast_tau_ms);
+          break;
+      case APP_ALT_PARAM_VARIO_SLOW_TAU:
+          snprintf(out, out_size, "%u ms", (unsigned)alt->vario_slow_tau_ms);
+          break;
+      case APP_ALT_PARAM_DISPLAY_LPF_TAU:
+          snprintf(out, out_size, "%u ms", (unsigned)alt->display_lpf_tau_ms);
+          break;
+      case APP_ALT_PARAM_GPS_MAX_VACC:
+          snprintf(out, out_size, "%u mm", (unsigned)alt->gps_max_vacc_mm);
+          break;
+      case APP_ALT_PARAM_GPS_MAX_PDOP:
+          APP_FormatSignedCentiText(text, sizeof(text), (int32_t)alt->gps_max_pdop_x100);
+          snprintf(out, out_size, "%s", text);
+          break;
+      case APP_ALT_PARAM_GPS_MIN_SATS:
+          snprintf(out, out_size, "%u", (unsigned)alt->gps_min_sats);
+          break;
+      case APP_ALT_PARAM_GPS_BIAS_TAU:
+          snprintf(out, out_size, "%u ms", (unsigned)alt->gps_bias_tau_ms);
+          break;
+      case APP_ALT_PARAM_IMU_GRAVITY_TAU:
+          snprintf(out, out_size, "%u ms", (unsigned)alt->imu_gravity_tau_ms);
+          break;
+      case APP_ALT_PARAM_IMU_ACCEL_TAU:
+          snprintf(out, out_size, "%u ms", (unsigned)alt->imu_accel_tau_ms);
+          break;
+      case APP_ALT_PARAM_IMU_DEADBAND:
+          snprintf(out, out_size, "%u mg", (unsigned)alt->imu_vertical_deadband_mg);
+          break;
+      case APP_ALT_PARAM_IMU_CLIP:
+          snprintf(out, out_size, "%u mg", (unsigned)alt->imu_vertical_clip_mg);
+          break;
+      case APP_ALT_PARAM_AUDIO_ENABLE:
+          snprintf(out, out_size, "%u", alt->debug_audio_enabled ? 1u : 0u);
+          break;
+      case APP_ALT_PARAM_AUDIO_DEADBAND:
+          APP_FormatSignedCmsAsMpsText(text, sizeof(text), (int32_t)alt->audio_deadband_cms);
+          snprintf(out, out_size, "%s m/s", text);
+          break;
+      case APP_ALT_PARAM_AUDIO_MIN_FREQ:
+          snprintf(out, out_size, "%u Hz", (unsigned)alt->audio_min_freq_hz);
+          break;
+      case APP_ALT_PARAM_AUDIO_MAX_FREQ:
+          snprintf(out, out_size, "%u Hz", (unsigned)alt->audio_max_freq_hz);
+          break;
+      case APP_ALT_PARAM_AUDIO_REPEAT_MS:
+          snprintf(out, out_size, "%u ms", (unsigned)alt->audio_repeat_ms);
+          break;
+      case APP_ALT_PARAM_AUDIO_BEEP_MS:
+          snprintf(out, out_size, "%u ms", (unsigned)alt->audio_beep_ms);
+          break;
+      case APP_ALT_PARAM_KF_Q_H:
+          snprintf(out, out_size, "%u", (unsigned)alt->kf_q_height_cm_per_s);
+          break;
+      case APP_ALT_PARAM_KF_Q_V:
+          snprintf(out, out_size, "%u", (unsigned)alt->kf_q_velocity_cms_per_s);
+          break;
+      case APP_ALT_PARAM_KF_Q_B:
+          snprintf(out, out_size, "%u", (unsigned)alt->kf_q_baro_bias_cm_per_s);
+          break;
+      case APP_ALT_PARAM_KF_Q_A:
+          snprintf(out, out_size, "%u", (unsigned)alt->kf_q_accel_bias_cms2_per_s);
+          break;
+      case APP_ALT_PARAM_BARO_R:
+          APP_FormatSignedCmAsMeterText(text, sizeof(text), (int32_t)alt->baro_measurement_noise_cm);
+          snprintf(out, out_size, "%s m", text);
+          break;
+      case APP_ALT_PARAM_GPS_R:
+          APP_FormatSignedCmAsMeterText(text, sizeof(text), (int32_t)alt->gps_measurement_noise_floor_cm);
+          snprintf(out, out_size, "%s m", text);
+          break;
+      case APP_ALT_PARAM_COUNT:
+      default:
+          snprintf(out, out_size, "-");
+          break;
+      }
+  }
+
+  static void APP_AltitudeDebugCommitSettings(void)
+  {
+      APP_STATE_StoreSettingsSnapshot(&g_settings_snapshot);
+  }
+
+  static void APP_AltitudeDebugAdjustSelected(int32_t direction)
+  {
+      app_altitude_settings_t *alt;
+
+      APP_STATE_CopySettingsSnapshot(&g_settings_snapshot);
+      alt = &g_settings_snapshot.altitude;
+
+      switch ((app_altitude_param_t)g_altitude_selected_param)
+      {
+      case APP_ALT_PARAM_MANUAL_QNH:
+          alt->manual_qnh_hpa_x100 = APP_ClampS32(alt->manual_qnh_hpa_x100 + ((direction > 0) ? 10 : -10), 80000, 120000);
+          break;
+      case APP_ALT_PARAM_GPS_EQ_QNH_ENABLE:
+          alt->gps_auto_equiv_qnh_enabled = (uint8_t)(alt->gps_auto_equiv_qnh_enabled ? 0u : 1u);
+          break;
+      case APP_ALT_PARAM_GPS_BIAS_ENABLE:
+          alt->gps_bias_correction_enabled = (uint8_t)(alt->gps_bias_correction_enabled ? 0u : 1u);
+          break;
+      case APP_ALT_PARAM_IMU_AID_ENABLE:
+          alt->imu_aid_enabled = (uint8_t)(alt->imu_aid_enabled ? 0u : 1u);
+          break;
+      case APP_ALT_PARAM_AUTO_HOME_ENABLE:
+          alt->auto_home_capture_enabled = (uint8_t)(alt->auto_home_capture_enabled ? 0u : 1u);
+          break;
+      case APP_ALT_PARAM_IMU_SIGN:
+          alt->imu_vertical_sign = (int8_t)((direction > 0) ? 1 : -1);
+          break;
+      case APP_ALT_PARAM_PRESSURE_LPF_TAU:
+          alt->pressure_lpf_tau_ms = APP_ClampToU16((int32_t)alt->pressure_lpf_tau_ms + ((direction > 0) ? 10 : -10), 0, 5000);
+          break;
+      case APP_ALT_PARAM_VARIO_FAST_TAU:
+          alt->vario_fast_tau_ms = APP_ClampToU16((int32_t)alt->vario_fast_tau_ms + ((direction > 0) ? 10 : -10), 0, 5000);
+          break;
+      case APP_ALT_PARAM_VARIO_SLOW_TAU:
+          alt->vario_slow_tau_ms = APP_ClampToU16((int32_t)alt->vario_slow_tau_ms + ((direction > 0) ? 50 : -50), 0, 10000);
+          break;
+      case APP_ALT_PARAM_DISPLAY_LPF_TAU:
+          alt->display_lpf_tau_ms = APP_ClampToU16((int32_t)alt->display_lpf_tau_ms + ((direction > 0) ? 25 : -25), 0, 10000);
+          break;
+      case APP_ALT_PARAM_GPS_MAX_VACC:
+          alt->gps_max_vacc_mm = APP_ClampToU16((int32_t)alt->gps_max_vacc_mm + ((direction > 0) ? 100 : -100), 500, 20000);
+          break;
+      case APP_ALT_PARAM_GPS_MAX_PDOP:
+          alt->gps_max_pdop_x100 = APP_ClampToU16((int32_t)alt->gps_max_pdop_x100 + ((direction > 0) ? 10 : -10), 50, 2000);
+          break;
+      case APP_ALT_PARAM_GPS_MIN_SATS:
+          alt->gps_min_sats = APP_ClampToU8((int32_t)alt->gps_min_sats + ((direction > 0) ? 1 : -1), 3, 20);
+          break;
+      case APP_ALT_PARAM_GPS_BIAS_TAU:
+          alt->gps_bias_tau_ms = APP_ClampToU16((int32_t)alt->gps_bias_tau_ms + ((direction > 0) ? 5000 : -5000), 1000, 120000);
+          break;
+      case APP_ALT_PARAM_IMU_GRAVITY_TAU:
+          alt->imu_gravity_tau_ms = APP_ClampToU16((int32_t)alt->imu_gravity_tau_ms + ((direction > 0) ? 50 : -50), 0, 10000);
+          break;
+      case APP_ALT_PARAM_IMU_ACCEL_TAU:
+          alt->imu_accel_tau_ms = APP_ClampToU16((int32_t)alt->imu_accel_tau_ms + ((direction > 0) ? 10 : -10), 0, 5000);
+          break;
+      case APP_ALT_PARAM_IMU_DEADBAND:
+          alt->imu_vertical_deadband_mg = APP_ClampToU16((int32_t)alt->imu_vertical_deadband_mg + ((direction > 0) ? 1 : -1), 0, 500);
+          break;
+      case APP_ALT_PARAM_IMU_CLIP:
+          alt->imu_vertical_clip_mg = APP_ClampToU16((int32_t)alt->imu_vertical_clip_mg + ((direction > 0) ? 10 : -10), 10, 2000);
+          break;
+      case APP_ALT_PARAM_AUDIO_ENABLE:
+          alt->debug_audio_enabled = (uint8_t)(alt->debug_audio_enabled ? 0u : 1u);
+          break;
+      case APP_ALT_PARAM_AUDIO_DEADBAND:
+          alt->audio_deadband_cms = APP_ClampToU16((int32_t)alt->audio_deadband_cms + ((direction > 0) ? 5 : -5), 0, 1000);
+          break;
+      case APP_ALT_PARAM_AUDIO_MIN_FREQ:
+          alt->audio_min_freq_hz = APP_ClampToU16((int32_t)alt->audio_min_freq_hz + ((direction > 0) ? 50 : -50), 50, 10000);
+          break;
+      case APP_ALT_PARAM_AUDIO_MAX_FREQ:
+          alt->audio_max_freq_hz = APP_ClampToU16((int32_t)alt->audio_max_freq_hz + ((direction > 0) ? 50 : -50), 100, 12000);
+          if (alt->audio_max_freq_hz < alt->audio_min_freq_hz)
+          {
+              alt->audio_max_freq_hz = alt->audio_min_freq_hz;
+          }
+          break;
+      case APP_ALT_PARAM_AUDIO_REPEAT_MS:
+          alt->audio_repeat_ms = APP_ClampToU16((int32_t)alt->audio_repeat_ms + ((direction > 0) ? 10 : -10), 20, 2000);
+          break;
+      case APP_ALT_PARAM_AUDIO_BEEP_MS:
+          alt->audio_beep_ms = APP_ClampToU16((int32_t)alt->audio_beep_ms + ((direction > 0) ? 5 : -5), 5, 1000);
+          break;
+      case APP_ALT_PARAM_KF_Q_H:
+          alt->kf_q_height_cm_per_s = APP_ClampToU16((int32_t)alt->kf_q_height_cm_per_s + ((direction > 0) ? 1 : -1), 0, 1000);
+          break;
+      case APP_ALT_PARAM_KF_Q_V:
+          alt->kf_q_velocity_cms_per_s = APP_ClampToU16((int32_t)alt->kf_q_velocity_cms_per_s + ((direction > 0) ? 5 : -5), 0, 5000);
+          break;
+      case APP_ALT_PARAM_KF_Q_B:
+          alt->kf_q_baro_bias_cm_per_s = APP_ClampToU16((int32_t)alt->kf_q_baro_bias_cm_per_s + ((direction > 0) ? 1 : -1), 0, 1000);
+          break;
+      case APP_ALT_PARAM_KF_Q_A:
+          alt->kf_q_accel_bias_cms2_per_s = APP_ClampToU16((int32_t)alt->kf_q_accel_bias_cms2_per_s + ((direction > 0) ? 5 : -5), 0, 5000);
+          break;
+      case APP_ALT_PARAM_BARO_R:
+          alt->baro_measurement_noise_cm = APP_ClampToU16((int32_t)alt->baro_measurement_noise_cm + ((direction > 0) ? 5 : -5), 1, 5000);
+          break;
+      case APP_ALT_PARAM_GPS_R:
+          alt->gps_measurement_noise_floor_cm = APP_ClampToU16((int32_t)alt->gps_measurement_noise_floor_cm + ((direction > 0) ? 10 : -10), 10, 20000);
+          break;
+      case APP_ALT_PARAM_COUNT:
+      default:
+          break;
+      }
+
+      APP_AltitudeDebugCommitSettings();
+  }
+
+  static bool APP_HandleAltitudePageButtonEvent(const button_event_t *event, uint32_t now_ms)
+  {
+      (void)now_ms;
+
+      if (event == 0)
+      {
+          return false;
+      }
+
+      if (g_ui_page != APP_UI_PAGE_ALTITUDE)
+      {
+          return false;
+      }
+
+      if (event->type == BUTTON_EVENT_SHORT_PRESS)
+      {
+          if (event->id == BUTTON_ID_2)
+          {
+              if (g_altitude_selected_param == 0u)
+              {
+                  g_altitude_selected_param = (uint8_t)(APP_ALT_PARAM_COUNT - 1u);
+              }
+              else
+              {
+                  g_altitude_selected_param--;
+              }
+              return true;
+          }
+          else if (event->id == BUTTON_ID_3)
+          {
+              g_altitude_selected_param = (uint8_t)((g_altitude_selected_param + 1u) % (uint8_t)APP_ALT_PARAM_COUNT);
+              return true;
+          }
+          else if (event->id == BUTTON_ID_4)
+          {
+              APP_AltitudeDebugAdjustSelected(-1);
+              return true;
+          }
+          else if (event->id == BUTTON_ID_5)
+          {
+              APP_AltitudeDebugAdjustSelected(+1);
+              return true;
+          }
+          else if (event->id == BUTTON_ID_6)
+          {
+              APP_ALTITUDE_DebugRequestHomeCapture();
+              return true;
+          }
+      }
+      else if ((event->type == BUTTON_EVENT_LONG_PRESS) && (event->id == BUTTON_ID_6))
+      {
+          APP_ALTITUDE_DebugRequestBiasRezero();
+          return true;
+      }
+
+      return false;
+  }
+
+  static void APP_DrawAltitudeDebugPage(u8g2_t *u8g2,
+                                        const app_altitude_state_t *altitude,
+                                        const app_settings_t *settings,
+                                        uint32_t now_ms)
+  {
+      uint8_t y_left;
+      uint8_t y_right;
+      char line[64];
+      char text_a[24];
+      char text_b[24];
+      char value_text[32];
+      uint32_t age_ms;
+
+      (void)now_ms;
+
+      if ((u8g2 == 0) || (altitude == 0) || (settings == 0))
+      {
+          return;
+      }
+
+      u8g2_SetFont(u8g2, u8g2_font_4x6_tr);
+      y_left = 6u;
+      y_right = 6u;
+
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, "ALTITUDE DBG S1/NEXT");
+      snprintf(line, sizeof(line), "SEL:%s", APP_AltitudeParamName((app_altitude_param_t)g_altitude_selected_param));
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+
+      APP_FormatSignedCentiText(text_a, sizeof(text_a), altitude->pressure_raw_hpa_x100);
+      APP_FormatSignedCentiText(text_b, sizeof(text_b), altitude->pressure_filt_hpa_x100);
+      snprintf(line, sizeof(line), "P %s/%s", text_a, text_b);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      APP_FormatSignedCentiText(text_a, sizeof(text_a), altitude->qnh_manual_hpa_x100);
+      APP_FormatSignedCentiText(text_b, sizeof(text_b), altitude->qnh_equiv_gps_hpa_x100);
+      snprintf(line, sizeof(line), "Q %s/%s", text_a, text_b);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      APP_FormatSignedCmAsMeterText(text_a, sizeof(text_a), altitude->alt_pressure_std_cm);
+      snprintf(line, sizeof(line), "STD %sm", text_a);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      APP_FormatSignedCmAsMeterText(text_a, sizeof(text_a), altitude->alt_qnh_manual_cm);
+      snprintf(line, sizeof(line), "QNH %sm", text_a);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      APP_FormatSignedCmAsMeterText(text_a, sizeof(text_a), altitude->alt_gps_hmsl_cm);
+      snprintf(line, sizeof(line), "GPS %sm", text_a);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      APP_FormatSignedCmAsMeterText(text_a, sizeof(text_a), altitude->alt_fused_noimu_cm);
+      snprintf(line, sizeof(line), "NOI %sm", text_a);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      APP_FormatSignedCmAsMeterText(text_a, sizeof(text_a), altitude->alt_fused_imu_cm);
+      snprintf(line, sizeof(line), "IMU %sm", text_a);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      APP_FormatSignedCmAsMeterText(text_a, sizeof(text_a), altitude->alt_rel_home_noimu_cm);
+      APP_FormatSignedCmAsMeterText(text_b, sizeof(text_b), altitude->alt_rel_home_imu_cm);
+      snprintf(line, sizeof(line), "REL %s/%s", text_a, text_b);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      APP_FormatSignedCmsAsMpsText(text_a, sizeof(text_a), altitude->vario_fast_noimu_cms);
+      APP_FormatSignedCmsAsMpsText(text_b, sizeof(text_b), altitude->vario_fast_imu_cms);
+      snprintf(line, sizeof(line), "VF %s/%s", text_a, text_b);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      APP_FormatSignedCmsAsMpsText(text_a, sizeof(text_a), altitude->vario_slow_noimu_cms);
+      APP_FormatSignedCmsAsMpsText(text_b, sizeof(text_b), altitude->vario_slow_imu_cms);
+      snprintf(line, sizeof(line), "VS %s/%s", text_a, text_b);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      APP_FormatSignedX10Text(text_a, sizeof(text_a), altitude->grade_noimu_x10);
+      APP_FormatSignedX10Text(text_b, sizeof(text_b), altitude->grade_imu_x10);
+      snprintf(line, sizeof(line), "GR %s/%s%%", text_a, text_b);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      APP_FormatSignedCmAsMeterText(text_a, sizeof(text_a), altitude->baro_bias_noimu_cm);
+      APP_FormatSignedCmAsMeterText(text_b, sizeof(text_b), altitude->baro_bias_imu_cm);
+      snprintf(line, sizeof(line), "BI %s/%s", text_a, text_b);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      APP_FormatSignedCmsAsMpsText(text_a, sizeof(text_a), altitude->imu_vertical_accel_cms2);
+      snprintf(line, sizeof(line), "ACC %s m/s2", text_a);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      age_ms = (altitude->last_update_ms == 0u) ? 0u : (now_ms - altitude->last_update_ms);
+      snprintf(line, sizeof(line), "AGE %lums", (unsigned long)age_ms);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      snprintf(line, sizeof(line), "GPSQ %u", (unsigned)altitude->gps_quality_permille);
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+
+      snprintf(line, sizeof(line), "VACC %lu m", (unsigned long)(altitude->gps_vacc_mm / 1000u));
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+
+      APP_FormatSignedCentiText(text_a, sizeof(text_a), (int32_t)altitude->gps_pdop_x100);
+      snprintf(line, sizeof(line), "PDOP %s", text_a);
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+
+      snprintf(line, sizeof(line), "SV %u FIX %u", (unsigned)altitude->gps_numsv_used, (unsigned)altitude->gps_fix_type);
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+
+      snprintf(line, sizeof(line), "B%u G%u H%u A%u",
+               altitude->baro_valid ? 1u : 0u,
+               altitude->gps_valid ? 1u : 0u,
+               altitude->home_valid ? 1u : 0u,
+               altitude->debug_audio_active ? 1u : 0u);
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+
+      snprintf(line, sizeof(line), "IMUV %u", altitude->imu_vector_valid ? 1u : 0u);
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+
+      APP_AltitudeDebugFormatSelectedValue(settings, value_text, sizeof(value_text));
+      snprintf(line, sizeof(line), "VAL %s", value_text);
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, "B2/B3 SEL");
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, "B4/B5 -/+");
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, "B6 HOME");
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, "B6L REZERO");
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, "ALT+VAR+AUDIO");
+  }
+
   /* -------------------------------------------------------------------------- */
   /*  UI가 쓰는 snapshot                                                          */
   /*                                                                            */
@@ -2076,7 +2652,6 @@
   static app_bluetooth_state_t       g_bluetooth_snapshot;
   static app_sd_state_t              g_sd_snapshot;
   static spi_flash_snapshot_t        g_spi_flash_snapshot;
-  static app_settings_t              g_settings_snapshot;
 
   #ifndef APP_UI_GPS_MIN_REFRESH_MS
   #define APP_UI_GPS_MIN_REFRESH_MS          100u
@@ -2145,6 +2720,9 @@
 
       case APP_UI_PAGE_CLOCK:
           return APP_UI_CLOCK_MIN_REFRESH_MS;
+
+      case APP_UI_PAGE_ALTITUDE:
+          return APP_UI_ALTITUDE_MIN_REFRESH_MS;
 
       case APP_UI_PAGE_GPS:
       default:
@@ -2231,6 +2809,14 @@
               (event.type == BUTTON_EVENT_SHORT_PRESS))
           {
               APP_SelectNextUiPage();
+              continue;
+          }
+
+          /* ------------------------------------------------------------------ */
+          /*  ALTITUDE 페이지 전용 버튼 매핑                                      */
+          /* ------------------------------------------------------------------ */
+          if (APP_HandleAltitudePageButtonEvent(&event, now_ms) != false)
+          {
               continue;
           }
 
@@ -2407,6 +2993,7 @@ void UI_DebugLegacy_Init(void)
     memset(&g_sd_snapshot, 0, sizeof(g_sd_snapshot));
     memset(&g_spi_flash_snapshot, 0, sizeof(g_spi_flash_snapshot));
     memset(&g_settings_snapshot, 0, sizeof(g_settings_snapshot));
+    memset(&g_altitude_snapshot, 0, sizeof(g_altitude_snapshot));
     memset(&g_last_button_event, 0, sizeof(g_last_button_event));
 
     g_ui_page = APP_UI_PAGE_GPS;
@@ -2414,15 +3001,16 @@ void UI_DebugLegacy_Init(void)
     g_last_ui_draw_ms = 0u;
     g_last_button_pressed_mask = Button_GetPressedMask();
     g_ui_force_redraw = 1u;
+    g_altitude_selected_param = 0u;
+    APP_ALTITUDE_DebugSetUiActive(false, HAL_GetTick());
 }
 
 void UI_DebugLegacy_Task(uint32_t now_ms)
 {
     uint32_t pressed_mask;
 
-    (void)now_ms;
-
     APP_HandleButtonEvents();
+    APP_ALTITUDE_DebugSetUiActive((g_ui_page == APP_UI_PAGE_ALTITUDE), now_ms);
 
     pressed_mask = Button_GetPressedMask();
     if (pressed_mask != g_last_button_pressed_mask)
@@ -2473,6 +3061,11 @@ void UI_DebugLegacy_Draw(u8g2_t *u8g2, uint32_t now_ms)
         {
             APP_STATE_CopyClockSnapshot(&g_clock_snapshot);
         }
+        else if (g_ui_page == APP_UI_PAGE_ALTITUDE)
+        {
+            APP_STATE_CopyAltitudeSnapshot(&g_altitude_snapshot);
+            APP_STATE_CopySettingsSnapshot(&g_settings_snapshot);
+        }
         else
         {
             APP_STATE_CopyGpsUiSnapshot(&g_gps_snapshot);
@@ -2507,6 +3100,10 @@ void UI_DebugLegacy_Draw(u8g2_t *u8g2, uint32_t now_ms)
     else if (g_ui_page == APP_UI_PAGE_CLOCK)
     {
         APP_DrawClockDebugPage(u8g2, &g_clock_snapshot, now_ms);
+    }
+    else if (g_ui_page == APP_UI_PAGE_ALTITUDE)
+    {
+        APP_DrawAltitudeDebugPage(u8g2, &g_altitude_snapshot, &g_settings_snapshot, now_ms);
     }
     else
     {

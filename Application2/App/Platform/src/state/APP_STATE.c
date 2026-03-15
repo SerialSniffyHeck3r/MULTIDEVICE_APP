@@ -70,6 +70,57 @@ static void APP_STATE_ApplyDefaultSettingsUnlocked(void)
         g_app_state.settings.uc1608.fixed_line_raw           = 0u;
         g_app_state.settings.uc1608.power_control_raw        = 7u;
         g_app_state.settings.uc1608.flip_mode                = 1u;
+
+    /* ---------------------------------------------------------------------- */
+    /*  Altitude / vario 기본 정책                                             */
+    /*                                                                        */
+    /*  설계 철학                                                              */
+    /*  - manual QNH와 GPS-equivalent QNH를 분리한다.                          */
+    /*  - GPS absolute anchor와 IMU aid는 각각 별도 토글로 둔다.               */
+    /*  - no-IMU / IMU 병렬 추정은 모두 항상 계산하되,                          */
+    /*    주 표시용 선택만 imu_aid_enabled로 결정한다.                         */
+    /* ---------------------------------------------------------------------- */
+    g_app_state.settings.altitude.manual_qnh_hpa_x100            = 101325;
+    g_app_state.settings.altitude.gps_auto_equiv_qnh_enabled     = 1u;
+    g_app_state.settings.altitude.gps_bias_correction_enabled    = 1u;
+    g_app_state.settings.altitude.imu_aid_enabled                = 0u;
+    g_app_state.settings.altitude.auto_home_capture_enabled      = 1u;
+    g_app_state.settings.altitude.imu_vertical_sign              = 1;
+    g_app_state.settings.altitude.reserved0                      = 0u;
+    g_app_state.settings.altitude.reserved1                      = 0u;
+
+    g_app_state.settings.altitude.pressure_lpf_tau_ms            = 120u;
+    g_app_state.settings.altitude.vario_fast_tau_ms              = 180u;
+    g_app_state.settings.altitude.vario_slow_tau_ms              = 900u;
+    g_app_state.settings.altitude.display_lpf_tau_ms             = 450u;
+
+    g_app_state.settings.altitude.baro_measurement_noise_cm      = 35u;
+    g_app_state.settings.altitude.gps_measurement_noise_floor_cm = 150u;
+    g_app_state.settings.altitude.gps_max_vacc_mm                = 4000u;
+    g_app_state.settings.altitude.gps_max_pdop_x100              = 350u;
+    g_app_state.settings.altitude.gps_min_sats                   = 6u;
+    g_app_state.settings.altitude.reserved2                      = 0u;
+    g_app_state.settings.altitude.gps_bias_tau_ms                = 45000u;
+
+    g_app_state.settings.altitude.imu_gravity_tau_ms             = 700u;
+    g_app_state.settings.altitude.imu_accel_tau_ms               = 120u;
+    g_app_state.settings.altitude.imu_accel_lsb_per_g            = 16384u;
+    g_app_state.settings.altitude.imu_vertical_deadband_mg       = 12u;
+    g_app_state.settings.altitude.imu_vertical_clip_mg           = 450u;
+    g_app_state.settings.altitude.imu_measurement_noise_cms2     = 80u;
+
+    g_app_state.settings.altitude.kf_q_height_cm_per_s           = 5u;
+    g_app_state.settings.altitude.kf_q_velocity_cms_per_s        = 60u;
+    g_app_state.settings.altitude.kf_q_baro_bias_cm_per_s        = 2u;
+    g_app_state.settings.altitude.kf_q_accel_bias_cms2_per_s     = 20u;
+
+    g_app_state.settings.altitude.debug_audio_enabled            = 1u;
+    g_app_state.settings.altitude.reserved3                      = 0u;
+    g_app_state.settings.altitude.audio_deadband_cms             = 35u;
+    g_app_state.settings.altitude.audio_min_freq_hz              = 700u;
+    g_app_state.settings.altitude.audio_max_freq_hz              = 2200u;
+    g_app_state.settings.altitude.audio_repeat_ms                = 140u;
+    g_app_state.settings.altitude.audio_beep_ms                  = 50u;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -355,6 +406,63 @@ static void APP_STATE_ResetSdUnlocked(void)
 }
 
 /* -------------------------------------------------------------------------- */
+/*  내부 유틸: ALTITUDE 저장소 초기화                                          */
+/* -------------------------------------------------------------------------- */
+static void APP_STATE_ResetAltitudeUnlocked(void)
+{
+    memset((void *)&g_app_state.altitude, 0, sizeof(g_app_state.altitude));
+
+    g_app_state.altitude.initialized             = false;
+    g_app_state.altitude.baro_valid              = false;
+    g_app_state.altitude.gps_valid               = false;
+    g_app_state.altitude.home_valid              = false;
+    g_app_state.altitude.imu_vector_valid        = false;
+    g_app_state.altitude.debug_audio_active      = 0u;
+    g_app_state.altitude.gps_quality_permille    = 0u;
+
+    g_app_state.altitude.last_update_ms          = 0u;
+    g_app_state.altitude.last_baro_update_ms     = 0u;
+    g_app_state.altitude.last_gps_update_ms      = 0u;
+
+    g_app_state.altitude.pressure_raw_hpa_x100   = 0;
+    g_app_state.altitude.pressure_filt_hpa_x100  = 0;
+    g_app_state.altitude.qnh_manual_hpa_x100     = g_app_state.settings.altitude.manual_qnh_hpa_x100;
+    g_app_state.altitude.qnh_equiv_gps_hpa_x100  = g_app_state.settings.altitude.manual_qnh_hpa_x100;
+
+    g_app_state.altitude.alt_pressure_std_cm     = 0;
+    g_app_state.altitude.alt_qnh_manual_cm       = 0;
+    g_app_state.altitude.alt_gps_hmsl_cm         = 0;
+    g_app_state.altitude.alt_fused_noimu_cm      = 0;
+    g_app_state.altitude.alt_fused_imu_cm        = 0;
+    g_app_state.altitude.alt_display_cm          = 0;
+
+    g_app_state.altitude.alt_rel_home_noimu_cm   = 0;
+    g_app_state.altitude.alt_rel_home_imu_cm     = 0;
+    g_app_state.altitude.home_alt_noimu_cm       = 0;
+    g_app_state.altitude.home_alt_imu_cm         = 0;
+
+    g_app_state.altitude.baro_bias_noimu_cm      = 0;
+    g_app_state.altitude.baro_bias_imu_cm        = 0;
+
+    g_app_state.altitude.vario_fast_noimu_cms    = 0;
+    g_app_state.altitude.vario_slow_noimu_cms    = 0;
+    g_app_state.altitude.vario_fast_imu_cms      = 0;
+    g_app_state.altitude.vario_slow_imu_cms      = 0;
+
+    g_app_state.altitude.grade_noimu_x10         = 0;
+    g_app_state.altitude.grade_imu_x10           = 0;
+
+    g_app_state.altitude.imu_vertical_accel_mg   = 0;
+    g_app_state.altitude.imu_vertical_accel_cms2 = 0;
+    g_app_state.altitude.imu_gravity_norm_mg     = 0;
+
+    g_app_state.altitude.gps_vacc_mm             = 0u;
+    g_app_state.altitude.gps_pdop_x100           = 0u;
+    g_app_state.altitude.gps_numsv_used          = 0u;
+    g_app_state.altitude.gps_fix_type            = 0u;
+}
+
+/* -------------------------------------------------------------------------- */
 /*  공개 API: GPS slice만 초기화                                                */
 /* -------------------------------------------------------------------------- */
 
@@ -389,6 +497,7 @@ void APP_STATE_Init(void)
     APP_STATE_ResetBluetoothUnlocked();
     APP_STATE_ResetDebugUartUnlocked();
     APP_STATE_ResetSdUnlocked();
+    APP_STATE_ResetAltitudeUnlocked();
 
     __enable_irq();
 }
@@ -572,6 +681,23 @@ void APP_STATE_CopyClockSnapshot(app_clock_state_t *dst)
     /*  따라서 snapshot 복사는 plain memcpy로 충분하다.                        */
     /* ---------------------------------------------------------------------- */
     memcpy((void *)dst, (const void *)&g_app_state.clock, sizeof(*dst));
+}
+
+/* -------------------------------------------------------------------------- */
+/*  공개 API: ALTITUDE 전체 스냅샷 복사                                         */
+/* -------------------------------------------------------------------------- */
+void APP_STATE_CopyAltitudeSnapshot(app_altitude_state_t *dst)
+{
+    if (dst == 0)
+    {
+        return;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /*  altitude slice는 APP_ALTITUDE_Task() main context에서만 갱신된다.       */
+    /*  따라서 plain memcpy로 충분하다.                                        */
+    /* ---------------------------------------------------------------------- */
+    memcpy((void *)dst, (const void *)&g_app_state.altitude, sizeof(*dst));
 }
 
 /* -------------------------------------------------------------------------- */

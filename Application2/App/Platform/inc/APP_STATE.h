@@ -156,10 +156,119 @@ typedef struct
 
 typedef struct
 {
+    /* ---------------------------------------------------------------------- */
+    /*  수동 QNH 설정                                                          */
+    /*                                                                        */
+    /*  항공식 의미를 보존하기 위해 "사용자가 넣은 QNH" 는                     */
+    /*  GPS auto calibration과 별개 변수로 유지한다.                           */
+    /*  단위는 0.01 hPa 고정소수점이다.                                        */
+    /* ---------------------------------------------------------------------- */
+    int32_t manual_qnh_hpa_x100;
+
+    /* ---------------------------------------------------------------------- */
+    /*  GPS / IMU / 홈 캡처 정책 토글                                          */
+    /*                                                                        */
+    /*  gps_auto_equiv_qnh_enabled                                             */
+    /*  - GPS hMSL과 현재 pressure를 역산해서                                  */
+    /*    "GPS와 일치하는 등가 sea-level pressure" 를 계산한다.               */
+    /*  - 이 값은 manual QNH를 덮어쓰지 않고                                   */
+    /*    debug / calibration 참고값으로만 보관한다.                           */
+    /*                                                                        */
+    /*  gps_bias_correction_enabled                                            */
+    /*  - GPS를 absolute anchor로 사용해서                                     */
+    /*    fused absolute altitude의 장기 bias를 붙잡는다.                      */
+    /*                                                                        */
+    /*  imu_aid_enabled                                                        */
+    /*  - IMU-aided 4-state filter를 "주 사용 후보" 로 둘지 결정한다.          */
+    /*  - no-IMU / IMU-aided 결과는 항상 병렬 계산해서 함께 보관한다.           */
+    /*                                                                        */
+    /*  auto_home_capture_enabled                                              */
+    /*  - 첫 valid altitude가 잡히면 home altitude를 자동 캡처한다.            */
+    /* ---------------------------------------------------------------------- */
+    uint8_t gps_auto_equiv_qnh_enabled;
+    uint8_t gps_bias_correction_enabled;
+    uint8_t imu_aid_enabled;
+    uint8_t auto_home_capture_enabled;
+
+    /* ---------------------------------------------------------------------- */
+    /*  IMU 수직축 보조 부호                                                   */
+    /*                                                                        */
+    /*  gravity-vector projection으로 기기 자세 의존성을 줄이지만,              */
+    /*  실제 장착 방향/축 정의가 다르면 수직 가속 부호가 뒤집힐 수 있다.        */
+    /*  +1 또는 -1 값을 사용한다.                                              */
+    /* ---------------------------------------------------------------------- */
+    int8_t  imu_vertical_sign;
+    uint8_t reserved0;
+    uint16_t reserved1;
+
+    /* ---------------------------------------------------------------------- */
+    /*  1차 저역통과 / 표시 반응 속도                                          */
+    /* ---------------------------------------------------------------------- */
+    uint16_t pressure_lpf_tau_ms;
+    uint16_t vario_fast_tau_ms;
+    uint16_t vario_slow_tau_ms;
+    uint16_t display_lpf_tau_ms;
+
+    /* ---------------------------------------------------------------------- */
+    /*  GPS gate / measurement noise 관련                                      */
+    /* ---------------------------------------------------------------------- */
+    uint16_t baro_measurement_noise_cm;
+    uint16_t gps_measurement_noise_floor_cm;
+    uint16_t gps_max_vacc_mm;
+    uint16_t gps_max_pdop_x100;
+    uint8_t  gps_min_sats;
+    uint8_t  reserved2;
+    uint16_t gps_bias_tau_ms;
+
+    /* ---------------------------------------------------------------------- */
+    /*  IMU 수직 가속 추정 튜닝                                                */
+    /*                                                                        */
+    /*  gravity_tau_ms                                                         */
+    /*  - 가속도 벡터에서 저주파 gravity 기준축을 추정하는 LPF 시정수          */
+    /*                                                                        */
+    /*  accel_tau_ms                                                           */
+    /*  - gravity 제거 후 남는 수직 specific-force의 LPF 시정수               */
+    /*                                                                        */
+    /*  accel_lsb_per_g                                                        */
+    /*  - MPU6050 raw scale. 기본은 ±2g = 16384 LSB/g                         */
+    /* ---------------------------------------------------------------------- */
+    uint16_t imu_gravity_tau_ms;
+    uint16_t imu_accel_tau_ms;
+    uint16_t imu_accel_lsb_per_g;
+    uint16_t imu_vertical_deadband_mg;
+    uint16_t imu_vertical_clip_mg;
+    uint16_t imu_measurement_noise_cms2;
+
+    /* ---------------------------------------------------------------------- */
+    /*  Kalman process noise                                                   */
+    /*                                                                        */
+    /*  단위는 사람이 IDE/debug UI에서 다루기 쉬운 "per-second 규모" 로 둔다.  */
+    /*  실제 구현에서는 dt를 곱해서 process covariance에 반영한다.              */
+    /* ---------------------------------------------------------------------- */
+    uint16_t kf_q_height_cm_per_s;
+    uint16_t kf_q_velocity_cms_per_s;
+    uint16_t kf_q_baro_bias_cm_per_s;
+    uint16_t kf_q_accel_bias_cms2_per_s;
+
+    /* ---------------------------------------------------------------------- */
+    /*  Debug altitude 페이지 전용 vario beep 파라미터                         */
+    /* ---------------------------------------------------------------------- */
+    uint8_t  debug_audio_enabled;
+    uint8_t  reserved3;
+    uint16_t audio_deadband_cms;
+    uint16_t audio_min_freq_hz;
+    uint16_t audio_max_freq_hz;
+    uint16_t audio_repeat_ms;
+    uint16_t audio_beep_ms;
+} app_altitude_settings_t;
+
+typedef struct
+{
     app_gps_settings_t       gps;
     app_clock_settings_t     clock;
     app_backlight_settings_t backlight;
     app_uc1608_settings_t    uc1608;
+    app_altitude_settings_t  altitude;
 } app_settings_t;
 
 
@@ -1211,6 +1320,77 @@ typedef struct
 
 
 /* -------------------------------------------------------------------------- */
+/*  ALTITUDE / VARIO 공개 상태                                                 */
+/*                                                                            */
+/*  이 저장소는                                                              */
+/*  - pressure altitude (STD 1013.25)                                         */
+/*  - manual QNH altitude                                                     */
+/*  - GPS hMSL                                                                */
+/*  - GPS anchor를 사용한 fused absolute altitude(no-IMU / IMU)               */
+/*  - relative/home altitude                                                  */
+/*  - fast/slow variometer                                                    */
+/*  - grade(경사도)                                                           */
+/*  를 병렬로 보관한다.                                                       */
+/*                                                                            */
+/*  중요                                                                      */
+/*  - manual QNH 고도와 GPS 기반 fused absolute altitude는                    */
+/*    서로 의미가 다르므로 둘 다 따로 남긴다.                                 */
+/*  - IMU-aided 결과와 no-IMU 결과도 동시에 유지해서                          */
+/*    튜닝/검증/로그 비교가 가능하게 만든다.                                   */
+/* -------------------------------------------------------------------------- */
+typedef struct
+{
+    bool     initialized;                 /* 서비스 init 완료 여부                  */
+    bool     baro_valid;                  /* 현재 baro 측정이 유효한가              */
+    bool     gps_valid;                   /* 현재 GPS 높이 측정이 gate 통과인가     */
+    bool     home_valid;                  /* home altitude 캡처가 되었는가          */
+    bool     imu_vector_valid;            /* gravity vector 추정이 유효한가         */
+    uint8_t  debug_audio_active;          /* ALTITUDE debug page 오디오 활성 여부   */
+    uint16_t gps_quality_permille;        /* 0..1000, gate/weight 참고값            */
+
+    uint32_t last_update_ms;              /* 마지막 task 시각                       */
+    uint32_t last_baro_update_ms;         /* 마지막 새 baro sample 반영 시각        */
+    uint32_t last_gps_update_ms;          /* 마지막 새 gps sample 반영 시각         */
+
+    int32_t  pressure_raw_hpa_x100;       /* 원본 pressure, 0.01 hPa                */
+    int32_t  pressure_filt_hpa_x100;      /* LPF 후 pressure, 0.01 hPa              */
+    int32_t  qnh_manual_hpa_x100;         /* 설정 manual QNH, 0.01 hPa              */
+    int32_t  qnh_equiv_gps_hpa_x100;      /* GPS 역산 등가 sea-level pressure       */
+
+    int32_t  alt_pressure_std_cm;         /* STD 1013.25 기준 pressure altitude     */
+    int32_t  alt_qnh_manual_cm;           /* manual QNH 기준 altitude               */
+    int32_t  alt_gps_hmsl_cm;             /* GPS hMSL                               */
+    int32_t  alt_fused_noimu_cm;          /* 3-state KF absolute altitude           */
+    int32_t  alt_fused_imu_cm;            /* 4-state IMU-aided absolute altitude    */
+    int32_t  alt_display_cm;              /* 현재 주 표시용 altitude                */
+
+    int32_t  alt_rel_home_noimu_cm;       /* no-IMU fused 기준 home 상대고도        */
+    int32_t  alt_rel_home_imu_cm;         /* IMU fused 기준 home 상대고도           */
+    int32_t  home_alt_noimu_cm;           /* no-IMU 기준 home 절대고도              */
+    int32_t  home_alt_imu_cm;             /* IMU 기준 home 절대고도                 */
+
+    int32_t  baro_bias_noimu_cm;          /* no-IMU filter의 baro bias 상태         */
+    int32_t  baro_bias_imu_cm;            /* IMU filter의 baro bias 상태            */
+
+    int32_t  vario_fast_noimu_cms;        /* no-IMU fast vario                      */
+    int32_t  vario_slow_noimu_cms;        /* no-IMU slow vario                      */
+    int32_t  vario_fast_imu_cms;          /* IMU fast vario                         */
+    int32_t  vario_slow_imu_cms;          /* IMU slow vario                         */
+
+    int32_t  grade_noimu_x10;             /* no-IMU grade %, x0.1                   */
+    int32_t  grade_imu_x10;               /* IMU grade %, x0.1                      */
+
+    int32_t  imu_vertical_accel_mg;       /* gravity 제거 후 수직 specific-force    */
+    int32_t  imu_vertical_accel_cms2;     /* 위 값을 cm/s^2 로 변환한 값            */
+    int32_t  imu_gravity_norm_mg;         /* gravity LPF 벡터 norm, mg              */
+
+    uint32_t gps_vacc_mm;                 /* 마지막 사용 GPS vAcc                   */
+    uint16_t gps_pdop_x100;               /* 마지막 사용 pDOP                       */
+    uint8_t  gps_numsv_used;              /* 마지막 사용 numSV_used                 */
+    uint8_t  gps_fix_type;                /* 마지막 사용 fixType                    */
+} app_altitude_state_t;
+
+/* -------------------------------------------------------------------------- */
 /*  app_state_t                                                                 */
 /* -------------------------------------------------------------------------- */
 
@@ -1226,6 +1406,7 @@ typedef struct
     app_debug_uart_state_t debug_uart;  /* 유선 DEBUG UART 상태 저장소               */
     app_sd_state_t         sd;          /* SD / FATFS / hotplug 공개 상태 저장소     */
     app_clock_state_t      clock;     /* RTC / timezone / GPS sync 상태 저장소     */
+    app_altitude_state_t   altitude;  /* 고도 / 바리오 / 경사도 공개 상태 저장소   */
 
     /* 다른 센서/서브시스템도 계속 여기에 추가하면 된다. */
     /* 예: battery, storage, ui, logger ... */
@@ -1317,6 +1498,7 @@ void APP_STATE_CopyBluetoothSnapshot(app_bluetooth_state_t *dst);
 void APP_STATE_CopyDebugUartSnapshot(app_debug_uart_state_t *dst);
 void APP_STATE_CopySdSnapshot(app_sd_state_t *dst);
 void APP_STATE_CopyClockSnapshot(app_clock_state_t *dst);
+void APP_STATE_CopyAltitudeSnapshot(app_altitude_state_t *dst);
 
 void APP_STATE_CopySettingsSnapshot(app_settings_t *dst);
 void APP_STATE_StoreSettingsSnapshot(const app_settings_t *src);
