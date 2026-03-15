@@ -107,11 +107,20 @@ typedef struct
 /*                                                                            */
 /*  이 순서가 곧 UI 기준 좌 -> 우 논리 순서다.                                */
 /*                                                                            */
+/*  매우 중요한 핀 소유권 정리                                                */
+/*  - Application2 IOC 기준 PB1 / TIM3_CH4 는 LCD backlight 전용 경로다.      */
+/*  - 따라서 LED driver는 PB1 / TIM3_CH4 를 절대로 LED 채널로 잡으면 안 된다.*/
+/*  - LED5는 현재 Application2 IOC 기준으로 PC9 / TIM8_CH4 이며,              */
+/*    logical 4는 반드시 그 경로를 따라야 한다.                               */
+/*  - 만약 logical 4를 TIM3_CH4로 두면, F2 길게 누름으로 LED test pattern을    */
+/*    넘길 때 LED 경로가 TIM3 CCR4를 덮어써 PB1 백라이트가 LED 상태를         */
+/*    따라가는 충돌이 다시 발생한다.                                          */
+/*                                                                            */
 /*  logical 0  -> LED1  -> PE9  -> TIM1_CH1                                    */
 /*  logical 1  -> LED2  -> PA6  -> TIM3_CH1                                    */
 /*  logical 2  -> LED3  -> PA7  -> TIM3_CH2                                    */
 /*  logical 3  -> LED4  -> PB0  -> TIM3_CH3                                    */
-/*  logical 4  -> LED5  -> PC9  -> TIM3_CH4                                    */
+/*  logical 4  -> LED5  -> PC9  -> TIM8_CH4                                    */
 /*  logical 5  -> LED6  -> PD12 -> TIM4_CH1                                    */
 /*  logical 6  -> LED7  -> PD13 -> TIM4_CH2                                    */
 /*  logical 7  -> LED8  -> PD14 -> TIM4_CH3                                    */
@@ -125,7 +134,7 @@ static const LED_DriverChannelMap_t s_led_channel_map[LED_DRIVER_CHANNEL_COUNT] 
     { &htim3, TIM_CHANNEL_1, "LED2  / PA6  / TIM3_CH1" },
     { &htim3, TIM_CHANNEL_2, "LED3  / PA7  / TIM3_CH2" },
     { &htim3, TIM_CHANNEL_3, "LED4  / PB0  / TIM3_CH3" },
-    { &htim3, TIM_CHANNEL_4, "LED5  / PC9  / TIM3_CH4" },
+    { &htim8, TIM_CHANNEL_4, "LED5  / PC9  / TIM8_CH4" },
     { &htim4, TIM_CHANNEL_1, "LED6  / PD12 / TIM4_CH1" },
     { &htim4, TIM_CHANNEL_2, "LED7  / PD13 / TIM4_CH2" },
     { &htim4, TIM_CHANNEL_3, "LED8  / PD14 / TIM4_CH3" },

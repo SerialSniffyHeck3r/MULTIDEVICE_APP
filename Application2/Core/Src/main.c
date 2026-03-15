@@ -2698,14 +2698,21 @@ int main(void)
   /* ------------------------------------------------------------------------ */
   LED_App_Init();
   /* ------------------------------------------------------------------------ */
-  /*  LCD 백라이트 자동 밝기 서브시스템 초기화                                  */
+  /*  LCD 백라이트 서브시스템 초기화                                            */
   /*                                                                          */
-  /*  중요                                                                    */
-  /*  - gpio.c는 LCD_BACKLIGHT 핀을 일반 GPIO low로 만들어 둔다.               */
-  /*  - 따라서 디스플레이 초기화/부트 로고/직전 fault 표시가 실제로 보이려면     */
-  /*    U8G2_UC1608_Init()보다 앞서 백라이트 PWM을 먼저 살려야 한다.           */
-  /*  - 이 init는 PB1을 runtime에서 TIM8_CH3N PWM 핀으로 다시 묶기 때문에      */
-  /*    CubeMX 재생성으로 gpio/tim 자동 생성 코드가 바뀌어도 비교적 안전하다.  */
+  /*  실제 출력 경로                                                            */
+  /*  - LCD 패널 백라이트 PWM 실출력은 PB1 / TIM3_CH4 이다.                    */
+  /*  - 이 핀의 alternate function 설정은 Cube가 생성한 MX_TIM3_Init() +       */
+  /*    HAL_TIM_MspPostInit()가 이미 끝낸 상태여야 한다.                        */
+  /*  - Backlight_App_Init()는 pin mux를 다시 바꾸지 않고,                     */
+  /*    BACKLIGHT_DRIVER가 Cube가 만든 PB1 / TIM3_CH4 PWM 채널을 start하고     */
+  /*    백라이트 정책 runtime만 초기화한다.                                     */
+  /*                                                                          */
+  /*  주의                                                                      */
+  /*  - Application2/Core/Src/gpio.c 에서 일반 GPIO output으로 잡는 것은       */
+  /*    PE2의 BACKLIGHT_Pin 이며, LCD 패널 PWM 출력인 PB1/LCD_BACKLIGHT_Pin과   */
+  /*    동일한 핀이 아니다.                                                     */
+  /*  - 따라서 PB1 소유권은 TIM3_CH4 + BACKLIGHT_DRIVER 한 경로로만 본다.      */
   /* ------------------------------------------------------------------------ */
   Backlight_App_Init();
 

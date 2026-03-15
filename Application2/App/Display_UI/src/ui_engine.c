@@ -29,12 +29,34 @@ volatile bool FastToggle5Hz = false;
 /*                                                                            */
 /*  TIM7 frame token timer를 재사용한다.                                       */
 /*  - raw 20Hz tick count : 화면 내부 live counter 증가용                      */
-/*  - slow / fast blink   : 2Hz / 5Hz 토글 생성                                */
+/*  - slow / fast blink   : 화면 전반 blink phase 토글 생성                    */
+/*                                                                            */
+/*  이번 정리에서 아주 중요했던 기준                                           */
+/*  - 사용자 요구의 "2Hz / 5Hz blink" 는 "완전한 한 주기" 가 아니라          */
+/*    "위상이 뒤집히는 토글 이벤트 빈도" 로 해석한다.                         */
+/*  - 즉 SlowToggle2Hz 는 1초에 2번만 토글되어야 하므로                        */
+/*    ON -> OFF 0.5초 + OFF -> ON 0.5초 = 전체 한 사이클 1.0초가 된다.         */
+/*  - FastToggle5Hz 는 1초에 5번 토글되어야 하므로                             */
+/*    토글 간격 0.2초, 전체 ON/OFF 한 사이클은 0.4초가 된다.                  */
 /*                                                                            */
 /*  중요                                                                      */
-/*  이 파일은 raw tick만 배포한다.                                             */
-/*  어떤 화면이 tick을 어떻게 해석할지는 각 화면 파일이 결정한다.              */
+/*  - 이 파일은 raw tick과 공용 blink phase만 배포한다.                        */
+/*  - 어떤 화면이 그 위상을 어떤 그림에 쓸지는 각 화면 파일이 결정한다.       */
 /* -------------------------------------------------------------------------- */
+#define UI_ENGINE_FRAME_TICK_HZ              20u
+#define UI_ENGINE_SLOW_TOGGLE_HZ             2u
+#define UI_ENGINE_FAST_TOGGLE_HZ             5u
+#define UI_ENGINE_SLOW_TOGGLE_PERIOD_TICKS   (UI_ENGINE_FRAME_TICK_HZ / UI_ENGINE_SLOW_TOGGLE_HZ)
+#define UI_ENGINE_FAST_TOGGLE_PERIOD_TICKS   (UI_ENGINE_FRAME_TICK_HZ / UI_ENGINE_FAST_TOGGLE_HZ)
+
+#if ((UI_ENGINE_FRAME_TICK_HZ % UI_ENGINE_SLOW_TOGGLE_HZ) != 0u)
+#error "UI_ENGINE_SLOW_TOGGLE_HZ must divide UI_ENGINE_FRAME_TICK_HZ exactly."
+#endif
+
+#if ((UI_ENGINE_FRAME_TICK_HZ % UI_ENGINE_FAST_TOGGLE_HZ) != 0u)
+#error "UI_ENGINE_FAST_TOGGLE_HZ must divide UI_ENGINE_FRAME_TICK_HZ exactly."
+#endif
+
 static volatile uint32_t s_ui_tick_20hz = 0u;
 static volatile uint8_t  s_slow_divider = 0u;
 static volatile uint8_t  s_fast_divider = 0u;
@@ -249,17 +271,41 @@ void UI_Engine_SetBluetoothStubState(uint8_t state)
 
 void UI_Engine_OnFrameTickFromISR(void)
 {
+    /* ---------------------------------------------------------------------- */
+    /*  TIM7 20Hz frame tick 누적                                               */
+    /*                                                                          */
+    /*  이 값은 TEST 화면 등의 live counter가 읽는 원본 tick이다.               */
+    /*  blink divider 계산과 별도로 항상 1tick씩 증가한다.                      */
+    /* ---------------------------------------------------------------------- */
     s_ui_tick_20hz++;
 
+    /* ---------------------------------------------------------------------- */
+    /*  FastToggle5Hz 생성                                                      */
+    /*                                                                          */
+    /*  요구 의미                                                                */
+    /*  - 5Hz는 "1초에 5번 위상 반전" 이다.                                     */
+    /*  - 20Hz source tick 기준으로 4tick마다 토글해야 하므로                   */
+    /*    토글 간격은 200ms가 된다.                                             */
+    /*  - 따라서 보이는 전체 ON/OFF 한 주기는 400ms다.                          */
+    /* ---------------------------------------------------------------------- */
     s_fast_divider++;
-    if (s_fast_divider >= 2u)
+    if (s_fast_divider >= UI_ENGINE_FAST_TOGGLE_PERIOD_TICKS)
     {
         s_fast_divider = 0u;
         FastToggle5Hz = (FastToggle5Hz == false);
     }
 
+    /* ---------------------------------------------------------------------- */
+    /*  SlowToggle2Hz 생성                                                      */
+    /*                                                                          */
+    /*  요구 의미                                                                */
+    /*  - 2Hz는 "1초에 2번 위상 반전" 이다.                                     */
+    /*  - 20Hz source tick 기준으로 10tick마다 토글해야 하므로                  */
+    /*    토글 간격은 500ms가 된다.                                             */
+    /*  - 따라서 보이는 전체 ON/OFF 한 주기는 1초가 된다.                       */
+    /* ---------------------------------------------------------------------- */
     s_slow_divider++;
-    if (s_slow_divider >= 5u)
+    if (s_slow_divider >= UI_ENGINE_SLOW_TOGGLE_PERIOD_TICKS)
     {
         s_slow_divider = 0u;
         SlowToggle2Hz = (SlowToggle2Hz == false);

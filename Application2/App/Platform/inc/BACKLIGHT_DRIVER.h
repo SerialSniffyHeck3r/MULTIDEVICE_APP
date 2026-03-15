@@ -28,8 +28,8 @@ extern "C" {
 /*                                                                            */
 /*  CubeMX 재생성 내성                                                         */
 /*  - generated tim.c / gpio.c / main.h를 직접 수정하지 않는다.               */
-/*  - 아래 매크로는 현재 IOC가 만든 결과와 일치해야 한다.                     */
-/*  - IOC를 다시 생성하더라도 PB1이 TIM3_CH4 PWM으로 유지되는 한,             */
+/*  - 아래 매크로는 현재 IOC가 만든  결과와 일치해야 한다.                     */
+/*  - IOC를 다시 생성하더라도 PB1이 TIM3_CH4 PWM으로 유지되는 한,            */
 /*    이 파일은 덮어써지지 않고 그대로 살아남는다.                            */
 /* -------------------------------------------------------------------------- */
 #ifndef BACKLIGHT_DRIVER_TIM_HANDLE
@@ -41,7 +41,7 @@ extern "C" {
 #endif
 
 #ifndef BACKLIGHT_DRIVER_OUTPUT_ACTIVE_HIGH
-#define BACKLIGHT_DRIVER_OUTPUT_ACTIVE_HIGH    1u
+#define BACKLIGHT_DRIVER_OUTPUT_ACTIVE_HIGH    0u
 #endif
 
 /* -------------------------------------------------------------------------- */
