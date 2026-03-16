@@ -148,8 +148,28 @@
 #define APP_ALTITUDE_IMU_ACCEL_NORM_REF_MG 1000.0f
 #endif
 
-#ifndef APP_ALTITUDE_AUDIO_SEGMENT_MS
-#define APP_ALTITUDE_AUDIO_SEGMENT_MS 14u
+#ifndef APP_ALTITUDE_AUDIO_SEGMENT_MARGIN_MS
+#define APP_ALTITUDE_AUDIO_SEGMENT_MARGIN_MS 4u
+#endif
+
+#ifndef APP_ALTITUDE_AUDIO_SEGMENT_FALLBACK_MIN_MS
+#define APP_ALTITUDE_AUDIO_SEGMENT_FALLBACK_MIN_MS 24u
+#endif
+
+#ifndef APP_ALTITUDE_AUDIO_SEGMENT_CLIMB_MAX_MS
+#define APP_ALTITUDE_AUDIO_SEGMENT_CLIMB_MAX_MS 52u
+#endif
+
+#ifndef APP_ALTITUDE_AUDIO_SEGMENT_SINK_MAX_MS
+#define APP_ALTITUDE_AUDIO_SEGMENT_SINK_MAX_MS 88u
+#endif
+
+#ifndef APP_ALTITUDE_AUDIO_SEGMENT_WARBLE_DIVISOR
+#define APP_ALTITUDE_AUDIO_SEGMENT_WARBLE_DIVISOR 4.0f
+#endif
+
+#ifndef APP_ALTITUDE_AUDIO_GATE_EXIT_SCALE
+#define APP_ALTITUDE_AUDIO_GATE_EXIT_SCALE 0.75f
 #endif
 
 #ifndef APP_ALTITUDE_AUDIO_CLIMB_WARBLE_RATE_MIN_HZ
@@ -1531,6 +1551,120 @@ static uint32_t APP_ALTITUDE_ComputeSinkBaseFreqHz(const app_altitude_settings_t
     return APP_ALTITUDE_ClampU32((uint32_t)base_freq_hz, 50u, 12000u);
 }
 
+static float APP_ALTITUDE_ComputeAudioWarbleRateHz(float scale,
+                                                bool sink_mode)
+{
+    if (sink_mode == false)
+    {
+        return APP_ALTITUDE_LerpF(APP_ALTITUDE_AUDIO_CLIMB_WARBLE_RATE_MIN_HZ,
+                                  APP_ALTITUDE_AUDIO_CLIMB_WARBLE_RATE_MAX_HZ,
+                                  scale);
+    }
+
+    return APP_ALTITUDE_LerpF(APP_ALTITUDE_AUDIO_SINK_WARBLE_RATE_MIN_HZ,
+                              APP_ALTITUDE_AUDIO_SINK_WARBLE_RATE_MAX_HZ,
+                              scale);
+}
+
+static uint32_t APP_ALTITUDE_ComputeAudioMinSegmentMs(void)
+{
+    uint32_t dma_half_buffer_ms;
+    uint32_t min_segment_ms;
+
+    /* ------------------------------------------------------------------ */
+    /* simple tone API는 호출할 때마다 내부 재생 상태를 다시 prime한다.     */
+    /* 따라서 segment 길이가 DMA half-buffer 시간보다 너무 짧으면          */
+    /* 실제 tone보다 restart overhead 비중이 커져 귀에 끊김이 들릴 수 있다. */
+    /*                                                                    */
+    /* 현재 드라이버 설정값으로 half-buffer 시간을 계산하고,               */
+    /* 여기에 margin을 더해 "이보다 짧게는 자르지 않는" 최소 길이를 만든다. */
+    /* ------------------------------------------------------------------ */
+    dma_half_buffer_ms =
+        (uint32_t)((((((uint64_t)AUDIO_DMA_BUFFER_SAMPLES) / 2u) * 1000u) +
+                     ((uint64_t)AUDIO_SAMPLE_RATE_HZ - 1u)) /
+                    (uint64_t)AUDIO_SAMPLE_RATE_HZ);
+
+    min_segment_ms = dma_half_buffer_ms + APP_ALTITUDE_AUDIO_SEGMENT_MARGIN_MS;
+
+    if (min_segment_ms < APP_ALTITUDE_AUDIO_SEGMENT_FALLBACK_MIN_MS)
+    {
+        min_segment_ms = APP_ALTITUDE_AUDIO_SEGMENT_FALLBACK_MIN_MS;
+    }
+
+    return min_segment_ms;
+}
+
+static uint32_t APP_ALTITUDE_ComputeAudioSegmentTargetMs(float scale,
+                                                         uint32_t tone_window_ms,
+                                                         bool sink_mode)
+{
+    float mod_rate_hz;
+    uint32_t min_segment_ms;
+    uint32_t max_segment_ms;
+    uint32_t target_segment_ms;
+
+    /* ------------------------------------------------------------------ */
+    /* segment 최소 길이는 DMA / restart overhead를 고려해 계산한다.       */
+    /* ------------------------------------------------------------------ */
+    min_segment_ms = APP_ALTITUDE_ComputeAudioMinSegmentMs();
+
+    /* ------------------------------------------------------------------ */
+    /* sink 모드는 더 긴 segment를 허용하고, climb 모드는 조금 더 촘촘하게 */
+    /* 잘라도 되므로 최대 길이를 분리한다.                                */
+    /* ------------------------------------------------------------------ */
+    max_segment_ms = (sink_mode != false)
+                     ? APP_ALTITUDE_AUDIO_SEGMENT_SINK_MAX_MS
+                     : APP_ALTITUDE_AUDIO_SEGMENT_CLIMB_MAX_MS;
+
+    /* ------------------------------------------------------------------ */
+    /* tone window 자체가 최소 segment보다 짧으면 더 나눌 수 없으므로      */
+    /* window 길이를 그대로 반환한다.                                     */
+    /* ------------------------------------------------------------------ */
+    if (tone_window_ms <= min_segment_ms)
+    {
+        return tone_window_ms;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* warble rate가 빠를수록 더 짧은 segment가 필요하다.                  */
+    /* 다만 너무 짧아지면 끊김이 생기므로 최소/최대 길이 안으로 clamp한다. */
+    /* ------------------------------------------------------------------ */
+    mod_rate_hz = APP_ALTITUDE_ComputeAudioWarbleRateHz(scale, sink_mode);
+
+    if (mod_rate_hz < 0.5f)
+    {
+        mod_rate_hz = 0.5f;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* warble의 반주기 정도를 한 segment 목표 길이로 사용한다.             */
+    /* 이렇게 하면 비프 한 번 안에서도 fast vario가 Hz에 계속 반영된다.    */
+    /* ------------------------------------------------------------------ */
+    target_segment_ms = (uint32_t)(1000.0f / (mod_rate_hz * 2.0f));
+
+    if (target_segment_ms < min_segment_ms)
+    {
+        target_segment_ms = min_segment_ms;
+    }
+
+    if (target_segment_ms > max_segment_ms)
+    {
+        target_segment_ms = max_segment_ms;
+    }
+
+    if (target_segment_ms > tone_window_ms)
+    {
+        target_segment_ms = tone_window_ms;
+    }
+
+    if (target_segment_ms == 0u)
+    {
+        target_segment_ms = tone_window_ms;
+    }
+
+    return target_segment_ms;
+}
+
 static uint32_t APP_ALTITUDE_ApplyAudioWarbleHz(uint32_t base_freq_hz,
                                                 float vario_cms,
                                                 float scale,
@@ -1544,19 +1678,14 @@ static uint32_t APP_ALTITUDE_ApplyAudioWarbleHz(uint32_t base_freq_hz,
     float warped_hz;
 
     now_s = ((float)now_ms) * 0.001f;
+    mod_rate_hz = APP_ALTITUDE_ComputeAudioWarbleRateHz(scale, sink_mode);
 
     if (sink_mode == false)
     {
-        mod_rate_hz = APP_ALTITUDE_LerpF(APP_ALTITUDE_AUDIO_CLIMB_WARBLE_RATE_MIN_HZ,
-                                         APP_ALTITUDE_AUDIO_CLIMB_WARBLE_RATE_MAX_HZ,
-                                         scale);
         mod_depth_hz = 22.0f + (0.12f * fabsf(vario_cms));
     }
     else
     {
-        mod_rate_hz = APP_ALTITUDE_LerpF(APP_ALTITUDE_AUDIO_SINK_WARBLE_RATE_MIN_HZ,
-                                         APP_ALTITUDE_AUDIO_SINK_WARBLE_RATE_MAX_HZ,
-                                         scale);
         mod_depth_hz = 14.0f + (0.07f * fabsf(vario_cms));
     }
 
@@ -1614,7 +1743,7 @@ static uint32_t APP_ALTITUDE_ComputeClimbToneWindowMs(const app_altitude_setting
 
     tone_ms = (uint32_t)((float)settings->audio_beep_ms * (1.20f - (0.25f * scale)) + 12.0f);
     return APP_ALTITUDE_ClampU32(tone_ms,
-                                 APP_ALTITUDE_AUDIO_SEGMENT_MS,
+                                 APP_ALTITUDE_ComputeAudioMinSegmentMs(),
                                  (period_ms > 8u) ? (period_ms - 8u) : period_ms);
 }
 
@@ -1680,12 +1809,14 @@ static void APP_ALTITUDE_HandleDebugAudio(uint32_t now_ms, const app_altitude_se
     float vario_cms;
     float speed_abs_cms;
     float deadband_cms;
+    float audio_release_threshold_cms;
     float full_scale_cms;
     float scale;
     uint32_t cycle_period_ms;
     uint32_t tone_window_ms;
     uint32_t cycle_elapsed_ms;
     uint32_t remaining_tone_ms;
+    uint32_t segment_target_ms;
     uint32_t segment_ms;
     uint32_t freq_hz;
     HAL_StatusTypeDef status;
@@ -1713,7 +1844,28 @@ static void APP_ALTITUDE_HandleDebugAudio(uint32_t now_ms, const app_altitude_se
     speed_abs_cms = fabsf(vario_cms);
     deadband_cms = (float)settings->audio_deadband_cms;
 
-    if (speed_abs_cms < deadband_cms)
+    /* ------------------------------------------------------------------ */
+    /*  오디오 게이트에는 작은 hysteresis를 넣는다.                         */
+    /*                                                                      */
+    /*  이유                                                               */
+    /*  - fast vario가 deadband 근처에서 ±수 cm/s 흔들릴 때                */
+    /*    audio start/stop이 너무 자주 뒤집히면                            */
+    /*    "소리가 계속 켜졌다 꺼졌다"는 인상을 준다.                       */
+    /*  - estimator와 표시값은 그대로 두고                                 */
+    /*    오디오 게이트만 살짝 보수적으로 만들어                           */
+    /*    near-zero chatter만 줄인다.                                      */
+    /*                                                                      */
+    /*  현재 이미 audible mode 안에 들어와 있으면                           */
+    /*  exit threshold를 deadband의 75%로 낮춰                              */
+    /*  소리가 조금 더 매끈하게 이어지게 한다.                              */
+    /* ------------------------------------------------------------------ */
+    audio_release_threshold_cms = deadband_cms;
+    if (s_altitude_runtime.audio_mode != 0)
+    {
+        audio_release_threshold_cms = deadband_cms * APP_ALTITUDE_AUDIO_GATE_EXIT_SCALE;
+    }
+
+    if (speed_abs_cms < audio_release_threshold_cms)
     {
         if ((s_altitude_runtime.audio_owned != false) &&
             ((uint32_t)(now_ms - s_altitude_runtime.last_audio_owner_ms) > APP_ALTITUDE_UI_ONLY_AUDIO_OWNER_TIMEOUT_MS))
@@ -1737,14 +1889,20 @@ static void APP_ALTITUDE_HandleDebugAudio(uint32_t now_ms, const app_altitude_se
 
     /* ------------------------------------------------------------------ */
     /*  climb/sink mode에 따라 cadence cycle을 따로 가진다.                */
-    /*  한 cycle 안의 tone window에서는                                     */
-    /*  매우 짧은 segment(기본 14ms)를 연속 발행하면서                      */
-    /*  "현재 fast vario" 를 곧바로 Hz에 다시 투영한다.                     */
     /*                                                                      */
-    /*  그래서                                                             */
-    /*  - beep cadence는 느리거나 빠르게 살아 있고                           */
-    /*  - 단일 beep 안에서도 주파수가 미세하게 계속 움직여                  */
-    /*    Flytec류의 '살아 있는' 소리에 더 가깝게 들린다.                    */
+    /*  여기서 중요한 수정 포인트                                           */
+    /*  - 이전 버전은 tone window를 14ms 고정 조각으로 잘라                 */
+    /*    매 segment마다 simple tone API를 다시 시작했다.                  */
+    /*  - 그런데 현재 Audio_Driver simple tone API는                        */
+    /*    호출할 때마다 기존 content/FIFO를 정리하고 새 tone을 prime한다.   */
+    /*  - 그래서 14ms처럼 너무 짧은 조각은                                 */
+    /*    본래 의도보다 훨씬 끊겨 들릴 수 있다.                              */
+    /*                                                                      */
+    /*  이번 버전은                                                         */
+    /*  - cadence는 그대로 유지하고                                         */
+    /*  - 단일 beep 내부 FM/warble도 유지하되                               */
+    /*  - segment 길이를 "warble 주기"와 "DMA half-buffer 시간"을 기준으로 */
+    /*    동적으로 크게 잡아, audible continuity를 우선 확보한다.           */
     /* ------------------------------------------------------------------ */
     audio_mode = (vario_cms >= 0.0f) ? 1 : -1;
     APP_ALTITUDE_ResetAudioCycleIfNeeded(now_ms, audio_mode);
@@ -1760,9 +1918,9 @@ static void APP_ALTITUDE_HandleDebugAudio(uint32_t now_ms, const app_altitude_se
         cycle_period_ms = tone_window_ms + APP_ALTITUDE_ComputeSinkGapMs(settings, vario_cms);
     }
 
-    if (cycle_period_ms < APP_ALTITUDE_AUDIO_SEGMENT_MS)
+    if (cycle_period_ms == 0u)
     {
-        cycle_period_ms = APP_ALTITUDE_AUDIO_SEGMENT_MS;
+        cycle_period_ms = 1u;
     }
 
     while ((uint32_t)(now_ms - s_altitude_runtime.audio_cycle_start_ms) >= cycle_period_ms)
@@ -1777,9 +1935,23 @@ static void APP_ALTITUDE_HandleDebugAudio(uint32_t now_ms, const app_altitude_se
     }
 
     remaining_tone_ms = tone_window_ms - cycle_elapsed_ms;
-    segment_ms = APP_ALTITUDE_ClampU32(remaining_tone_ms,
-                                       APP_ALTITUDE_AUDIO_SEGMENT_MS,
-                                       APP_ALTITUDE_AUDIO_SEGMENT_MS);
+
+    /* ------------------------------------------------------------------ */
+    /*  segment_target_ms는                                               */
+    /*  - climb: 대개 24~52ms                                              */
+    /*  - sink : 대개 24~88ms                                              */
+    /*  안쪽으로 잡힌다.                                                    */
+    /*                                                                      */
+    /*  결과적으로                                                          */
+    /*  - 단일 beep 내부에서 FM은 여전히 살아 있고                           */
+    /*  - "너무 잘게 쪼개서 틱틱 끊기는" 현상은 크게 줄어든다.               */
+    /* ------------------------------------------------------------------ */
+    segment_target_ms = APP_ALTITUDE_ComputeAudioSegmentTargetMs(scale,
+                                                                 tone_window_ms,
+                                                                 (audio_mode < 0) ? true : false);
+    segment_ms = (remaining_tone_ms < segment_target_ms) ?
+                 remaining_tone_ms :
+                 segment_target_ms;
 
     if (audio_mode > 0)
     {
