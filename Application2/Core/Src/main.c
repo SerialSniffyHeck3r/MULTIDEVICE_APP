@@ -88,7 +88,7 @@
 
 #include "POWER_STATE.h"
 
-
+#include "BOOT_SELFTEST_SCREEN.h"
 
 
 #ifndef M_PI
@@ -2948,6 +2948,24 @@ int main(void)
    *  필요 시 mount retry state만 올린다.
    * ------------------------------------------------------------------*/
   APP_SD_Init();
+
+  /* -------------------------------------------------------------------- */
+  /* blocking 부트 self-test screen                                       */
+  /*                                                                      */
+  /* 이 화면은 아래 역할을 동시에 맡는다.                                 */
+  /* 1) boot logo를 위쪽에 다시 배치한 self-test 전용 UI draw             */
+  /* 2) GPS / IMU / SENSORS / HARDWARE 4개 카테고리 상태 표시             */
+  /* 3) 전원 ON 확인 화면에서 남아 있는 F6 release 등 잔상 버튼 이벤트를  */
+  /*    계속 소비해서 일반 런타임 화면으로 새어 들어가지 않게 차단        */
+  /* 4) self-test가 끝날 때까지 boot 동안 필요한 background task를        */
+  /*    임시 main loop처럼 계속 서비스                                     */
+  /*                                                                      */
+  /* 주의                                                                  */
+  /* - 이 함수는 내부에서 watchdog kick을 계속 수행한다.                  */
+  /* - TIM7 frame token이 아직 시작되지 않았으므로                         */
+  /*   direct U8G2 commit 방식으로 화면을 갱신한다.                       */
+  /* -------------------------------------------------------------------- */
+  BOOT_SELFTEST_SCREEN_RunBlocking();
 
   /* -------------------------------------------------------------------- */
   /*  20fps 화면 갱신용 timer는 TIM7을 사용한다.                            */
