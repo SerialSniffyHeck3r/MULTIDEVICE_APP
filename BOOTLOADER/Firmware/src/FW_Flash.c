@@ -267,8 +267,17 @@ void FW_FLASH_JumpToApp(void)
     app_reset_handler = (void (*)(void))app_pc;
 
     __disable_irq();
-
     HAL_DeInit();
+
+    /* ---------------------------------------------------------------------- */
+    /* bootloader -> app jump 경계에서                                         */
+    /* Soft Power OFF 핀을 LOW 로 다시 확실히 고정한다.                        */
+    /*                                                                        */
+    /* 이렇게 해야                                                              */
+    /* - bootloader 와 app 의 GPIO 철학이 다른 상태여도                        */
+    /* - 점프 직후 OFF line glitch 로 전원이 끊기는 문제를 줄일 수 있다.       */
+    /* ---------------------------------------------------------------------- */
+    FW_POWER_PrepareForAppJump();
 
     SysTick->CTRL = 0u;
     SysTick->LOAD = 0u;
