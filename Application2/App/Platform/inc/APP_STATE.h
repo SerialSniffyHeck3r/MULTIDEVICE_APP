@@ -159,31 +159,29 @@ typedef struct
     /* ---------------------------------------------------------------------- */
     /*  수동 QNH 설정                                                          */
     /*                                                                        */
-    /*  항공식 의미를 보존하기 위해 "사용자가 넣은 QNH" 는                     */
-    /*  GPS auto calibration과 별개 변수로 유지한다.                           */
+    /*  항공식 의미를 보존하기 위해 "사용자가 직접 입력한 QNH" 는             */
+    /*  GPS 기반 자동 보정값과 분리해 별도 변수로 유지한다.                    */
     /*  단위는 0.01 hPa 고정소수점이다.                                        */
     /* ---------------------------------------------------------------------- */
     int32_t manual_qnh_hpa_x100;
 
     /* ---------------------------------------------------------------------- */
-    /*  GPS / IMU / 홈 캡처 정책 토글                                          */
+    /*  GPS / IMU / HOME 정책 토글                                             */
     /*                                                                        */
     /*  gps_auto_equiv_qnh_enabled                                             */
-    /*  - GPS hMSL과 현재 pressure를 역산해서                                  */
-    /*    "GPS와 일치하는 등가 sea-level pressure" 를 계산한다.               */
-    /*  - 이 값은 manual QNH를 덮어쓰지 않고                                   */
-    /*    debug / calibration 참고값으로만 보관한다.                           */
+    /*  - GPS hMSL과 현재 pressure를 이용해                                    */
+    /*    "GPS와 일치하는 등가 sea-level pressure" 를 계산할지 여부          */
     /*                                                                        */
     /*  gps_bias_correction_enabled                                            */
-    /*  - GPS를 absolute anchor로 사용해서                                     */
-    /*    fused absolute altitude의 장기 bias를 붙잡는다.                      */
+    /*  - GPS를 장기 드리프트 없는 absolute anchor로 사용해                    */
+    /*    baro bias를 천천히 잡을지 여부                                       */
     /*                                                                        */
     /*  imu_aid_enabled                                                        */
-    /*  - IMU-aided 4-state filter를 "주 사용 후보" 로 둘지 결정한다.          */
-    /*  - no-IMU / IMU-aided 결과는 항상 병렬 계산해서 함께 보관한다.           */
+    /*  - IMU-aided 4-state filter를 display/audio 기본 후보로 둘지 여부       */
+    /*  - no-IMU / IMU 결과는 항상 병렬 계산해서 둘 다 APP_STATE에 남긴다.     */
     /*                                                                        */
     /*  auto_home_capture_enabled                                              */
-    /*  - 첫 valid altitude가 잡히면 home altitude를 자동 캡처한다.            */
+    /*  - 첫 valid fused altitude가 잡히면 home altitude를 자동 캡처한다.     */
     /* ---------------------------------------------------------------------- */
     uint8_t gps_auto_equiv_qnh_enabled;
     uint8_t gps_bias_correction_enabled;
@@ -191,18 +189,23 @@ typedef struct
     uint8_t auto_home_capture_enabled;
 
     /* ---------------------------------------------------------------------- */
-    /*  IMU 수직축 보조 부호                                                   */
+    /*  IMU 수직축 부호                                                        */
     /*                                                                        */
-    /*  gravity-vector projection으로 기기 자세 의존성을 줄이지만,              */
-    /*  실제 장착 방향/축 정의가 다르면 수직 가속 부호가 뒤집힐 수 있다.        */
-    /*  +1 또는 -1 값을 사용한다.                                              */
+    /*  gravity projection을 사용해도 실제 장착 방향이 뒤집혀 있으면          */
+    /*  수직 specific-force 부호가 반대로 나올 수 있으므로                    */
+    /*  +1 / -1 을 런타임에서 바꿀 수 있게 유지한다.                           */
     /* ---------------------------------------------------------------------- */
     int8_t  imu_vertical_sign;
     uint8_t reserved0;
     uint16_t reserved1;
 
     /* ---------------------------------------------------------------------- */
-    /*  1차 저역통과 / 표시 반응 속도                                          */
+    /*  Pressure / display LPF 시정수                                          */
+    /*                                                                        */
+    /*  pressure_lpf_tau_ms : raw pressure -> pressure_filt LPF                */
+    /*  vario_fast_tau_ms   : KF velocity -> fast vario LPF                    */
+    /*  vario_slow_tau_ms   : KF velocity -> slow vario LPF                    */
+    /*  display_lpf_tau_ms  : fused altitude -> display altitude LPF           */
     /* ---------------------------------------------------------------------- */
     uint16_t pressure_lpf_tau_ms;
     uint16_t vario_fast_tau_ms;
@@ -210,36 +213,36 @@ typedef struct
     uint16_t display_lpf_tau_ms;
 
     /* ---------------------------------------------------------------------- */
-    /*  정지 상태(rest) 전용 표시 안정화                                        */
+    /*  정지 상태(rest) 전용 display 안정화                                    */
     /*                                                                        */
-    /*  rest_display_enabled                                                   */
-    /*  - core filter / vario는 그대로 두고                                   */
-    /*    "최종 표시 altitude" 에만 정지 상태용 추가 안정화를 건다.            */
-    /*  - 따라서 바리오 반응성은 유지하면서,                                  */
-    /*    책상 위 정지 상태에서 숫자가 달달 떨리는 현상을 줄일 수 있다.       */
+    /*  core filter / fast vario는 그대로 두고                                 */
+    /*  "최종 화면값" 만 더 천천히 따라가게 만드는 계층이다.                  */
     /*                                                                        */
-    /*  rest_detect_vario_cms                                                 */
-    /*  - 정지 판정에 사용하는 slow vario 절대값 기준                         */
-    /*                                                                        */
-    /*  rest_detect_accel_mg                                                  */
-    /*  - IMU가 유효할 때 정지 판정에 사용하는 수직 specific-force 기준       */
-    /*                                                                        */
-    /*  rest_display_tau_ms                                                   */
-    /*  - 정지 상태일 때 display altitude에 적용되는 추가 LPF 시정수          */
-    /*                                                                        */
-    /*  rest_display_hold_cm                                                  */
-    /*  - 정지 상태에서 display altitude와 target altitude 차이가              */
-    /*    이 값보다 작으면, 화면 숫자를 그대로 붙잡아 미세 떨림을 막는다.     */
+    /*  rest_display_enabled      : 표시 전용 stabilizer on/off               */
+    /*  rest_detect_vario_cms     : 정지 판정용 slow vario 임계값             */
+    /*  rest_detect_accel_mg      : 정지 판정용 IMU specific-force 임계값     */
+    /*  rest_display_tau_ms       : 정지 시 display LPF 시정수                */
+    /*  rest_display_hold_cm      : 이 범위 이내의 미세 변화는 화면값 유지    */
+    /*  zupt_enabled              : 정지 상태일 때 velocity=0 pseudo update   */
     /* ---------------------------------------------------------------------- */
     uint8_t  rest_display_enabled;
-    uint8_t  reserved_rest0;
+    uint8_t  zupt_enabled;
+    uint16_t reserved_rest0;
     uint16_t rest_detect_vario_cms;
     uint16_t rest_detect_accel_mg;
     uint16_t rest_display_tau_ms;
     uint16_t rest_display_hold_cm;
 
     /* ---------------------------------------------------------------------- */
-    /*  GPS gate / measurement noise 관련                                      */
+    /*  Baro / GPS measurement noise 및 gate                                  */
+    /*                                                                        */
+    /*  baro_measurement_noise_cm      : 평온 구간에서 기본 baro altitude R    */
+    /*  baro_adaptive_noise_max_cm     : residual이 클 때 올릴 최대 R          */
+    /*  gps_measurement_noise_floor_cm : GPS altitude 최소 noise floor         */
+    /*  gps_max_vacc_mm                : GPS vertical accuracy 허용 상한       */
+    /*  gps_max_pdop_x100              : GPS pDOP 허용 상한                    */
+    /*  gps_min_sats                   : 최소 위성 수                          */
+    /*  gps_bias_tau_ms                : GPS로 baro bias를 따라잡는 속도       */
     /* ---------------------------------------------------------------------- */
     uint16_t baro_measurement_noise_cm;
     uint16_t baro_adaptive_noise_max_cm;
@@ -251,16 +254,32 @@ typedef struct
     uint16_t gps_bias_tau_ms;
 
     /* ---------------------------------------------------------------------- */
-    /*  IMU 수직 가속 추정 튜닝                                                */
+    /*  Baro velocity observation                                              */
     /*                                                                        */
-    /*  gravity_tau_ms                                                         */
-    /*  - 가속도 벡터에서 저주파 gravity 기준축을 추정하는 LPF 시정수          */
+    /*  pressure -> altitude derivative 로 만든 baro vario를                  */
+    /*  velocity measurement로 KF에 직접 넣는다.                              */
     /*                                                                        */
-    /*  accel_tau_ms                                                           */
-    /*  - gravity 제거 후 남는 수직 specific-force의 LPF 시정수               */
+    /*  baro_vario_lpf_tau_ms             : derivative LPF 시정수             */
+    /*  baro_vario_measurement_noise_cms  : velocity update R                 */
+    /* ---------------------------------------------------------------------- */
+    uint16_t baro_vario_lpf_tau_ms;
+    uint16_t baro_vario_measurement_noise_cms;
+
+    /* ---------------------------------------------------------------------- */
+    /*  IMU vertical specific-force 추정 튜닝                                  */
     /*                                                                        */
-    /*  accel_lsb_per_g                                                        */
-    /*  - MPU6050 raw scale. 기본은 ±2g = 16384 LSB/g                         */
+    /*  imu_gravity_tau_ms             : gyro-aided gravity estimator          */
+    /*                                   accel correction 시정수              */
+    /*  imu_accel_tau_ms               : vertical specific-force LPF           */
+    /*  imu_accel_lsb_per_g            : MPU raw scale                         */
+    /*  imu_vertical_deadband_mg       : 아주 작은 수직 성분 무시             */
+    /*  imu_vertical_clip_mg           : 과도한 입력 clip                     */
+    /*  imu_measurement_noise_cms2     : KF4 predict input noise 기준값       */
+    /*  imu_gyro_lsb_per_dps           : gyro raw scale                        */
+    /*  imu_attitude_accel_gate_mg     : accel norm이 1g에서 얼마나 벗어나면   */
+    /*                                   attitude trust를 깎을지 결정         */
+    /*  imu_predict_min_trust_permille : 이 값 이하 trust에서는               */
+    /*                                   IMU predict weight를 0으로 둔다.     */
     /* ---------------------------------------------------------------------- */
     uint16_t imu_gravity_tau_ms;
     uint16_t imu_accel_tau_ms;
@@ -268,12 +287,15 @@ typedef struct
     uint16_t imu_vertical_deadband_mg;
     uint16_t imu_vertical_clip_mg;
     uint16_t imu_measurement_noise_cms2;
+    uint16_t imu_gyro_lsb_per_dps;
+    uint16_t imu_attitude_accel_gate_mg;
+    uint16_t imu_predict_min_trust_permille;
 
     /* ---------------------------------------------------------------------- */
     /*  Kalman process noise                                                   */
     /*                                                                        */
-    /*  단위는 사람이 IDE/debug UI에서 다루기 쉬운 "per-second 규모" 로 둔다.  */
-    /*  실제 구현에서는 dt를 곱해서 process covariance에 반영한다.              */
+    /*  단위는 debug/IDE에서 조절하기 쉬운 "초당 규모" 로 둔다.               */
+    /*  실제 구현에서는 dt를 곱해 process covariance에 반영한다.               */
     /* ---------------------------------------------------------------------- */
     uint16_t kf_q_height_cm_per_s;
     uint16_t kf_q_velocity_cms_per_s;
@@ -281,14 +303,14 @@ typedef struct
     uint16_t kf_q_accel_bias_cms2_per_s;
 
     /* ---------------------------------------------------------------------- */
-    /*  Debug altitude 페이지 전용 vario beep 파라미터                         */
+    /*  ALTITUDE debug page 전용 test vario audio                              */
     /*                                                                        */
-    /*  debug_audio_source                                                    */
-    /*  - 0 : no-IMU fast vario                                              */
-    /*  - 1 : IMU-aided fast vario                                           */
-    /*                                                                        */
-    /*  사용자는 현장에서 두 소스를 직접 번갈아 들으면서                      */
-    /*  어떤 추정이 더 자연스러운지 비교할 수 있다.                           */
+    /*  debug_audio_enabled : test tone 출력 허용                              */
+    /*  debug_audio_source  : 0=no-IMU fast vario, 1=IMU fast vario            */
+    /*  audio_deadband_cms  : 이 값 이하의 vario는 무음                        */
+    /*  audio_min/max_freq  : FM vario tone 주파수 범위                        */
+    /*  audio_repeat_ms     : climb beep cadence 기준값                        */
+    /*  audio_beep_ms       : climb beep tone 길이 기준값                      */
     /* ---------------------------------------------------------------------- */
     uint8_t  debug_audio_enabled;
     uint8_t  debug_audio_source;
@@ -1377,59 +1399,93 @@ typedef struct
 /* -------------------------------------------------------------------------- */
 typedef struct
 {
-    bool     initialized;                 /* 서비스 init 완료 여부                  */
-    bool     baro_valid;                  /* 현재 baro 측정이 유효한가              */
-    bool     gps_valid;                   /* 현재 GPS 높이 측정이 gate 통과인가     */
-    bool     home_valid;                  /* home altitude 캡처가 되었는가          */
-    bool     imu_vector_valid;            /* gravity vector 추정이 유효한가         */
-    uint8_t  debug_audio_active;          /* ALTITUDE debug page 오디오 활성 여부   */
-    uint16_t gps_quality_permille;        /* 0..1000, gate/weight 참고값            */
+    /* ---------------------------------------------------------------------- */
+    /*  공개 상태 플래그 / 품질 정보                                           */
+    /* ---------------------------------------------------------------------- */
+    bool     initialized;                   /* 서비스 init 완료 여부                 */
+    bool     baro_valid;                    /* baro 경로가 현재 살아 있는가          */
+    bool     gps_valid;                     /* GPS height gate 통과 여부             */
+    bool     home_valid;                    /* home altitude가 캡처되었는가          */
+    bool     imu_vector_valid;              /* gravity estimator가 유효한가          */
+    uint8_t  debug_audio_active;            /* ALTITUDE debug audio 활성 여부        */
+    uint16_t gps_quality_permille;          /* GPS quality 0..1000                   */
 
-    uint32_t last_update_ms;              /* 마지막 task 시각                       */
-    uint32_t last_baro_update_ms;         /* 마지막 새 baro sample 반영 시각        */
-    uint32_t last_gps_update_ms;          /* 마지막 새 gps sample 반영 시각         */
+    /* ---------------------------------------------------------------------- */
+    /*  최근 update timestamp                                                  */
+    /* ---------------------------------------------------------------------- */
+    uint32_t last_update_ms;                /* 마지막 task 실행 시각                 */
+    uint32_t last_baro_update_ms;           /* 마지막 신규 baro sample 반영 시각     */
+    uint32_t last_gps_update_ms;            /* 마지막 신규 GPS sample 반영 시각      */
 
-    int32_t  pressure_raw_hpa_x100;       /* 원본 pressure, 0.01 hPa                */
-    int32_t  pressure_filt_hpa_x100;      /* LPF 후 pressure, 0.01 hPa              */
-    int32_t  pressure_residual_hpa_x100;  /* raw - LPF pressure residual, 0.01 hPa  */
-    int32_t  qnh_manual_hpa_x100;         /* 설정 manual QNH, 0.01 hPa              */
-    int32_t  qnh_equiv_gps_hpa_x100;      /* GPS 역산 등가 sea-level pressure       */
+    /* ---------------------------------------------------------------------- */
+    /*  Pressure / QNH intermediate 공개값                                     */
+    /* ---------------------------------------------------------------------- */
+    int32_t  pressure_raw_hpa_x100;         /* raw pressure, 0.01 hPa                */
+    int32_t  pressure_prefilt_hpa_x100;     /* median-3 prefilter pressure           */
+    int32_t  pressure_filt_hpa_x100;        /* LPF pressure                          */
+    int32_t  pressure_residual_hpa_x100;    /* prefilt - lpf residual                */
+    int32_t  qnh_manual_hpa_x100;           /* manual QNH                            */
+    int32_t  qnh_equiv_gps_hpa_x100;        /* GPS equivalent QNH                    */
 
-    int32_t  alt_pressure_std_cm;         /* STD 1013.25 기준 pressure altitude     */
-    int32_t  alt_qnh_manual_cm;           /* manual QNH 기준 altitude               */
-    int32_t  alt_gps_hmsl_cm;             /* GPS hMSL                               */
-    int32_t  alt_fused_noimu_cm;          /* 3-state KF absolute altitude           */
-    int32_t  alt_fused_imu_cm;            /* 4-state IMU-aided absolute altitude    */
-    int32_t  alt_display_cm;              /* 현재 주 표시용 altitude                */
+    /* ---------------------------------------------------------------------- */
+    /*  병렬 고도값                                                            */
+    /* ---------------------------------------------------------------------- */
+    int32_t  alt_pressure_std_cm;           /* STD 1013.25 pressure altitude         */
+    int32_t  alt_qnh_manual_cm;             /* manual QNH altitude                   */
+    int32_t  alt_gps_hmsl_cm;               /* GPS hMSL                              */
+    int32_t  alt_fused_noimu_cm;            /* 3-state KF fused altitude             */
+    int32_t  alt_fused_imu_cm;              /* 4-state IMU-aided fused altitude      */
+    int32_t  alt_display_cm;                /* 최종 UI/log 주 표시용 altitude        */
 
-    int32_t  alt_rel_home_noimu_cm;       /* no-IMU fused 기준 home 상대고도        */
-    int32_t  alt_rel_home_imu_cm;         /* IMU fused 기준 home 상대고도           */
-    int32_t  home_alt_noimu_cm;           /* no-IMU 기준 home 절대고도              */
-    int32_t  home_alt_imu_cm;             /* IMU 기준 home 절대고도                 */
+    /* ---------------------------------------------------------------------- */
+    /*  home / relative altitude                                               */
+    /* ---------------------------------------------------------------------- */
+    int32_t  alt_rel_home_noimu_cm;         /* no-IMU 상대고도                       */
+    int32_t  alt_rel_home_imu_cm;           /* IMU 상대고도                          */
+    int32_t  home_alt_noimu_cm;             /* no-IMU home absolute altitude         */
+    int32_t  home_alt_imu_cm;               /* IMU home absolute altitude            */
 
-    int32_t  baro_bias_noimu_cm;          /* no-IMU filter의 baro bias 상태         */
-    int32_t  baro_bias_imu_cm;            /* IMU filter의 baro bias 상태            */
-    uint16_t baro_noise_used_cm;          /* 현재 baro update에 사용된 noise(cm)    */
-    uint8_t  display_rest_active;         /* 정지 상태 display stabilizer 활성      */
-    uint8_t  debug_audio_source;          /* 디버그 audio가 현재 쓰는 source        */
-    int32_t  debug_audio_vario_cms;       /* 디버그 audio source vario(cm/s)        */
+    /* ---------------------------------------------------------------------- */
+    /*  filter bias / noise / display mode                                     */
+    /* ---------------------------------------------------------------------- */
+    int32_t  baro_bias_noimu_cm;            /* no-IMU filter의 baro bias             */
+    int32_t  baro_bias_imu_cm;              /* IMU filter의 baro bias                */
+    uint16_t baro_noise_used_cm;            /* 이번 step에서 사용된 altitude R       */
+    uint8_t  display_rest_active;           /* rest display stabilizer 활성          */
+    uint8_t  zupt_active;                   /* zero-velocity pseudo update 활성      */
+    uint8_t  debug_audio_source;            /* 현재 audio source 0/1                 */
+    uint8_t  reserved_audio0;               /* alignment / future use                */
+    int32_t  debug_audio_vario_cms;         /* 실제 tone source vario                */
 
-    int32_t  vario_fast_noimu_cms;        /* no-IMU fast vario                      */
-    int32_t  vario_slow_noimu_cms;        /* no-IMU slow vario                      */
-    int32_t  vario_fast_imu_cms;          /* IMU fast vario                         */
-    int32_t  vario_slow_imu_cms;          /* IMU slow vario                         */
+    /* ---------------------------------------------------------------------- */
+    /*  Vario / baro-velocity / grade                                          */
+    /* ---------------------------------------------------------------------- */
+    int32_t  vario_fast_noimu_cms;          /* no-IMU fast vario                     */
+    int32_t  vario_slow_noimu_cms;          /* no-IMU slow vario                     */
+    int32_t  vario_fast_imu_cms;            /* IMU fast vario                        */
+    int32_t  vario_slow_imu_cms;            /* IMU slow vario                        */
+    int32_t  baro_vario_raw_cms;            /* altitude derivative raw               */
+    int32_t  baro_vario_filt_cms;           /* altitude derivative LPF               */
+    int32_t  grade_noimu_x10;               /* no-IMU grade %, x0.1                  */
+    int32_t  grade_imu_x10;                 /* IMU grade %, x0.1                     */
 
-    int32_t  grade_noimu_x10;             /* no-IMU grade %, x0.1                   */
-    int32_t  grade_imu_x10;               /* IMU grade %, x0.1                      */
+    /* ---------------------------------------------------------------------- */
+    /*  IMU vertical estimate diagnostics                                      */
+    /* ---------------------------------------------------------------------- */
+    int32_t  imu_vertical_accel_mg;         /* gravity 제거 후 수직 specific-force   */
+    int32_t  imu_vertical_accel_cms2;       /* 위 값을 cm/s^2 로 변환한 값           */
+    int32_t  imu_gravity_norm_mg;           /* gravity vector norm diagnostic        */
+    int32_t  imu_accel_norm_mg;             /* raw accel norm diagnostic             */
+    uint16_t imu_attitude_trust_permille;   /* attitude trust 0..1000                */
+    uint16_t imu_predict_weight_permille;   /* KF4 predict weight 0..1000            */
 
-    int32_t  imu_vertical_accel_mg;       /* gravity 제거 후 수직 specific-force    */
-    int32_t  imu_vertical_accel_cms2;     /* 위 값을 cm/s^2 로 변환한 값            */
-    int32_t  imu_gravity_norm_mg;         /* gravity LPF 벡터 norm, mg              */
-
-    uint32_t gps_vacc_mm;                 /* 마지막 사용 GPS vAcc                   */
-    uint16_t gps_pdop_x100;               /* 마지막 사용 pDOP                       */
-    uint8_t  gps_numsv_used;              /* 마지막 사용 numSV_used                 */
-    uint8_t  gps_fix_type;                /* 마지막 사용 fixType                    */
+    /* ---------------------------------------------------------------------- */
+    /*  최근 사용된 GPS 품질 수치                                              */
+    /* ---------------------------------------------------------------------- */
+    uint32_t gps_vacc_mm;                   /* GPS vertical accuracy                 */
+    uint16_t gps_pdop_x100;                 /* GPS PDOP x100                         */
+    uint8_t  gps_numsv_used;                /* GPS numSV_used                        */
+    uint8_t  gps_fix_type;                  /* GPS fixType                           */
 } app_altitude_state_t;
 
 

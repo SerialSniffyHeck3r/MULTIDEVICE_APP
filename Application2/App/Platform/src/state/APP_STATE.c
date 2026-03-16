@@ -80,6 +80,16 @@ static void APP_STATE_ApplyDefaultSettingsUnlocked(void)
     /*  - no-IMU / IMU 병렬 추정은 모두 항상 계산하되,                          */
     /*    주 표시용 선택만 imu_aid_enabled로 결정한다.                         */
     /* ---------------------------------------------------------------------- */
+        /* ------------------------------------------------------------------ */
+        /*  ALTITUDE 서비스 기본 설정                                           */
+        /*                                                                    */
+        /*  기본 철학                                                         */
+        /*  - manual QNH / GPS equivalent QNH / fused altitude를 분리한다.    */
+        /*  - baro는 빠르고 촘촘한 상대 채널, GPS는 느린 절대 anchor다.         */
+        /*  - IMU-aided 결과는 항상 계산하되, 기본 표시 후보는 안전하게        */
+        /*    no-IMU 쪽을 먼저 쓰도록 시작한다.                                */
+        /*  - stationary burst 억제를 위해 rest display와 ZUPT를 켠다.        */
+        /* ------------------------------------------------------------------ */
         g_app_state.settings.altitude.manual_qnh_hpa_x100            = 101325;
         g_app_state.settings.altitude.gps_auto_equiv_qnh_enabled     = 1u;
         g_app_state.settings.altitude.gps_bias_correction_enabled    = 1u;
@@ -89,30 +99,52 @@ static void APP_STATE_ApplyDefaultSettingsUnlocked(void)
         g_app_state.settings.altitude.reserved0                      = 0u;
         g_app_state.settings.altitude.reserved1                      = 0u;
 
-        g_app_state.settings.altitude.pressure_lpf_tau_ms            = 120u;
-        g_app_state.settings.altitude.vario_fast_tau_ms              = 180u;
+        /* ------------------------------------------------------------------ */
+        /*  pressure / vario / display 반응 속도                               */
+        /*                                                                    */
+        /*  pressure_lpf_tau_ms = 110ms                                        */
+        /*  - raw pressure 잔떨림을 줄이되, baro 고유 응답성은 유지한다.       */
+        /*                                                                    */
+        /*  vario_fast_tau_ms = 160ms                                          */
+        /*  - 오디오/즉응용 fast vario                                         */
+        /*                                                                    */
+        /*  vario_slow_tau_ms = 900ms                                          */
+        /*  - 숫자 표시/경사도용 slow vario                                    */
+        /*                                                                    */
+        /*  display_lpf_tau_ms = 450ms                                         */
+        /*  - 최종 display altitude 기본 LPF                                   */
+        /* ------------------------------------------------------------------ */
+        g_app_state.settings.altitude.pressure_lpf_tau_ms            = 110u;
+        g_app_state.settings.altitude.vario_fast_tau_ms              = 160u;
         g_app_state.settings.altitude.vario_slow_tau_ms              = 900u;
         g_app_state.settings.altitude.display_lpf_tau_ms             = 450u;
 
         /* ------------------------------------------------------------------ */
-        /*  정지 상태 display 안정화 기본값                                   */
+        /*  정지 상태 display 안정화 + ZUPT 기본값                             */
         /*                                                                    */
-        /*  책상 위에 고정해 둔 상태처럼 "실제로는 거의 안 움직이는 상황" 에서  */
-        /*  숫자만 잔떨림으로 흔들리는 것을 줄이기 위한 값이다.                */
-        /*                                                                    */
-        /*  - rest_detect_vario_cms  : 0.08m/s 이하를 정지 후보로 본다.       */
-        /*  - rest_detect_accel_mg   : 수직 specific-force 18mg 이하면 정지    */
-        /*  - rest_display_tau_ms    : 정지 시 display LPF를 1.8s 로 늘림      */
-        /*  - rest_display_hold_cm   : ±12cm 이내 미세 변화는 화면값을 유지     */
+        /*  rest_detect_vario_cms  = 0.08m/s                                   */
+        /*  rest_detect_accel_mg   = 15mg                                       */
+        /*  rest_display_tau_ms    = 1.8s                                       */
+        /*  rest_display_hold_cm   = ±10cm                                      */
+        /*  zupt_enabled           = 1                                          */
         /* ------------------------------------------------------------------ */
         g_app_state.settings.altitude.rest_display_enabled           = 1u;
+        g_app_state.settings.altitude.zupt_enabled                   = 1u;
         g_app_state.settings.altitude.reserved_rest0                 = 0u;
         g_app_state.settings.altitude.rest_detect_vario_cms          = 8u;
-        g_app_state.settings.altitude.rest_detect_accel_mg           = 18u;
+        g_app_state.settings.altitude.rest_detect_accel_mg           = 15u;
         g_app_state.settings.altitude.rest_display_tau_ms            = 1800u;
-        g_app_state.settings.altitude.rest_display_hold_cm           = 12u;
+        g_app_state.settings.altitude.rest_display_hold_cm           = 10u;
 
-        g_app_state.settings.altitude.baro_measurement_noise_cm      = 35u;
+        /* ------------------------------------------------------------------ */
+        /*  baro / GPS gate 및 measurement noise                               */
+        /*                                                                    */
+        /*  baro_measurement_noise_cm      = 0.30m                             */
+        /*  baro_adaptive_noise_max_cm     = 2.50m                             */
+        /*  gps_measurement_noise_floor_cm = 1.50m                             */
+        /*  gps_bias_tau_ms                = 45s                               */
+        /* ------------------------------------------------------------------ */
+        g_app_state.settings.altitude.baro_measurement_noise_cm      = 30u;
         g_app_state.settings.altitude.baro_adaptive_noise_max_cm     = 250u;
         g_app_state.settings.altitude.gps_measurement_noise_floor_cm = 150u;
         g_app_state.settings.altitude.gps_max_vacc_mm                = 4000u;
@@ -121,25 +153,73 @@ static void APP_STATE_ApplyDefaultSettingsUnlocked(void)
         g_app_state.settings.altitude.reserved2                      = 0u;
         g_app_state.settings.altitude.gps_bias_tau_ms                = 45000u;
 
+        /* ------------------------------------------------------------------ */
+        /*  baro velocity observation                                          */
+        /*                                                                    */
+        /*  baro_vario_lpf_tau_ms            = 130ms                           */
+        /*  baro_vario_measurement_noise_cms = 0.25m/s                         */
+        /*                                                                    */
+        /*  이 값은 altitude derivative를 velocity measurement로 사용할 때      */
+        /*  얼마나 매끈하게 / 얼마나 신뢰할지 정한다.                           */
+        /* ------------------------------------------------------------------ */
+        g_app_state.settings.altitude.baro_vario_lpf_tau_ms          = 130u;
+        g_app_state.settings.altitude.baro_vario_measurement_noise_cms = 25u;
+
+        /* ------------------------------------------------------------------ */
+        /*  IMU vertical estimate 기본값                                       */
+        /*                                                                    */
+        /*  imu_gravity_tau_ms            = 700ms                              */
+        /*  imu_accel_tau_ms              = 100ms                              */
+        /*  imu_accel_lsb_per_g           = 16384 (MPU6050 ±2g)                */
+        /*  imu_vertical_deadband_mg      = 12mg                               */
+        /*  imu_vertical_clip_mg          = 450mg                              */
+        /*  imu_measurement_noise_cms2    = 90cm/s²                            */
+        /*  imu_gyro_lsb_per_dps          = 131 (MPU6050 ±250dps)              */
+        /*  imu_attitude_accel_gate_mg    = 120mg                              */
+        /*  imu_predict_min_trust_permille= 300                                */
+        /*                                                                    */
+        /*  stationary burst가 보이면                                           */
+        /*  1) I_TMIN을 올리고                                                  */
+        /*  2) ATT_AG를 낮추고                                                  */
+        /*  3) A_TAU를 조금 늘려라.                                             */
+        /* ------------------------------------------------------------------ */
         g_app_state.settings.altitude.imu_gravity_tau_ms             = 700u;
-        g_app_state.settings.altitude.imu_accel_tau_ms               = 120u;
+        g_app_state.settings.altitude.imu_accel_tau_ms               = 100u;
         g_app_state.settings.altitude.imu_accel_lsb_per_g            = 16384u;
         g_app_state.settings.altitude.imu_vertical_deadband_mg       = 12u;
         g_app_state.settings.altitude.imu_vertical_clip_mg           = 450u;
-        g_app_state.settings.altitude.imu_measurement_noise_cms2     = 80u;
+        g_app_state.settings.altitude.imu_measurement_noise_cms2     = 90u;
+        g_app_state.settings.altitude.imu_gyro_lsb_per_dps           = 131u;
+        g_app_state.settings.altitude.imu_attitude_accel_gate_mg     = 120u;
+        g_app_state.settings.altitude.imu_predict_min_trust_permille = 300u;
 
+        /* ------------------------------------------------------------------ */
+        /*  Kalman process noise 기본값                                        */
+        /*                                                                    */
+        /*  Q_h : 고도 상태가 스스로 퍼지는 정도                               */
+        /*  Q_v : 속도 상태가 스스로 퍼지는 정도                               */
+        /*  Q_b : baro bias가 천천히 움직이는 정도                              */
+        /*  Q_a : accel bias가 천천히 움직이는 정도                             */
+        /* ------------------------------------------------------------------ */
         g_app_state.settings.altitude.kf_q_height_cm_per_s           = 5u;
         g_app_state.settings.altitude.kf_q_velocity_cms_per_s        = 60u;
         g_app_state.settings.altitude.kf_q_baro_bias_cm_per_s        = 2u;
         g_app_state.settings.altitude.kf_q_accel_bias_cms2_per_s     = 20u;
 
+        /* ------------------------------------------------------------------ */
+        /*  ALTITUDE debug page 전용 vario audio 기본값                        */
+        /*                                                                    */
+        /*  audio_repeat_ms / audio_beep_ms 는                                 */
+        /*  climb cadence의 기준값일 뿐이고,                                    */
+        /*  실제 음정은 fast vario 수치가 실시간으로 FM modulation 한다.         */
+        /* ------------------------------------------------------------------ */
         g_app_state.settings.altitude.debug_audio_enabled            = 1u;
         g_app_state.settings.altitude.debug_audio_source             = 0u;
         g_app_state.settings.altitude.audio_deadband_cms             = 35u;
         g_app_state.settings.altitude.audio_min_freq_hz              = 700u;
-        g_app_state.settings.altitude.audio_max_freq_hz              = 2200u;
+        g_app_state.settings.altitude.audio_max_freq_hz              = 2400u;
         g_app_state.settings.altitude.audio_repeat_ms                = 140u;
-        g_app_state.settings.altitude.audio_beep_ms                  = 50u;
+        g_app_state.settings.altitude.audio_beep_ms                  = 55u;
 }
 
 /* -------------------------------------------------------------------------- */

@@ -5,6 +5,45 @@
 #include <math.h>
 #include <string.h>
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+/* -------------------------------------------------------------------------- */
+/*  APP_ALTITUDE tuning quick memo                                             */
+/*                                                                            */
+/*  이 파일은 altitude / vario / grade / debug audio를 한 번에 처리한다.      */
+/*                                                                            */
+/*  현장에서 가장 먼저 만질 파라미터                                           */
+/*  1) 정지 화면 떨림이 거슬리면                                               */
+/*     - REST_EN, REST_V, REST_A, REST_TAU, REST_HLD 를 조절한다.             */
+/*     - core vario 반응성은 유지하면서 display만 더 차분하게 만든다.         */
+/*                                                                            */
+/*  2) IMU 모드에서 가끔 혼자 "뚜우우욱" 하고 발광하면                        */
+/*     - ZUPT_EN 을 켠다.                                                      */
+/*     - I_TMIN 을 올린다.                                                     */
+/*     - ATT_AG 를 낮춘다.                                                     */
+/*     - A_TAU 를 조금 늘린다.                                                 */
+/*     - 필요하면 IMU_AID를 끄고 no-IMU 경로를 주 표시로 쓴다.                */
+/*                                                                            */
+/*  3) baro 숫자는 안정적인데 vario가 둔하면                                   */
+/*     - VF_TAU 를 줄인다.                                                     */
+/*     - BV_TAU 를 줄인다.                                                     */
+/*     - BV_R 를 조금 줄여 baro velocity measurement를 더 믿게 만든다.        */
+/*                                                                            */
+/*  4) 주행 중 airflow로 고도가 흔들리면                                       */
+/*     - BARO_R / BARO_RX 를 올린다.                                           */
+/*     - 가능하면 하우징 vent / static port 구조도 같이 본다.                 */
+/*                                                                            */
+/*  5) GPS absolute anchor가 너무 느리거나 빠르면                              */
+/*     - GBIAS_T, GPS_R, GPS_VACC, GPS_PDOP, GPS_SATS 를 조절한다.            */
+/*                                                                            */
+/*  오디오 정책                                                                 */
+/*  - climb : beep cadence + beep 내부 FM 둘 다 fast vario에 반응한다.        */
+/*  - sink  : 긴 saw tone에 약한 warble을 얹는다.                              */
+/*  - AUD_SRC로 no-IMU / IMU vario를 현장에서 비교 청취할 수 있다.            */
+/* -------------------------------------------------------------------------- */
+
 #ifndef APP_ALTITUDE_STD_QNH_HPA
 #define APP_ALTITUDE_STD_QNH_HPA 1013.25f
 #endif
@@ -73,42 +112,151 @@
 #define APP_ALTITUDE_SINK_AUDIO_MAX_TONE_MS 700u
 #endif
 
+#ifndef APP_ALTITUDE_BARO_ALTITUDE_GATE_SIGMA
+#define APP_ALTITUDE_BARO_ALTITUDE_GATE_SIGMA 6.0f
+#endif
+
+#ifndef APP_ALTITUDE_BARO_ALTITUDE_GATE_FLOOR_CM
+#define APP_ALTITUDE_BARO_ALTITUDE_GATE_FLOOR_CM 250.0f
+#endif
+
+#ifndef APP_ALTITUDE_BARO_VELOCITY_GATE_SIGMA
+#define APP_ALTITUDE_BARO_VELOCITY_GATE_SIGMA 6.0f
+#endif
+
+#ifndef APP_ALTITUDE_BARO_VELOCITY_GATE_FLOOR_CMS
+#define APP_ALTITUDE_BARO_VELOCITY_GATE_FLOOR_CMS 120.0f
+#endif
+
+#ifndef APP_ALTITUDE_GPS_ALTITUDE_GATE_SIGMA
+#define APP_ALTITUDE_GPS_ALTITUDE_GATE_SIGMA 5.0f
+#endif
+
+#ifndef APP_ALTITUDE_GPS_ALTITUDE_GATE_FLOOR_CM
+#define APP_ALTITUDE_GPS_ALTITUDE_GATE_FLOOR_CM 600.0f
+#endif
+
+#ifndef APP_ALTITUDE_ZUPT_VELOCITY_NOISE_CMS
+#define APP_ALTITUDE_ZUPT_VELOCITY_NOISE_CMS 6.0f
+#endif
+
+#ifndef APP_ALTITUDE_BARO_VARIO_CLIP_CMS
+#define APP_ALTITUDE_BARO_VARIO_CLIP_CMS 4000.0f
+#endif
+
+#ifndef APP_ALTITUDE_IMU_ACCEL_NORM_REF_MG
+#define APP_ALTITUDE_IMU_ACCEL_NORM_REF_MG 1000.0f
+#endif
+
+#ifndef APP_ALTITUDE_AUDIO_SEGMENT_MS
+#define APP_ALTITUDE_AUDIO_SEGMENT_MS 14u
+#endif
+
+#ifndef APP_ALTITUDE_AUDIO_CLIMB_WARBLE_RATE_MIN_HZ
+#define APP_ALTITUDE_AUDIO_CLIMB_WARBLE_RATE_MIN_HZ 5.0f
+#endif
+
+#ifndef APP_ALTITUDE_AUDIO_CLIMB_WARBLE_RATE_MAX_HZ
+#define APP_ALTITUDE_AUDIO_CLIMB_WARBLE_RATE_MAX_HZ 12.0f
+#endif
+
+#ifndef APP_ALTITUDE_AUDIO_SINK_WARBLE_RATE_MIN_HZ
+#define APP_ALTITUDE_AUDIO_SINK_WARBLE_RATE_MIN_HZ 2.5f
+#endif
+
+#ifndef APP_ALTITUDE_AUDIO_SINK_WARBLE_RATE_MAX_HZ
+#define APP_ALTITUDE_AUDIO_SINK_WARBLE_RATE_MAX_HZ 5.0f
+#endif
+
 /* -------------------------------------------------------------------------- */
 /*  내부 런타임 저장소                                                         */
 /* -------------------------------------------------------------------------- */
 typedef struct
 {
-    bool initialized;
-    bool ui_active;
-    bool audio_owned;
-    bool home_capture_request;
-    bool bias_rezero_request;
+    /* ---------------------------------------------------------------------- */
+    /*  서비스 전체 생명주기 / 외부 요청 상태                                  */
+    /* ---------------------------------------------------------------------- */
+    bool initialized;                  /* init 완료 여부                          */
+    bool ui_active;                    /* ALTITUDE debug page 활성 여부           */
+    bool audio_owned;                  /* 현재 tone을 이 서비스가 점유 중인가     */
+    bool home_capture_request;         /* UI가 home recapture를 요청했는가        */
+    bool bias_rezero_request;          /* UI가 bias rezero를 요청했는가           */
 
+    /* ---------------------------------------------------------------------- */
+    /*  main task / sensor update timing                                       */
+    /*                                                                        */
+    /*  last_task_ms               : APP_ALTITUDE_Task() 마지막 실행 시각      */
+    /*  last_audio_ms              : 마지막 tone segment 발행 시각             */
+    /*  last_audio_owner_ms        : debug audio ownership 유지 시각           */
+    /*  last_baro_sample_count     : 마지막으로 반영한 baro sample count       */
+    /*  last_baro_timestamp_ms     : 마지막 baro timestamp                     */
+    /*  last_gps_fix_update_ms     : 마지막 GPS fix update ms                  */
+    /*  last_mpu_sample_count      : 마지막으로 반영한 MPU raw sample count    */
+    /*  last_mpu_timestamp_ms      : 마지막 MPU timestamp                      */
+    /* ---------------------------------------------------------------------- */
     uint32_t last_task_ms;
     uint32_t last_audio_ms;
     uint32_t last_audio_owner_ms;
+    uint32_t audio_cycle_start_ms;
     uint32_t last_baro_sample_count;
+    uint32_t last_baro_timestamp_ms;
     uint32_t last_gps_fix_update_ms;
+    uint32_t last_mpu_sample_count;
+    uint32_t last_mpu_timestamp_ms;
 
-    float pressure_filt_hpa;
-    float pressure_residual_hpa;
-    float baro_residual_lp_cm;
-    float adaptive_baro_noise_cm;
-    float qnh_equiv_filt_hpa;
-    float display_alt_filt_cm;
+    int8_t   audio_mode;               /* -1: sink, 0: silent, +1: climb          */
 
-    float gravity_lp_x_g;
-    float gravity_lp_y_g;
-    float gravity_lp_z_g;
-    float imu_vertical_lp_cms2;
+    /* ---------------------------------------------------------------------- */
+    /*  Pressure / altitude intermediate states                                */
+    /* ---------------------------------------------------------------------- */
+    float pressure_prefilt_hpa;        /* median-3 선별 후 pressure               */
+    float pressure_filt_hpa;           /* 1차 LPF pressure                        */
+    float pressure_residual_hpa;       /* prefilt - filt residual                 */
+    float pressure_hist_hpa[3];        /* median-3 원본 history                   */
+    uint8_t pressure_hist_count;       /* history 유효 개수                       */
+    uint8_t pressure_hist_index;       /* history ring index                      */
 
-    float home_noimu_cm;
-    float home_imu_cm;
+    float baro_residual_lp_cm;         /* adaptive R envelope용 residual LPF      */
+    float adaptive_baro_noise_cm;      /* 현재 실제 사용된 adaptive baro noise    */
+    float qnh_equiv_filt_hpa;          /* GPS anchor 기반 equivalent QNH LPF      */
+    float display_alt_filt_cm;         /* 최종 표시 altitude LPF                  */
 
-    float vario_fast_noimu_cms;
-    float vario_slow_noimu_cms;
-    float vario_fast_imu_cms;
-    float vario_slow_imu_cms;
+    float baro_alt_prev_cm;            /* baro altitude derivative 이전 샘플      */
+    bool  baro_alt_prev_valid;         /* derivative 이전 샘플 유효 여부          */
+    float baro_vario_raw_cms;          /* baro altitude raw derivative            */
+    float baro_vario_filt_cms;         /* velocity measurement용 LPF derivative   */
+
+    /* ---------------------------------------------------------------------- */
+    /*  IMU / gravity estimation intermediates                                 */
+    /*                                                                        */
+    /*  gravity_est_* 는 body frame 기준 "중력 방향 unit vector" 이다.         */
+    /*  기존처럼 단순 accel LPF가 아니라,                                      */
+    /*  gyro 적분으로 빠른 자세 변화를 따라가고,                               */
+    /*  accel norm이 1g에 가까울 때만 천천히 교정하는                          */
+    /*  6-axis complementary gravity estimator 역할을 한다.                    */
+    /* ---------------------------------------------------------------------- */
+    bool  gravity_est_valid;           /* gravity estimator 초기화 여부           */
+    float gravity_est_x;
+    float gravity_est_y;
+    float gravity_est_z;
+
+    float imu_vertical_lp_cms2;        /* trust-gated vertical specific-force LPF */
+    float imu_accel_norm_mg;           /* 현재 accel norm, mg                     */
+    float imu_attitude_trust_permille; /* accel norm 기반 attitude trust 0..1000  */
+    float imu_predict_weight_permille; /* KF4 predict에 실제 적용된 weight        */
+
+    /* ---------------------------------------------------------------------- */
+    /*  Home / output smoothing states                                         */
+    /* ---------------------------------------------------------------------- */
+    float home_noimu_cm;               /* no-IMU home absolute altitude           */
+    float home_imu_cm;                 /* IMU home absolute altitude              */
+
+    float vario_fast_noimu_cms;        /* no-IMU fast display vario               */
+    float vario_slow_noimu_cms;        /* no-IMU slow display vario               */
+    float vario_fast_imu_cms;          /* IMU fast display vario                  */
+    float vario_slow_imu_cms;          /* IMU slow display vario                  */
+
+    bool  zupt_active;                 /* 이번 task에서 ZUPT pseudo-update 적용   */
 
     struct
     {
@@ -194,6 +342,171 @@ static float APP_ALTITUDE_LpfUpdate(float current, float target, uint32_t tau_ms
 
     alpha = APP_ALTITUDE_LpfAlphaFromTauMs(tau_ms, dt_s);
     return current + alpha * (target - current);
+}
+
+static float APP_ALTITUDE_Clamp01F(float value)
+{
+    return APP_ALTITUDE_ClampF(value, 0.0f, 1.0f);
+}
+
+static float APP_ALTITUDE_LerpF(float start_value, float end_value, float t)
+{
+    t = APP_ALTITUDE_Clamp01F(t);
+    return start_value + ((end_value - start_value) * t);
+}
+
+static float APP_ALTITUDE_VectorNorm3F(float x, float y, float z)
+{
+    return sqrtf((x * x) + (y * y) + (z * z));
+}
+
+static bool APP_ALTITUDE_NormalizeVec3(float *x, float *y, float *z)
+{
+    float norm;
+
+    if ((x == 0) || (y == 0) || (z == 0))
+    {
+        return false;
+    }
+
+    norm = APP_ALTITUDE_VectorNorm3F(*x, *y, *z);
+    if (norm < 0.000001f)
+    {
+        return false;
+    }
+
+    *x /= norm;
+    *y /= norm;
+    *z /= norm;
+    return true;
+}
+
+static float APP_ALTITUDE_Median3F(float a, float b, float c)
+{
+    float tmp;
+
+    if (a > b)
+    {
+        tmp = a;
+        a = b;
+        b = tmp;
+    }
+
+    if (b > c)
+    {
+        tmp = b;
+        b = c;
+        c = tmp;
+    }
+
+    if (a > b)
+    {
+        tmp = a;
+        a = b;
+        b = tmp;
+    }
+
+    return b;
+}
+
+static bool APP_ALTITUDE_IsResidualAccepted(float residual,
+                                            float sigma,
+                                            float gate_sigma,
+                                            float floor_value)
+{
+    float limit;
+
+    limit = fabsf(sigma) * gate_sigma;
+    if (limit < floor_value)
+    {
+        limit = floor_value;
+    }
+
+    return (fabsf(residual) <= limit);
+}
+
+static float APP_ALTITUDE_ComputeSampleDtS(uint32_t now_ms,
+                                           uint32_t last_ms,
+                                           float fallback_dt_s)
+{
+    float dt_s;
+
+    if ((last_ms == 0u) || (now_ms <= last_ms))
+    {
+        return fallback_dt_s;
+    }
+
+    dt_s = ((float)(now_ms - last_ms)) * 0.001f;
+    return APP_ALTITUDE_ClampF(dt_s, APP_ALTITUDE_MIN_DT_S, APP_ALTITUDE_MAX_DT_S);
+}
+
+static float APP_ALTITUDE_UpdatePressurePrefilter(float pressure_raw_hpa)
+{
+    uint8_t index;
+    float filtered_hpa;
+
+    index = s_altitude_runtime.pressure_hist_index;
+    if (index >= 3u)
+    {
+        index = 0u;
+        s_altitude_runtime.pressure_hist_index = 0u;
+    }
+
+    s_altitude_runtime.pressure_hist_hpa[index] = pressure_raw_hpa;
+    s_altitude_runtime.pressure_hist_index = (uint8_t)((index + 1u) % 3u);
+
+    if (s_altitude_runtime.pressure_hist_count < 3u)
+    {
+        s_altitude_runtime.pressure_hist_count++;
+    }
+
+    if (s_altitude_runtime.pressure_hist_count < 3u)
+    {
+        filtered_hpa = pressure_raw_hpa;
+    }
+    else
+    {
+        filtered_hpa = APP_ALTITUDE_Median3F(s_altitude_runtime.pressure_hist_hpa[0],
+                                             s_altitude_runtime.pressure_hist_hpa[1],
+                                             s_altitude_runtime.pressure_hist_hpa[2]);
+    }
+
+    s_altitude_runtime.pressure_prefilt_hpa = filtered_hpa;
+    return filtered_hpa;
+}
+
+static float APP_ALTITUDE_UpdateBaroVarioMeasurement(const app_altitude_settings_t *settings,
+                                                     float baro_alt_cm,
+                                                     float baro_dt_s)
+{
+    float raw_cms;
+
+    if (settings == 0)
+    {
+        return 0.0f;
+    }
+
+    if ((s_altitude_runtime.baro_alt_prev_valid == false) || (baro_dt_s <= 0.0f))
+    {
+        s_altitude_runtime.baro_alt_prev_cm = baro_alt_cm;
+        s_altitude_runtime.baro_alt_prev_valid = true;
+        s_altitude_runtime.baro_vario_raw_cms = 0.0f;
+        s_altitude_runtime.baro_vario_filt_cms = 0.0f;
+        return 0.0f;
+    }
+
+    raw_cms = (baro_alt_cm - s_altitude_runtime.baro_alt_prev_cm) / baro_dt_s;
+    raw_cms = APP_ALTITUDE_ClampF(raw_cms,
+                                  -APP_ALTITUDE_BARO_VARIO_CLIP_CMS,
+                                  APP_ALTITUDE_BARO_VARIO_CLIP_CMS);
+
+    s_altitude_runtime.baro_alt_prev_cm = baro_alt_cm;
+    s_altitude_runtime.baro_vario_raw_cms = raw_cms;
+    s_altitude_runtime.baro_vario_filt_cms = APP_ALTITUDE_LpfUpdate(s_altitude_runtime.baro_vario_filt_cms,
+                                                                    raw_cms,
+                                                                    settings->baro_vario_lpf_tau_ms,
+                                                                    baro_dt_s);
+    return s_altitude_runtime.baro_vario_filt_cms;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -475,6 +788,49 @@ static bool APP_ALTITUDE_IsDisplayRestActive(const app_altitude_settings_t *sett
     return true;
 }
 
+static bool APP_ALTITUDE_IsCoreRestActive(const app_altitude_settings_t *settings,
+                                          float baro_vario_filt_cms,
+                                          float imu_vertical_cms2,
+                                          bool imu_vector_valid,
+                                          uint16_t imu_trust_permille)
+{
+    float accel_abs_mg;
+
+    if ((settings == 0) || (settings->zupt_enabled == 0u))
+    {
+        return false;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  core rest / ZUPT는 display rest보다 조금 더 보수적으로 본다.       */
+    /*  기준이 되는 속도는 core filter의 source가 아니라                   */
+    /*  "baro에서 직접 만든 velocity observation" 이다.                     */
+    /*  이렇게 해야 display LPF나 IMU display source 상태와                */
+    /*  독립적으로 stationarity 판단이 가능하다.                           */
+    /* ------------------------------------------------------------------ */
+    if (fabsf(baro_vario_filt_cms) > (float)settings->rest_detect_vario_cms)
+    {
+        return false;
+    }
+
+    if (imu_vector_valid != false)
+    {
+        accel_abs_mg = fabsf(imu_vertical_cms2) / (APP_ALTITUDE_GRAVITY_MPS2 * 100.0f) * 1000.0f;
+
+        if (imu_trust_permille < settings->imu_predict_min_trust_permille)
+        {
+            return false;
+        }
+
+        if (accel_abs_mg > (float)settings->rest_detect_accel_mg)
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 static float APP_ALTITUDE_GetDebugAudioSourceVarioCms(const app_altitude_settings_t *settings)
 {
     if ((settings != 0) && (settings->debug_audio_source != 0u))
@@ -692,10 +1048,16 @@ static void APP_ALTITUDE_Kf3_Predict(float x[3], float P[3][3], float dt_s, cons
     memcpy(P, newP, sizeof(newP));
 }
 
-static void APP_ALTITUDE_Kf4_Predict(float x[4], float P[4][4], float dt_s, float accel_cms2, const app_altitude_settings_t *settings)
+static void APP_ALTITUDE_Kf4_Predict(float x[4],
+                                     float P[4][4],
+                                     float dt_s,
+                                     float accel_cms2,
+                                     float accel_noise_cms2,
+                                     const app_altitude_settings_t *settings)
 {
     float dt2;
     float corrected_accel;
+    float accel_noise_var;
     float F[4][4];
     float A[4][4];
     float newP[4][4];
@@ -710,7 +1072,16 @@ static void APP_ALTITUDE_Kf4_Predict(float x[4], float P[4][4], float dt_s, floa
     dt2 = dt_s * dt_s;
     corrected_accel = accel_cms2 - x[3];
 
-    x[0] += x[1] * dt_s + 0.5f * corrected_accel * dt2;
+    /* ------------------------------------------------------------------ */
+    /*  4-state IMU aid filter                                             */
+    /*  x = [height_cm, velocity_cms, baro_bias_cm, accel_bias_cms2]       */
+    /*                                                                     */
+    /*  predict는 vertical specific-force를 사용해 h/v를 전파한다.         */
+    /*  단, accel_noise_cms2를 별도로 받아                                  */
+    /*  IMU trust가 낮을 때는 공분산을 더 크게 부풀린다.                   */
+    /*  즉, "IMU를 쓰되 맹신하지 않는다" 가 핵심이다.                       */
+    /* ------------------------------------------------------------------ */
+    x[0] += x[1] * dt_s + (0.5f * corrected_accel * dt2);
     x[1] += corrected_accel * dt_s;
 
     F[0][0] = 1.0f; F[0][1] = dt_s; F[0][2] = 0.0f; F[0][3] = -0.5f * dt2;
@@ -752,6 +1123,19 @@ static void APP_ALTITUDE_Kf4_Predict(float x[4], float P[4][4], float dt_s, floa
     newP[2][2] += APP_ALTITUDE_SquareF(qb);
     newP[3][3] += APP_ALTITUDE_SquareF(qab);
 
+    /* ------------------------------------------------------------------ */
+    /*  입력 가속도의 불확실성은 h/v 공분산에 직접 전파된다.                 */
+    /*  dt가 짧더라도 누적되면 큰 차이를 만들므로                            */
+    /*  IMU trust가 낮은 구간일수록 accel_noise_cms2를 키워서               */
+    /*  filter가 baro/GPS 쪽으로 자연스럽게 기대게 만든다.                  */
+    /* ------------------------------------------------------------------ */
+    accel_noise_var = APP_ALTITUDE_SquareF(accel_noise_cms2);
+
+    newP[0][0] += 0.25f * dt2 * dt2 * accel_noise_var;
+    newP[0][1] += 0.5f * dt2 * dt_s * accel_noise_var;
+    newP[1][0] += 0.5f * dt2 * dt_s * accel_noise_var;
+    newP[1][1] += dt_s * dt_s * accel_noise_var;
+
     memcpy(P, newP, sizeof(newP));
 }
 
@@ -775,25 +1159,39 @@ static void APP_ALTITUDE_Kf4_Predict(float x[4], float P[4][4], float dt_s, floa
 /* -------------------------------------------------------------------------- */
 static float APP_ALTITUDE_UpdateImuVerticalAccelCms2(const app_altitude_settings_t *settings,
                                                       const app_gy86_mpu_raw_t *mpu,
-                                                      float dt_s,
+                                                      float task_dt_s,
                                                       bool *out_vector_valid)
 {
-    float lsb_per_g;
+    float imu_dt_s;
+    float accel_lsb_per_g;
+    float gyro_lsb_per_dps;
     float ax_g;
     float ay_g;
     float az_g;
-    float gravity_alpha;
-    float grav_norm_g;
-    float gx_hat;
-    float gy_hat;
-    float gz_hat;
-    float dyn_x_g;
-    float dyn_y_g;
-    float dyn_z_g;
+    float accel_norm_g;
+    float accel_norm_mg;
+    float a_hat_x;
+    float a_hat_y;
+    float a_hat_z;
+    float g_pred_x;
+    float g_pred_y;
+    float g_pred_z;
+    float gx_rad_s;
+    float gy_rad_s;
+    float gz_rad_s;
+    float dg_x;
+    float dg_y;
+    float dg_z;
+    float accel_gate_mg;
+    float accel_error_mg;
+    float attitude_trust;
+    float correction_alpha;
+    float sign_f;
+    float predict_weight;
+    float vertical_total_g;
     float vertical_dyn_g;
     float deadband_g;
     float clip_g;
-    float sign_f;
 
     if (out_vector_valid != 0)
     {
@@ -805,49 +1203,180 @@ static float APP_ALTITUDE_UpdateImuVerticalAccelCms2(const app_altitude_settings
         return 0.0f;
     }
 
-    lsb_per_g = (float)settings->imu_accel_lsb_per_g;
-    ax_g = ((float)mpu->accel_x_raw) / lsb_per_g;
-    ay_g = ((float)mpu->accel_y_raw) / lsb_per_g;
-    az_g = ((float)mpu->accel_z_raw) / lsb_per_g;
-
-    gravity_alpha = APP_ALTITUDE_LpfAlphaFromTauMs(settings->imu_gravity_tau_ms, dt_s);
-
-    if ((s_altitude_runtime.gravity_lp_x_g == 0.0f) &&
-        (s_altitude_runtime.gravity_lp_y_g == 0.0f) &&
-        (s_altitude_runtime.gravity_lp_z_g == 0.0f))
+    /* ------------------------------------------------------------------ */
+    /*  같은 raw sample을 두 번 이상 적분하지 않도록 sample_count를 본다.   */
+    /*  task loop가 sensor rate보다 빠른 경우에도                             */
+    /*  실제 MPU sample cadence 기준으로만 IMU estimator가 전진한다.         */
+    /* ------------------------------------------------------------------ */
+    if ((mpu->sample_count != 0u) && (mpu->sample_count == s_altitude_runtime.last_mpu_sample_count))
     {
-        s_altitude_runtime.gravity_lp_x_g = ax_g;
-        s_altitude_runtime.gravity_lp_y_g = ay_g;
-        s_altitude_runtime.gravity_lp_z_g = az_g;
-    }
-    else
-    {
-        s_altitude_runtime.gravity_lp_x_g += gravity_alpha * (ax_g - s_altitude_runtime.gravity_lp_x_g);
-        s_altitude_runtime.gravity_lp_y_g += gravity_alpha * (ay_g - s_altitude_runtime.gravity_lp_y_g);
-        s_altitude_runtime.gravity_lp_z_g += gravity_alpha * (az_g - s_altitude_runtime.gravity_lp_z_g);
+        if (out_vector_valid != 0)
+        {
+            *out_vector_valid = s_altitude_runtime.gravity_est_valid;
+        }
+
+        return s_altitude_runtime.imu_vertical_lp_cms2;
     }
 
-    grav_norm_g = sqrtf(APP_ALTITUDE_SquareF(s_altitude_runtime.gravity_lp_x_g) +
-                        APP_ALTITUDE_SquareF(s_altitude_runtime.gravity_lp_y_g) +
-                        APP_ALTITUDE_SquareF(s_altitude_runtime.gravity_lp_z_g));
-
-    if (grav_norm_g < 0.25f)
+    imu_dt_s = task_dt_s;
+    if ((mpu->sample_count != 0u) &&
+        (mpu->timestamp_ms != 0u) &&
+        (s_altitude_runtime.last_mpu_timestamp_ms != 0u) &&
+        (mpu->timestamp_ms > s_altitude_runtime.last_mpu_timestamp_ms))
     {
+        imu_dt_s = APP_ALTITUDE_ComputeSampleDtS(mpu->timestamp_ms,
+                                                 s_altitude_runtime.last_mpu_timestamp_ms,
+                                                 task_dt_s);
+    }
+
+    s_altitude_runtime.last_mpu_sample_count = mpu->sample_count;
+    s_altitude_runtime.last_mpu_timestamp_ms = mpu->timestamp_ms;
+
+    accel_lsb_per_g = (float)settings->imu_accel_lsb_per_g;
+    ax_g = ((float)mpu->accel_x_raw) / accel_lsb_per_g;
+    ay_g = ((float)mpu->accel_y_raw) / accel_lsb_per_g;
+    az_g = ((float)mpu->accel_z_raw) / accel_lsb_per_g;
+
+    accel_norm_g = APP_ALTITUDE_VectorNorm3F(ax_g, ay_g, az_g);
+    accel_norm_mg = accel_norm_g * 1000.0f;
+    s_altitude_runtime.imu_accel_norm_mg = accel_norm_mg;
+
+    if (accel_norm_g < 0.25f)
+    {
+        s_altitude_runtime.imu_attitude_trust_permille = 0.0f;
+        s_altitude_runtime.imu_predict_weight_permille = 0.0f;
+        s_altitude_runtime.gravity_est_valid = false;
         return 0.0f;
     }
 
-    gx_hat = s_altitude_runtime.gravity_lp_x_g / grav_norm_g;
-    gy_hat = s_altitude_runtime.gravity_lp_y_g / grav_norm_g;
-    gz_hat = s_altitude_runtime.gravity_lp_z_g / grav_norm_g;
+    a_hat_x = ax_g / accel_norm_g;
+    a_hat_y = ay_g / accel_norm_g;
+    a_hat_z = az_g / accel_norm_g;
 
-    dyn_x_g = ax_g - s_altitude_runtime.gravity_lp_x_g;
-    dyn_y_g = ay_g - s_altitude_runtime.gravity_lp_y_g;
-    dyn_z_g = az_g - s_altitude_runtime.gravity_lp_z_g;
+    if (s_altitude_runtime.gravity_est_valid == false)
+    {
+        /* -------------------------------------------------------------- */
+        /*  첫 유효 샘플에서는 가속도 방향을 그대로 gravity estimate로 쓴다.*/
+        /*  이후부터는 gyro predict + accel correction 구조로 넘어간다.    */
+        /* -------------------------------------------------------------- */
+        s_altitude_runtime.gravity_est_x = a_hat_x;
+        s_altitude_runtime.gravity_est_y = a_hat_y;
+        s_altitude_runtime.gravity_est_z = a_hat_z;
+        s_altitude_runtime.gravity_est_valid = true;
+    }
+    else
+    {
+        g_pred_x = s_altitude_runtime.gravity_est_x;
+        g_pred_y = s_altitude_runtime.gravity_est_y;
+        g_pred_z = s_altitude_runtime.gravity_est_z;
 
-    vertical_dyn_g = (dyn_x_g * gx_hat) + (dyn_y_g * gy_hat) + (dyn_z_g * gz_hat);
+        /* -------------------------------------------------------------- */
+        /*  gyro 적분 prediction                                          */
+        /*  g_body 는 body frame에서 본 중력 방향 unit vector이므로        */
+        /*  dg/dt = -omega x g 형태로 전진한다.                             */
+        /* -------------------------------------------------------------- */
+        if (settings->imu_gyro_lsb_per_dps > 0u)
+        {
+            gyro_lsb_per_dps = (float)settings->imu_gyro_lsb_per_dps;
+
+            gx_rad_s = (((float)mpu->gyro_x_raw) / gyro_lsb_per_dps) * ((float)M_PI / 180.0f);
+            gy_rad_s = (((float)mpu->gyro_y_raw) / gyro_lsb_per_dps) * ((float)M_PI / 180.0f);
+            gz_rad_s = (((float)mpu->gyro_z_raw) / gyro_lsb_per_dps) * ((float)M_PI / 180.0f);
+
+            dg_x = -((gy_rad_s * g_pred_z) - (gz_rad_s * g_pred_y));
+            dg_y = -((gz_rad_s * g_pred_x) - (gx_rad_s * g_pred_z));
+            dg_z = -((gx_rad_s * g_pred_y) - (gy_rad_s * g_pred_x));
+
+            g_pred_x += dg_x * imu_dt_s;
+            g_pred_y += dg_y * imu_dt_s;
+            g_pred_z += dg_z * imu_dt_s;
+
+            if (APP_ALTITUDE_NormalizeVec3(&g_pred_x, &g_pred_y, &g_pred_z) == false)
+            {
+                g_pred_x = a_hat_x;
+                g_pred_y = a_hat_y;
+                g_pred_z = a_hat_z;
+            }
+        }
+
+        /* -------------------------------------------------------------- */
+        /*  accel correction trust                                         */
+        /*  accel norm이 1g와 가까울수록 attitude correction을 허용한다.     */
+        /*  큰 선형가속 / 충격 구간에서는 trust를 자동으로 줄여              */
+        /*  accel이 gravity estimate를 오염시키지 못하게 한다.               */
+        /* -------------------------------------------------------------- */
+        accel_gate_mg = (float)settings->imu_attitude_accel_gate_mg;
+        if (accel_gate_mg <= 1.0f)
+        {
+            accel_gate_mg = 1.0f;
+        }
+
+        accel_error_mg = fabsf(accel_norm_mg - APP_ALTITUDE_IMU_ACCEL_NORM_REF_MG);
+        attitude_trust = 1.0f - (accel_error_mg / accel_gate_mg);
+        attitude_trust = APP_ALTITUDE_Clamp01F(attitude_trust);
+
+        correction_alpha = APP_ALTITUDE_LpfAlphaFromTauMs(settings->imu_gravity_tau_ms, imu_dt_s);
+        correction_alpha *= attitude_trust;
+
+        s_altitude_runtime.gravity_est_x = g_pred_x + (correction_alpha * (a_hat_x - g_pred_x));
+        s_altitude_runtime.gravity_est_y = g_pred_y + (correction_alpha * (a_hat_y - g_pred_y));
+        s_altitude_runtime.gravity_est_z = g_pred_z + (correction_alpha * (a_hat_z - g_pred_z));
+
+        if (APP_ALTITUDE_NormalizeVec3(&s_altitude_runtime.gravity_est_x,
+                                       &s_altitude_runtime.gravity_est_y,
+                                       &s_altitude_runtime.gravity_est_z) == false)
+        {
+            s_altitude_runtime.gravity_est_x = a_hat_x;
+            s_altitude_runtime.gravity_est_y = a_hat_y;
+            s_altitude_runtime.gravity_est_z = a_hat_z;
+        }
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  predict weight                                                     */
+    /*  - attitude trust가 일정 threshold 아래로 내려가면                   */
+    /*    KF4 predict에 IMU 가속도를 거의 주지 않는다.                      */
+    /*  - "IMU는 반응은 빠르지만, 믿을 수 있을 때만 센다" 라는 정책이다.     */
+    /* ------------------------------------------------------------------ */
+    if (s_altitude_runtime.gravity_est_valid != false)
+    {
+        s_altitude_runtime.imu_attitude_trust_permille =
+            APP_ALTITUDE_ClampF((fabsf(accel_norm_mg - APP_ALTITUDE_IMU_ACCEL_NORM_REF_MG) <= (float)settings->imu_attitude_accel_gate_mg) ?
+                                (1000.0f * (1.0f - (fabsf(accel_norm_mg - APP_ALTITUDE_IMU_ACCEL_NORM_REF_MG) /
+                                                   APP_ALTITUDE_ClampF((float)settings->imu_attitude_accel_gate_mg, 1.0f, 2000.0f)))) :
+                                0.0f,
+                                0.0f,
+                                1000.0f);
+    }
+    else
+    {
+        s_altitude_runtime.imu_attitude_trust_permille = 0.0f;
+    }
+
+    if (s_altitude_runtime.imu_attitude_trust_permille <= (float)settings->imu_predict_min_trust_permille)
+    {
+        predict_weight = 0.0f;
+    }
+    else
+    {
+        predict_weight = (s_altitude_runtime.imu_attitude_trust_permille -
+                          (float)settings->imu_predict_min_trust_permille) /
+                         APP_ALTITUDE_ClampF((1000.0f - (float)settings->imu_predict_min_trust_permille), 1.0f, 1000.0f);
+        predict_weight = APP_ALTITUDE_Clamp01F(predict_weight);
+    }
+
+    s_altitude_runtime.imu_predict_weight_permille = predict_weight * 1000.0f;
+
+    /* ------------------------------------------------------------------ */
+    /*  gravity 방향 축으로 총 specific-force를 projection 하고             */
+    /*  1g 정적 성분을 제거해서 vertical dynamic component만 남긴다.         */
+    /* ------------------------------------------------------------------ */
+    vertical_total_g = (ax_g * s_altitude_runtime.gravity_est_x) +
+                       (ay_g * s_altitude_runtime.gravity_est_y) +
+                       (az_g * s_altitude_runtime.gravity_est_z);
 
     sign_f = (settings->imu_vertical_sign >= 0) ? 1.0f : -1.0f;
-    vertical_dyn_g *= sign_f;
+    vertical_dyn_g = (vertical_total_g - 1.0f) * sign_f;
 
     deadband_g = ((float)settings->imu_vertical_deadband_mg) * 0.001f;
     clip_g     = ((float)settings->imu_vertical_clip_mg) * 0.001f;
@@ -856,19 +1385,25 @@ static float APP_ALTITUDE_UpdateImuVerticalAccelCms2(const app_altitude_settings
     {
         vertical_dyn_g = 0.0f;
     }
+
     vertical_dyn_g = APP_ALTITUDE_ClampF(vertical_dyn_g, -clip_g, clip_g);
+
+    /* ------------------------------------------------------------------ */
+    /*  최종적으로 trust-based predict weight를 곱해                         */
+    /*  "가끔 혼자 뚜우우욱!" 하던 stationary burst를 줄인다.               */
+    /* ------------------------------------------------------------------ */
+    vertical_dyn_g *= predict_weight;
 
     s_altitude_runtime.imu_vertical_lp_cms2 = APP_ALTITUDE_LpfUpdate(s_altitude_runtime.imu_vertical_lp_cms2,
                                                                      vertical_dyn_g * APP_ALTITUDE_GRAVITY_MPS2 * 100.0f,
                                                                      settings->imu_accel_tau_ms,
-                                                                     dt_s);
+                                                                     imu_dt_s);
 
     if (out_vector_valid != 0)
     {
-        *out_vector_valid = true;
+        *out_vector_valid = s_altitude_runtime.gravity_est_valid;
     }
 
-    g_app_state.altitude.imu_gravity_norm_mg = APP_ALTITUDE_RoundFloatToS32(grav_norm_g * 1000.0f);
     return s_altitude_runtime.imu_vertical_lp_cms2;
 }
 
@@ -948,25 +1483,219 @@ static void APP_ALTITUDE_StopOwnedAudioIfNeeded(void)
     }
 }
 
+static uint32_t APP_ALTITUDE_ComputeClimbBaseFreqHz(const app_altitude_settings_t *settings,
+                                                     float vario_cms)
+{
+    float scale;
+    float base_freq_hz;
+    float deadband_cms;
+    float full_scale_cms;
+
+    deadband_cms = (float)settings->audio_deadband_cms;
+    full_scale_cms = APP_ALTITUDE_DEFAULT_CLIMB_FULL_SCALE_CMS;
+    scale = (fabsf(vario_cms) - deadband_cms) /
+            APP_ALTITUDE_ClampF(full_scale_cms - deadband_cms, 1.0f, 10000.0f);
+    scale = APP_ALTITUDE_Clamp01F(scale);
+
+    base_freq_hz = (float)settings->audio_min_freq_hz +
+                   ((((settings->audio_max_freq_hz > settings->audio_min_freq_hz) ?
+                      ((float)settings->audio_max_freq_hz - (float)settings->audio_min_freq_hz) : 0.0f)) * powf(scale, 0.78f));
+
+    return APP_ALTITUDE_ClampU32((uint32_t)base_freq_hz, 50u, 12000u);
+}
+
+static uint32_t APP_ALTITUDE_ComputeSinkBaseFreqHz(const app_altitude_settings_t *settings,
+                                                   float vario_cms)
+{
+    float scale;
+    float deadband_cms;
+    float full_scale_cms;
+    uint32_t sink_freq_min_hz;
+    uint32_t sink_freq_max_hz;
+    float base_freq_hz;
+
+    deadband_cms = (float)settings->audio_deadband_cms;
+    full_scale_cms = APP_ALTITUDE_DEFAULT_CLIMB_FULL_SCALE_CMS;
+    scale = (fabsf(vario_cms) - deadband_cms) /
+            APP_ALTITUDE_ClampF(full_scale_cms - deadband_cms, 1.0f, 10000.0f);
+    scale = APP_ALTITUDE_Clamp01F(scale);
+
+    sink_freq_min_hz = (uint32_t)APP_ALTITUDE_ClampU32((uint32_t)((float)settings->audio_min_freq_hz * 0.28f), 90u, 2000u);
+    sink_freq_max_hz = (uint32_t)APP_ALTITUDE_ClampU32((uint32_t)((float)settings->audio_min_freq_hz * 0.62f),
+                                                       sink_freq_min_hz + 20u,
+                                                       4000u);
+
+    base_freq_hz = (float)sink_freq_max_hz -
+                   (((float)(sink_freq_max_hz - sink_freq_min_hz)) * scale);
+
+    return APP_ALTITUDE_ClampU32((uint32_t)base_freq_hz, 50u, 12000u);
+}
+
+static uint32_t APP_ALTITUDE_ApplyAudioWarbleHz(uint32_t base_freq_hz,
+                                                float vario_cms,
+                                                float scale,
+                                                uint32_t now_ms,
+                                                bool sink_mode)
+{
+    float now_s;
+    float mod_rate_hz;
+    float mod_depth_hz;
+    float phase;
+    float warped_hz;
+
+    now_s = ((float)now_ms) * 0.001f;
+
+    if (sink_mode == false)
+    {
+        mod_rate_hz = APP_ALTITUDE_LerpF(APP_ALTITUDE_AUDIO_CLIMB_WARBLE_RATE_MIN_HZ,
+                                         APP_ALTITUDE_AUDIO_CLIMB_WARBLE_RATE_MAX_HZ,
+                                         scale);
+        mod_depth_hz = 22.0f + (0.12f * fabsf(vario_cms));
+    }
+    else
+    {
+        mod_rate_hz = APP_ALTITUDE_LerpF(APP_ALTITUDE_AUDIO_SINK_WARBLE_RATE_MIN_HZ,
+                                         APP_ALTITUDE_AUDIO_SINK_WARBLE_RATE_MAX_HZ,
+                                         scale);
+        mod_depth_hz = 14.0f + (0.07f * fabsf(vario_cms));
+    }
+
+    phase = 2.0f * (float)M_PI * mod_rate_hz * now_s;
+    warped_hz = ((float)base_freq_hz) + (mod_depth_hz * sinf(phase));
+
+    return APP_ALTITUDE_ClampU32((uint32_t)APP_ALTITUDE_ClampF(warped_hz, 50.0f, 12000.0f), 50u, 12000u);
+}
+
+static uint32_t APP_ALTITUDE_ComputeClimbCadencePeriodMs(const app_altitude_settings_t *settings,
+                                                         float vario_cms)
+{
+    float deadband_cms;
+    float full_scale_cms;
+    float scale;
+    uint32_t slow_ms;
+    uint32_t fast_ms;
+    uint32_t period_ms;
+
+    deadband_cms = (float)settings->audio_deadband_cms;
+    full_scale_cms = APP_ALTITUDE_DEFAULT_CLIMB_FULL_SCALE_CMS;
+
+    scale = (fabsf(vario_cms) - deadband_cms) /
+            APP_ALTITUDE_ClampF(full_scale_cms - deadband_cms, 1.0f, 10000.0f);
+    scale = APP_ALTITUDE_Clamp01F(scale);
+
+    slow_ms = APP_ALTITUDE_ClampU32((uint32_t)settings->audio_repeat_ms + 140u,
+                                    APP_ALTITUDE_CLIMB_AUDIO_MIN_PERIOD_MS,
+                                    APP_ALTITUDE_CLIMB_AUDIO_MAX_PERIOD_MS);
+    fast_ms = APP_ALTITUDE_ClampU32((uint32_t)(settings->audio_repeat_ms / 2u),
+                                    APP_ALTITUDE_CLIMB_AUDIO_MIN_PERIOD_MS,
+                                    slow_ms);
+
+    period_ms = (uint32_t)((float)slow_ms - (((float)(slow_ms - fast_ms)) * scale));
+    return APP_ALTITUDE_ClampU32(period_ms,
+                                 APP_ALTITUDE_CLIMB_AUDIO_MIN_PERIOD_MS,
+                                 APP_ALTITUDE_CLIMB_AUDIO_MAX_PERIOD_MS);
+}
+
+static uint32_t APP_ALTITUDE_ComputeClimbToneWindowMs(const app_altitude_settings_t *settings,
+                                                      float vario_cms,
+                                                      uint32_t period_ms)
+{
+    float deadband_cms;
+    float full_scale_cms;
+    float scale;
+    uint32_t tone_ms;
+
+    deadband_cms = (float)settings->audio_deadband_cms;
+    full_scale_cms = APP_ALTITUDE_DEFAULT_CLIMB_FULL_SCALE_CMS;
+
+    scale = (fabsf(vario_cms) - deadband_cms) /
+            APP_ALTITUDE_ClampF(full_scale_cms - deadband_cms, 1.0f, 10000.0f);
+    scale = APP_ALTITUDE_Clamp01F(scale);
+
+    tone_ms = (uint32_t)((float)settings->audio_beep_ms * (1.20f - (0.25f * scale)) + 12.0f);
+    return APP_ALTITUDE_ClampU32(tone_ms,
+                                 APP_ALTITUDE_AUDIO_SEGMENT_MS,
+                                 (period_ms > 8u) ? (period_ms - 8u) : period_ms);
+}
+
+static uint32_t APP_ALTITUDE_ComputeSinkToneWindowMs(const app_altitude_settings_t *settings,
+                                                     float vario_cms)
+{
+    float deadband_cms;
+    float full_scale_cms;
+    float scale;
+    uint32_t tone_ms;
+
+    deadband_cms = (float)settings->audio_deadband_cms;
+    full_scale_cms = APP_ALTITUDE_DEFAULT_CLIMB_FULL_SCALE_CMS;
+
+    scale = (fabsf(vario_cms) - deadband_cms) /
+            APP_ALTITUDE_ClampF(full_scale_cms - deadband_cms, 1.0f, 10000.0f);
+    scale = APP_ALTITUDE_Clamp01F(scale);
+
+    tone_ms = (uint32_t)((float)APP_ALTITUDE_SINK_AUDIO_MAX_TONE_MS -
+                         (((float)(APP_ALTITUDE_SINK_AUDIO_MAX_TONE_MS - APP_ALTITUDE_SINK_AUDIO_MIN_TONE_MS)) * scale));
+
+    return APP_ALTITUDE_ClampU32(tone_ms,
+                                 APP_ALTITUDE_SINK_AUDIO_MIN_TONE_MS,
+                                 APP_ALTITUDE_SINK_AUDIO_MAX_TONE_MS);
+}
+
+static uint32_t APP_ALTITUDE_ComputeSinkGapMs(const app_altitude_settings_t *settings,
+                                              float vario_cms)
+{
+    float deadband_cms;
+    float full_scale_cms;
+    float scale;
+    uint32_t gap_ms;
+
+    deadband_cms = (float)settings->audio_deadband_cms;
+    full_scale_cms = APP_ALTITUDE_DEFAULT_CLIMB_FULL_SCALE_CMS;
+
+    scale = (fabsf(vario_cms) - deadband_cms) /
+            APP_ALTITUDE_ClampF(full_scale_cms - deadband_cms, 1.0f, 10000.0f);
+    scale = APP_ALTITUDE_Clamp01F(scale);
+
+    gap_ms = (uint32_t)((float)APP_ALTITUDE_SINK_AUDIO_MAX_GAP_MS -
+                        (((float)(APP_ALTITUDE_SINK_AUDIO_MAX_GAP_MS - APP_ALTITUDE_SINK_AUDIO_MIN_GAP_MS)) * scale));
+
+    return APP_ALTITUDE_ClampU32(gap_ms,
+                                 APP_ALTITUDE_SINK_AUDIO_MIN_GAP_MS,
+                                 APP_ALTITUDE_ClampU32((uint32_t)(settings->audio_repeat_ms / 4u),
+                                                       APP_ALTITUDE_SINK_AUDIO_MAX_GAP_MS,
+                                                       180u));
+}
+
+static void APP_ALTITUDE_ResetAudioCycleIfNeeded(uint32_t now_ms, int8_t mode)
+{
+    if (s_altitude_runtime.audio_mode != mode)
+    {
+        s_altitude_runtime.audio_mode = mode;
+        s_altitude_runtime.audio_cycle_start_ms = now_ms;
+    }
+}
+
 static void APP_ALTITUDE_HandleDebugAudio(uint32_t now_ms, const app_altitude_settings_t *settings)
 {
     float vario_cms;
     float speed_abs_cms;
+    float deadband_cms;
+    float full_scale_cms;
     float scale;
-    uint32_t period_ms;
-    uint32_t tone_ms;
-    uint32_t gap_ms;
+    uint32_t cycle_period_ms;
+    uint32_t tone_window_ms;
+    uint32_t cycle_elapsed_ms;
+    uint32_t remaining_tone_ms;
+    uint32_t segment_ms;
     uint32_t freq_hz;
-    uint32_t sink_freq_min_hz;
-    uint32_t sink_freq_max_hz;
-    uint32_t climb_freq_min_hz;
-    uint32_t climb_freq_max_hz;
     HAL_StatusTypeDef status;
+    int8_t audio_mode;
 
     if ((settings == 0) || (s_altitude_runtime.ui_active == false) || (settings->debug_audio_enabled == 0u))
     {
         g_app_state.altitude.debug_audio_active = 0u;
         g_app_state.altitude.debug_audio_vario_cms = 0;
+        s_altitude_runtime.audio_mode = 0;
         APP_ALTITUDE_StopOwnedAudioIfNeeded();
         return;
     }
@@ -982,121 +1711,93 @@ static void APP_ALTITUDE_HandleDebugAudio(uint32_t now_ms, const app_altitude_se
     g_app_state.altitude.debug_audio_vario_cms = APP_ALTITUDE_RoundFloatToS32(vario_cms);
 
     speed_abs_cms = fabsf(vario_cms);
+    deadband_cms = (float)settings->audio_deadband_cms;
 
-    if (speed_abs_cms < (float)settings->audio_deadband_cms)
+    if (speed_abs_cms < deadband_cms)
     {
-        /* -------------------------------------------------------------- */
-        /*  deadband 안에서는 silence로 돌아간다.                         */
-        /*  다만 다른 페이지/오디오 경로와 소유권 충돌을 줄이기 위해       */
-        /*  owner 플래그는 짧은 timeout 후 자연 해제한다.                 */
-        /* -------------------------------------------------------------- */
         if ((s_altitude_runtime.audio_owned != false) &&
             ((uint32_t)(now_ms - s_altitude_runtime.last_audio_owner_ms) > APP_ALTITUDE_UI_ONLY_AUDIO_OWNER_TIMEOUT_MS))
         {
-            s_altitude_runtime.audio_owned = false;
+            APP_ALTITUDE_StopOwnedAudioIfNeeded();
         }
+
+        s_altitude_runtime.audio_mode = 0;
         return;
     }
-
-    scale = (speed_abs_cms - (float)settings->audio_deadband_cms) /
-            (APP_ALTITUDE_DEFAULT_CLIMB_FULL_SCALE_CMS - (float)settings->audio_deadband_cms);
-    scale = APP_ALTITUDE_ClampF(scale, 0.0f, 1.0f);
 
     if (Audio_Driver_IsBusy() != false)
     {
         return;
     }
 
+    full_scale_cms = APP_ALTITUDE_DEFAULT_CLIMB_FULL_SCALE_CMS;
+    scale = (speed_abs_cms - deadband_cms) /
+            APP_ALTITUDE_ClampF(full_scale_cms - deadband_cms, 1.0f, 10000.0f);
+    scale = APP_ALTITUDE_Clamp01F(scale);
+
     /* ------------------------------------------------------------------ */
-    /*  상승음                                                             */
-    /*  - climb가 커질수록 pitch가 올라간다.                              */
-    /*  - climb가 커질수록 beep cadence도 빨라진다.                       */
-    /*  - 즉, Flytec류 바리오처럼 "높이 + 주기" 둘 다 살아 있는 방향.    */
+    /*  climb/sink mode에 따라 cadence cycle을 따로 가진다.                */
+    /*  한 cycle 안의 tone window에서는                                     */
+    /*  매우 짧은 segment(기본 14ms)를 연속 발행하면서                      */
+    /*  "현재 fast vario" 를 곧바로 Hz에 다시 투영한다.                     */
+    /*                                                                      */
+    /*  그래서                                                             */
+    /*  - beep cadence는 느리거나 빠르게 살아 있고                           */
+    /*  - 단일 beep 안에서도 주파수가 미세하게 계속 움직여                  */
+    /*    Flytec류의 '살아 있는' 소리에 더 가깝게 들린다.                    */
     /* ------------------------------------------------------------------ */
-    if (vario_cms >= 0.0f)
+    audio_mode = (vario_cms >= 0.0f) ? 1 : -1;
+    APP_ALTITUDE_ResetAudioCycleIfNeeded(now_ms, audio_mode);
+
+    if (audio_mode > 0)
     {
-        uint32_t climb_period_slow_ms;
-        uint32_t climb_period_fast_ms;
-
-        climb_freq_min_hz = settings->audio_min_freq_hz;
-        climb_freq_max_hz = (settings->audio_max_freq_hz > climb_freq_min_hz) ?
-                            settings->audio_max_freq_hz : climb_freq_min_hz;
-
-        /* ------------------------------------------------------------------ */
-        /*  audio_repeat_ms는 climb beep의 기본 cadence knob로 사용한다.      */
-        /*  사용자가 이 값을 키우면 약한 상승 영역의 기본 간격이 느려지고,     */
-        /*  줄이면 전체 climb cadence가 더 민첩하게 들린다.                   */
-        /* ------------------------------------------------------------------ */
-        climb_period_slow_ms = APP_ALTITUDE_ClampU32((uint32_t)settings->audio_repeat_ms + 140u,
-                                                     APP_ALTITUDE_CLIMB_AUDIO_MIN_PERIOD_MS,
-                                                     APP_ALTITUDE_CLIMB_AUDIO_MAX_PERIOD_MS);
-        climb_period_fast_ms = APP_ALTITUDE_ClampU32((uint32_t)(settings->audio_repeat_ms / 2u),
-                                                     APP_ALTITUDE_CLIMB_AUDIO_MIN_PERIOD_MS,
-                                                     climb_period_slow_ms);
-
-        period_ms = (uint32_t)((float)climb_period_slow_ms -
-                               ((float)(climb_period_slow_ms - climb_period_fast_ms) * scale));
-        period_ms = APP_ALTITUDE_ClampU32(period_ms,
-                                          APP_ALTITUDE_CLIMB_AUDIO_MIN_PERIOD_MS,
-                                          APP_ALTITUDE_CLIMB_AUDIO_MAX_PERIOD_MS);
-
-        tone_ms = (uint32_t)((float)settings->audio_beep_ms * (1.20f - (0.25f * scale)) + 12.0f);
-        tone_ms = APP_ALTITUDE_ClampU32(tone_ms, 18u, (period_ms > 8u) ? (period_ms - 8u) : period_ms);
-
-        if ((uint32_t)(now_ms - s_altitude_runtime.last_audio_ms) < period_ms)
-        {
-            return;
-        }
-
-        /* ------------------------------------------------------------------ */
-        /*  주파수는 약간 비선형으로 올려서                                    */
-        /*  약한 상승에서도 "살아 있는" 느낌이 나고,                           */
-        /*  강한 상승에서는 빠르게 고조되도록 한다.                            */
-        /* ------------------------------------------------------------------ */
-        freq_hz = (uint32_t)((float)climb_freq_min_hz +
-                  ((float)(climb_freq_max_hz - climb_freq_min_hz) * powf(scale, 0.78f)));
-
-        status = Audio_Driver_PlaySquareWaveMs(freq_hz, tone_ms);
+        cycle_period_ms = APP_ALTITUDE_ComputeClimbCadencePeriodMs(settings, vario_cms);
+        tone_window_ms  = APP_ALTITUDE_ComputeClimbToneWindowMs(settings, vario_cms, cycle_period_ms);
     }
     else
     {
-        /* ------------------------------------------------------------------ */
-        /*  하강음                                                             */
-        /*  - 삑삑거리는 sink beep가 아니라,                                   */
-        /*    길게 이어지는 연속 tone + 아주 짧은 gap 형태로 만든다.           */
-        /*  - 실제 체감은 "뚜우우~" 에 가깝게 들린다.                           */
-        /* ------------------------------------------------------------------ */
-        sink_freq_min_hz = (uint32_t)APP_ALTITUDE_ClampU32((uint32_t)((float)settings->audio_min_freq_hz * 0.28f), 90u, 2000u);
-        sink_freq_max_hz = (uint32_t)APP_ALTITUDE_ClampU32((uint32_t)((float)settings->audio_min_freq_hz * 0.62f), sink_freq_min_hz + 20u, 4000u);
+        tone_window_ms = APP_ALTITUDE_ComputeSinkToneWindowMs(settings, vario_cms);
+        cycle_period_ms = tone_window_ms + APP_ALTITUDE_ComputeSinkGapMs(settings, vario_cms);
+    }
 
-        /* ------------------------------------------------------------------ */
-        /*  sink가 커질수록 더 낮고 더 촘촘한 연속 tone 쪽으로 몰아준다.       */
-        /* ------------------------------------------------------------------ */
-        tone_ms = (uint32_t)((float)APP_ALTITUDE_SINK_AUDIO_MAX_TONE_MS -
-                             ((float)(APP_ALTITUDE_SINK_AUDIO_MAX_TONE_MS - APP_ALTITUDE_SINK_AUDIO_MIN_TONE_MS) * scale));
-        tone_ms = APP_ALTITUDE_ClampU32(tone_ms,
-                                        APP_ALTITUDE_SINK_AUDIO_MIN_TONE_MS,
-                                        APP_ALTITUDE_SINK_AUDIO_MAX_TONE_MS);
+    if (cycle_period_ms < APP_ALTITUDE_AUDIO_SEGMENT_MS)
+    {
+        cycle_period_ms = APP_ALTITUDE_AUDIO_SEGMENT_MS;
+    }
 
-        gap_ms = (uint32_t)((float)APP_ALTITUDE_SINK_AUDIO_MAX_GAP_MS -
-                            ((float)(APP_ALTITUDE_SINK_AUDIO_MAX_GAP_MS - APP_ALTITUDE_SINK_AUDIO_MIN_GAP_MS) * scale));
-        gap_ms = APP_ALTITUDE_ClampU32(gap_ms,
-                                       APP_ALTITUDE_SINK_AUDIO_MIN_GAP_MS,
-                                       APP_ALTITUDE_ClampU32((uint32_t)(settings->audio_repeat_ms / 4u),
-                                                             APP_ALTITUDE_SINK_AUDIO_MAX_GAP_MS,
-                                                             180u));
+    while ((uint32_t)(now_ms - s_altitude_runtime.audio_cycle_start_ms) >= cycle_period_ms)
+    {
+        s_altitude_runtime.audio_cycle_start_ms += cycle_period_ms;
+    }
 
-        period_ms = tone_ms + gap_ms;
+    cycle_elapsed_ms = (uint32_t)(now_ms - s_altitude_runtime.audio_cycle_start_ms);
+    if (cycle_elapsed_ms >= tone_window_ms)
+    {
+        return;
+    }
 
-        if ((uint32_t)(now_ms - s_altitude_runtime.last_audio_ms) < period_ms)
-        {
-            return;
-        }
+    remaining_tone_ms = tone_window_ms - cycle_elapsed_ms;
+    segment_ms = APP_ALTITUDE_ClampU32(remaining_tone_ms,
+                                       APP_ALTITUDE_AUDIO_SEGMENT_MS,
+                                       APP_ALTITUDE_AUDIO_SEGMENT_MS);
 
-        freq_hz = (uint32_t)((float)sink_freq_max_hz -
-                  ((float)(sink_freq_max_hz - sink_freq_min_hz) * scale));
-
-        status = Audio_Driver_PlaySawToothWaveMs(freq_hz, tone_ms);
+    if (audio_mode > 0)
+    {
+        freq_hz = APP_ALTITUDE_ApplyAudioWarbleHz(APP_ALTITUDE_ComputeClimbBaseFreqHz(settings, vario_cms),
+                                                  vario_cms,
+                                                  scale,
+                                                  now_ms,
+                                                  false);
+        status = Audio_Driver_PlaySquareWaveMs(freq_hz, segment_ms);
+    }
+    else
+    {
+        freq_hz = APP_ALTITUDE_ApplyAudioWarbleHz(APP_ALTITUDE_ComputeSinkBaseFreqHz(settings, vario_cms),
+                                                  vario_cms,
+                                                  scale,
+                                                  now_ms,
+                                                  true);
+        status = Audio_Driver_PlaySawToothWaveMs(freq_hz, segment_ms);
     }
 
     if (status == HAL_OK)
@@ -1106,6 +1807,7 @@ static void APP_ALTITUDE_HandleDebugAudio(uint32_t now_ms, const app_altitude_se
         s_altitude_runtime.audio_owned = true;
     }
 }
+
 /* -------------------------------------------------------------------------- */
 /*  Public API                                                                 */
 /* -------------------------------------------------------------------------- */
@@ -1115,6 +1817,7 @@ void APP_ALTITUDE_Init(uint32_t now_ms)
     s_altitude_runtime.initialized = true;
     s_altitude_runtime.last_task_ms = now_ms;
     s_altitude_runtime.qnh_equiv_filt_hpa = ((float)g_app_state.settings.altitude.manual_qnh_hpa_x100) * 0.01f;
+    s_altitude_runtime.audio_mode = 0;
 
     g_app_state.altitude.initialized = true;
     g_app_state.altitude.qnh_manual_hpa_x100 = g_app_state.settings.altitude.manual_qnh_hpa_x100;
@@ -1124,10 +1827,12 @@ void APP_ALTITUDE_Init(uint32_t now_ms)
 void APP_ALTITUDE_Task(uint32_t now_ms)
 {
     app_altitude_settings_t settings_local;
+    app_altitude_state_t altitude_prev_local;
     app_gy86_baro_raw_t baro_local;
     gps_fix_basic_t gps_fix_local;
     app_gy86_mpu_raw_t mpu_local;
-    app_altitude_settings_t *settings;
+    const app_altitude_settings_t *settings;
+    const app_altitude_state_t *alt_prev;
     const app_gy86_baro_raw_t *baro;
     const gps_fix_basic_t *gps_fix;
     const app_gy86_mpu_raw_t *mpu;
@@ -1135,9 +1840,12 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
     bool new_gps_sample;
     bool gps_valid;
     bool imu_vector_valid;
+    bool core_rest_active;
     uint16_t gps_quality_permille;
     float dt_s;
+    float baro_dt_s;
     float pressure_raw_hpa;
+    float pressure_prefilt_hpa;
     float qnh_manual_hpa;
     float qnh_equiv_hpa;
     float alt_std_cm;
@@ -1145,15 +1853,24 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
     float alt_gps_cm;
     float gps_noise_cm;
     float baro_noise_cm;
+    float baro_altitude_residual_cm;
+    float baro_velocity_meas_cms;
     float imu_vertical_cms2;
+    float imu_predict_weight;
+    float imu_predict_cms2;
+    float imu_predict_noise_cms2;
     float display_target_cm;
     float display_source_vario_cms;
     uint32_t display_tau_ms;
     bool display_rest_active;
     float H_baro3[3];
     float H_gps3[3];
+    float H_vel3[3];
+    float H_zero_vel3[3];
     float H_baro4[4];
     float H_gps4[4];
+    float H_vel4[4];
+    float H_zero_vel4[4];
 
     /* ------------------------------------------------------------------ */
     /*  volatile APP_STATE를 함수 시작 시점에 로컬 snapshot으로 복사한다.  */
@@ -1162,12 +1879,14 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
     /*  - volatile qualifier discard 경고 없이                               */
     /*    계산 helper에 안전하게 넘길 수 있다.                               */
     /* ------------------------------------------------------------------ */
-    settings_local = g_app_state.settings.altitude;
-    baro_local     = g_app_state.gy86.baro;
-    gps_fix_local  = g_app_state.gps.fix;
-    mpu_local      = g_app_state.gy86.mpu;
+    settings_local     = g_app_state.settings.altitude;
+    altitude_prev_local = g_app_state.altitude;
+    baro_local         = g_app_state.gy86.baro;
+    gps_fix_local      = g_app_state.gps.fix;
+    mpu_local          = g_app_state.gy86.mpu;
 
     settings = &settings_local;
+    alt_prev = &altitude_prev_local;
     baro     = &baro_local;
     gps_fix  = &gps_fix_local;
     mpu      = &mpu_local;
@@ -1184,43 +1903,72 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
     new_baro_sample = false;
     new_gps_sample  = false;
     gps_valid       = false;
-    gps_quality_permille = 0u;
     imu_vector_valid = false;
+    core_rest_active = false;
+    gps_quality_permille = 0u;
+
     pressure_raw_hpa = 0.0f;
+    pressure_prefilt_hpa = s_altitude_runtime.pressure_prefilt_hpa;
+    qnh_equiv_hpa = s_altitude_runtime.qnh_equiv_filt_hpa;
     alt_std_cm = 0.0f;
     alt_qnh_cm = 0.0f;
     alt_gps_cm = 0.0f;
+    gps_noise_cm = 0.0f;
     baro_noise_cm = (float)settings->baro_measurement_noise_cm;
+    baro_altitude_residual_cm = 0.0f;
+    baro_velocity_meas_cms = s_altitude_runtime.baro_vario_filt_cms;
     imu_vertical_cms2 = 0.0f;
+    imu_predict_weight = 0.0f;
+    imu_predict_cms2 = 0.0f;
+    imu_predict_noise_cms2 = (float)settings->imu_measurement_noise_cms2;
+    display_target_cm = 0.0f;
     display_source_vario_cms = 0.0f;
     display_tau_ms = settings->display_lpf_tau_ms;
     display_rest_active = false;
+    baro_dt_s = dt_s;
 
     qnh_manual_hpa = ((float)settings->manual_qnh_hpa_x100) * 0.01f;
     qnh_manual_hpa = APP_ALTITUDE_ClampF(qnh_manual_hpa, 800.0f, 1100.0f);
 
-    if ((baro->sample_count != 0u) && (baro->pressure_hpa_x100 > 0) && (baro->sample_count != s_altitude_runtime.last_baro_sample_count))
+    /* ------------------------------------------------------------------ */
+    /*  BARO path                                                           */
+    /*  - sample_count / timestamp 기준으로만 새 샘플을 반영한다.            */
+    /*  - raw pressure는 그대로 보존하되,                                    */
+    /*    filter 입력은 median-3 -> LPF 순서로 정리한다.                    */
+    /*  - derivative는 실제 baro sample dt로 계산한다.                      */
+    /* ------------------------------------------------------------------ */
+    if ((baro->sample_count != 0u) &&
+        (baro->pressure_hpa_x100 > 0) &&
+        (baro->sample_count != s_altitude_runtime.last_baro_sample_count))
     {
         new_baro_sample = true;
         s_altitude_runtime.last_baro_sample_count = baro->sample_count;
-        pressure_raw_hpa = ((float)baro->pressure_hpa_x100) * 0.01f;
 
-        /* ------------------------------------------------------------------ */
-        /*  residual은 "새 raw pressure - 직전 LPF pressure" 로 계산한다.       */
-        /*  이 값은 adaptive baro trust 추정에 사용된다.                       */
-        /* ------------------------------------------------------------------ */
-        if ((s_altitude_runtime.pressure_filt_hpa <= 0.0f) || (g_app_state.altitude.baro_valid == false))
+        if ((baro->timestamp_ms != 0u) &&
+            (s_altitude_runtime.last_baro_timestamp_ms != 0u) &&
+            (baro->timestamp_ms > s_altitude_runtime.last_baro_timestamp_ms))
+        {
+            baro_dt_s = APP_ALTITUDE_ComputeSampleDtS(baro->timestamp_ms,
+                                                      s_altitude_runtime.last_baro_timestamp_ms,
+                                                      dt_s);
+        }
+        s_altitude_runtime.last_baro_timestamp_ms = baro->timestamp_ms;
+
+        pressure_raw_hpa = ((float)baro->pressure_hpa_x100) * 0.01f;
+        pressure_prefilt_hpa = APP_ALTITUDE_UpdatePressurePrefilter(pressure_raw_hpa);
+
+        if ((s_altitude_runtime.pressure_filt_hpa <= 0.0f) || (alt_prev->baro_valid == false))
         {
             s_altitude_runtime.pressure_residual_hpa = 0.0f;
-            s_altitude_runtime.pressure_filt_hpa = pressure_raw_hpa;
+            s_altitude_runtime.pressure_filt_hpa = pressure_prefilt_hpa;
         }
         else
         {
-            s_altitude_runtime.pressure_residual_hpa = pressure_raw_hpa - s_altitude_runtime.pressure_filt_hpa;
+            s_altitude_runtime.pressure_residual_hpa = pressure_prefilt_hpa - s_altitude_runtime.pressure_filt_hpa;
             s_altitude_runtime.pressure_filt_hpa = APP_ALTITUDE_LpfUpdate(s_altitude_runtime.pressure_filt_hpa,
-                                                                          pressure_raw_hpa,
+                                                                          pressure_prefilt_hpa,
                                                                           settings->pressure_lpf_tau_ms,
-                                                                          dt_s);
+                                                                          baro_dt_s);
         }
 
         alt_std_cm = APP_ALTITUDE_PressureToAltitudeMeters(s_altitude_runtime.pressure_filt_hpa,
@@ -1228,30 +1976,38 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
         alt_qnh_cm = APP_ALTITUDE_PressureToAltitudeMeters(s_altitude_runtime.pressure_filt_hpa,
                                                            qnh_manual_hpa) * 100.0f;
 
-        /* ------------------------------------------------------------------ */
-        /*  adaptive baro noise는 core altitude filter에만 적용한다.           */
-        /*  raw/filt pressure와 QNH altitude는 그대로 유지하므로               */
-        /*  logger/debug에서 원 신호도 계속 볼 수 있다.                        */
-        /* ------------------------------------------------------------------ */
         baro_noise_cm = APP_ALTITUDE_ComputeAdaptiveBaroNoiseCm(settings,
                                                                 s_altitude_runtime.pressure_filt_hpa,
                                                                 s_altitude_runtime.pressure_residual_hpa,
-                                                                dt_s);
+                                                                baro_dt_s);
+
+        baro_velocity_meas_cms = APP_ALTITUDE_UpdateBaroVarioMeasurement(settings,
+                                                                         alt_qnh_cm,
+                                                                         baro_dt_s);
     }
-    else if (g_app_state.altitude.baro_valid != false)
+    else if (alt_prev->baro_valid != false)
     {
-        pressure_raw_hpa = ((float)g_app_state.altitude.pressure_raw_hpa_x100) * 0.01f;
-        alt_std_cm = ((float)g_app_state.altitude.alt_pressure_std_cm);
-        alt_qnh_cm = ((float)g_app_state.altitude.alt_qnh_manual_cm);
-        baro_noise_cm = (s_altitude_runtime.adaptive_baro_noise_cm > 0.0f) ?
-                        s_altitude_runtime.adaptive_baro_noise_cm :
-                        (float)settings->baro_measurement_noise_cm;
+        pressure_raw_hpa = ((float)alt_prev->pressure_raw_hpa_x100) * 0.01f;
+        pressure_prefilt_hpa = ((float)alt_prev->pressure_prefilt_hpa_x100) * 0.01f;
+        alt_std_cm = (float)alt_prev->alt_pressure_std_cm;
+        alt_qnh_cm = (float)alt_prev->alt_qnh_manual_cm;
+        baro_noise_cm = (float)alt_prev->baro_noise_used_cm;
+        if (baro_noise_cm <= 0.0f)
+        {
+            baro_noise_cm = (float)settings->baro_measurement_noise_cm;
+        }
+
+        baro_velocity_meas_cms = (float)alt_prev->baro_vario_filt_cms;
     }
 
+    /* ------------------------------------------------------------------ */
+    /*  GPS path                                                            */
+    /* ------------------------------------------------------------------ */
     gps_valid = APP_ALTITUDE_IsGpsAltitudeUsable(settings, gps_fix, &gps_quality_permille);
     if (gps_valid != false)
     {
         alt_gps_cm = ((float)gps_fix->hMSL) * 0.1f;
+
         if (gps_fix->last_update_ms != s_altitude_runtime.last_gps_fix_update_ms)
         {
             s_altitude_runtime.last_gps_fix_update_ms = gps_fix->last_update_ms;
@@ -1259,14 +2015,19 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
         }
     }
 
+    /* ------------------------------------------------------------------ */
+    /*  equivalent QNH는 "GPS와 pressure가 현재 일치하도록 만드는 기준압"   */
+    /*  참고값으로만 유지하고, manual QNH를 덮어쓰지 않는다.                 */
+    /* ------------------------------------------------------------------ */
     if ((settings->gps_auto_equiv_qnh_enabled != 0u) &&
-        ((new_gps_sample != false) || (g_app_state.altitude.gps_valid != false)) &&
-        ((new_baro_sample != false) || (g_app_state.altitude.baro_valid != false)) &&
+        ((new_gps_sample != false) || (alt_prev->gps_valid != false)) &&
+        ((new_baro_sample != false) || (alt_prev->baro_valid != false)) &&
         (gps_valid != false) &&
         (s_altitude_runtime.pressure_filt_hpa > 0.0f))
     {
         qnh_equiv_hpa = APP_ALTITUDE_AltitudeMetersToEquivalentQnh(s_altitude_runtime.pressure_filt_hpa,
                                                                    alt_gps_cm * 0.01f);
+
         if (s_altitude_runtime.qnh_equiv_filt_hpa <= 0.0f)
         {
             s_altitude_runtime.qnh_equiv_filt_hpa = qnh_equiv_hpa;
@@ -1284,12 +2045,29 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
         s_altitude_runtime.qnh_equiv_filt_hpa = qnh_manual_hpa;
     }
 
+    /* ------------------------------------------------------------------ */
+    /*  filter init는 새 baro altitude가 생겼을 때만 수행한다.               */
+    /* ------------------------------------------------------------------ */
     if (new_baro_sample != false)
     {
         APP_ALTITUDE_EnsureFiltersInitialized(alt_qnh_cm, alt_gps_cm, gps_valid);
         g_app_state.altitude.baro_valid = true;
         g_app_state.altitude.last_baro_update_ms = now_ms;
     }
+
+    /* ------------------------------------------------------------------ */
+    /*  IMU path                                                            */
+    /*  - 6-axis complementary gravity estimator 사용                       */
+    /*  - trust가 낮으면 KF4 입력 가속도를 자동으로 줄인다.                 */
+    /* ------------------------------------------------------------------ */
+    imu_vertical_cms2 = APP_ALTITUDE_UpdateImuVerticalAccelCms2(settings, mpu, dt_s, &imu_vector_valid);
+
+    imu_predict_weight = APP_ALTITUDE_ClampF(s_altitude_runtime.imu_predict_weight_permille * 0.001f, 0.0f, 1.0f);
+    imu_predict_cms2 = imu_vertical_cms2 * imu_predict_weight;
+
+    imu_predict_noise_cms2 = (float)settings->imu_measurement_noise_cms2;
+    imu_predict_noise_cms2 *= (1.0f + ((1.0f - imu_predict_weight) * 2.5f));
+    imu_predict_noise_cms2 = APP_ALTITUDE_ClampF(imu_predict_noise_cms2, 5.0f, 10000.0f);
 
     if (s_altitude_runtime.kf_noimu.valid != false)
     {
@@ -1299,70 +2077,189 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
                                  settings);
     }
 
-    imu_vertical_cms2 = APP_ALTITUDE_UpdateImuVerticalAccelCms2(settings, mpu, dt_s, &imu_vector_valid);
     if (s_altitude_runtime.kf_imu.valid != false)
     {
         APP_ALTITUDE_Kf4_Predict(s_altitude_runtime.kf_imu.x,
                                  s_altitude_runtime.kf_imu.P,
                                  dt_s,
-                                 imu_vertical_cms2,
+                                 imu_predict_cms2,
+                                 imu_predict_noise_cms2,
                                  settings);
     }
 
     H_baro3[0] = 1.0f; H_baro3[1] = 0.0f; H_baro3[2] = 1.0f;
     H_gps3[0]  = 1.0f; H_gps3[1]  = 0.0f; H_gps3[2]  = 0.0f;
+    H_vel3[0]  = 0.0f; H_vel3[1]  = 1.0f; H_vel3[2]  = 0.0f;
+    H_zero_vel3[0] = 0.0f; H_zero_vel3[1] = 1.0f; H_zero_vel3[2] = 0.0f;
+
     H_baro4[0] = 1.0f; H_baro4[1] = 0.0f; H_baro4[2] = 1.0f; H_baro4[3] = 0.0f;
     H_gps4[0]  = 1.0f; H_gps4[1]  = 0.0f; H_gps4[2]  = 0.0f; H_gps4[3]  = 0.0f;
+    H_vel4[0]  = 0.0f; H_vel4[1]  = 1.0f; H_vel4[2]  = 0.0f; H_vel4[3]  = 0.0f;
+    H_zero_vel4[0] = 0.0f; H_zero_vel4[1] = 1.0f; H_zero_vel4[2] = 0.0f; H_zero_vel4[3] = 0.0f;
 
+    /* ------------------------------------------------------------------ */
+    /*  baro altitude update                                               */
+    /*  - adaptive R 사용                                                   */
+    /*  - residual gate로 말도 안 되는 spike는 걸러낸다.                    */
+    /* ------------------------------------------------------------------ */
     if ((new_baro_sample != false) && (s_altitude_runtime.kf_noimu.valid != false))
     {
-        APP_ALTITUDE_Kf3_UpdateScalar(s_altitude_runtime.kf_noimu.x,
-                                      s_altitude_runtime.kf_noimu.P,
-                                      H_baro3,
-                                      alt_qnh_cm,
-                                      APP_ALTITUDE_SquareF(baro_noise_cm));
-    }
-    if ((new_baro_sample != false) && (s_altitude_runtime.kf_imu.valid != false))
-    {
-        APP_ALTITUDE_Kf4_UpdateScalar(s_altitude_runtime.kf_imu.x,
-                                      s_altitude_runtime.kf_imu.P,
-                                      H_baro4,
-                                      alt_qnh_cm,
-                                      APP_ALTITUDE_SquareF(baro_noise_cm));
+        baro_altitude_residual_cm = alt_qnh_cm - (s_altitude_runtime.kf_noimu.x[0] + s_altitude_runtime.kf_noimu.x[2]);
+
+        if (APP_ALTITUDE_IsResidualAccepted(baro_altitude_residual_cm,
+                                            baro_noise_cm,
+                                            APP_ALTITUDE_BARO_ALTITUDE_GATE_SIGMA,
+                                            APP_ALTITUDE_BARO_ALTITUDE_GATE_FLOOR_CM) != false)
+        {
+            APP_ALTITUDE_Kf3_UpdateScalar(s_altitude_runtime.kf_noimu.x,
+                                          s_altitude_runtime.kf_noimu.P,
+                                          H_baro3,
+                                          alt_qnh_cm,
+                                          APP_ALTITUDE_SquareF(baro_noise_cm));
+        }
     }
 
+    if ((new_baro_sample != false) && (s_altitude_runtime.kf_imu.valid != false))
+    {
+        baro_altitude_residual_cm = alt_qnh_cm - (s_altitude_runtime.kf_imu.x[0] + s_altitude_runtime.kf_imu.x[2]);
+
+        if (APP_ALTITUDE_IsResidualAccepted(baro_altitude_residual_cm,
+                                            baro_noise_cm,
+                                            APP_ALTITUDE_BARO_ALTITUDE_GATE_SIGMA,
+                                            APP_ALTITUDE_BARO_ALTITUDE_GATE_FLOOR_CM) != false)
+        {
+            APP_ALTITUDE_Kf4_UpdateScalar(s_altitude_runtime.kf_imu.x,
+                                          s_altitude_runtime.kf_imu.P,
+                                          H_baro4,
+                                          alt_qnh_cm,
+                                          APP_ALTITUDE_SquareF(baro_noise_cm));
+        }
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  baro velocity observation update                                   */
+    /*  - altitude difference로 만든 derivative를 별도 velocity 측정처럼     */
+    /*    사용한다.                                                         */
+    /*  - no-IMU filter의 반응성을 끌어올리고,                              */
+    /*    IMU filter에도 velocity anchor를 하나 더 준다.                    */
+    /* ------------------------------------------------------------------ */
+    if ((new_baro_sample != false) && (settings->baro_vario_measurement_noise_cms > 0u))
+    {
+        if (s_altitude_runtime.kf_noimu.valid != false)
+        {
+            if (APP_ALTITUDE_IsResidualAccepted(baro_velocity_meas_cms - s_altitude_runtime.kf_noimu.x[1],
+                                                (float)settings->baro_vario_measurement_noise_cms,
+                                                APP_ALTITUDE_BARO_VELOCITY_GATE_SIGMA,
+                                                APP_ALTITUDE_BARO_VELOCITY_GATE_FLOOR_CMS) != false)
+            {
+                APP_ALTITUDE_Kf3_UpdateScalar(s_altitude_runtime.kf_noimu.x,
+                                              s_altitude_runtime.kf_noimu.P,
+                                              H_vel3,
+                                              baro_velocity_meas_cms,
+                                              APP_ALTITUDE_SquareF((float)settings->baro_vario_measurement_noise_cms));
+            }
+        }
+
+        if (s_altitude_runtime.kf_imu.valid != false)
+        {
+            if (APP_ALTITUDE_IsResidualAccepted(baro_velocity_meas_cms - s_altitude_runtime.kf_imu.x[1],
+                                                (float)settings->baro_vario_measurement_noise_cms,
+                                                APP_ALTITUDE_BARO_VELOCITY_GATE_SIGMA,
+                                                APP_ALTITUDE_BARO_VELOCITY_GATE_FLOOR_CMS) != false)
+            {
+                APP_ALTITUDE_Kf4_UpdateScalar(s_altitude_runtime.kf_imu.x,
+                                              s_altitude_runtime.kf_imu.P,
+                                              H_vel4,
+                                              baro_velocity_meas_cms,
+                                              APP_ALTITUDE_SquareF((float)settings->baro_vario_measurement_noise_cms));
+            }
+        }
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  GPS absolute altitude update                                       */
+    /*  - GPS 품질 gate + innovation gate                                  */
+    /*  - 상용 EKF 철학처럼 GPS는 slow absolute anchor 역할                 */
+    /* ------------------------------------------------------------------ */
     if ((new_gps_sample != false) && (gps_valid != false) && (settings->gps_bias_correction_enabled != 0u))
     {
         gps_noise_cm = APP_ALTITUDE_ComputeGpsMeasurementNoiseCm(settings, gps_fix);
 
         if (s_altitude_runtime.kf_noimu.valid != false)
         {
-            APP_ALTITUDE_Kf3_UpdateScalar(s_altitude_runtime.kf_noimu.x,
-                                          s_altitude_runtime.kf_noimu.P,
-                                          H_gps3,
-                                          alt_gps_cm,
-                                          APP_ALTITUDE_SquareF(gps_noise_cm));
+            if (APP_ALTITUDE_IsResidualAccepted(alt_gps_cm - s_altitude_runtime.kf_noimu.x[0],
+                                                gps_noise_cm,
+                                                APP_ALTITUDE_GPS_ALTITUDE_GATE_SIGMA,
+                                                APP_ALTITUDE_GPS_ALTITUDE_GATE_FLOOR_CM) != false)
+            {
+                APP_ALTITUDE_Kf3_UpdateScalar(s_altitude_runtime.kf_noimu.x,
+                                              s_altitude_runtime.kf_noimu.P,
+                                              H_gps3,
+                                              alt_gps_cm,
+                                              APP_ALTITUDE_SquareF(gps_noise_cm));
+            }
         }
+
         if (s_altitude_runtime.kf_imu.valid != false)
         {
-            APP_ALTITUDE_Kf4_UpdateScalar(s_altitude_runtime.kf_imu.x,
-                                          s_altitude_runtime.kf_imu.P,
-                                          H_gps4,
-                                          alt_gps_cm,
-                                          APP_ALTITUDE_SquareF(gps_noise_cm));
+            if (APP_ALTITUDE_IsResidualAccepted(alt_gps_cm - s_altitude_runtime.kf_imu.x[0],
+                                                gps_noise_cm,
+                                                APP_ALTITUDE_GPS_ALTITUDE_GATE_SIGMA,
+                                                APP_ALTITUDE_GPS_ALTITUDE_GATE_FLOOR_CM) != false)
+            {
+                APP_ALTITUDE_Kf4_UpdateScalar(s_altitude_runtime.kf_imu.x,
+                                              s_altitude_runtime.kf_imu.P,
+                                              H_gps4,
+                                              alt_gps_cm,
+                                              APP_ALTITUDE_SquareF(gps_noise_cm));
+            }
         }
 
         g_app_state.altitude.last_gps_update_ms = now_ms;
     }
 
+    /* ------------------------------------------------------------------ */
+    /*  ZUPT (Zero Velocity Update)                                        */
+    /*  - stationary로 판단되면 v=0 pseudo-measurement를 넣는다.            */
+    /*  - IMU burst 억제와 실내 정지 안정화에 특히 효과가 크다.             */
+    /* ------------------------------------------------------------------ */
+    core_rest_active = APP_ALTITUDE_IsCoreRestActive(settings,
+                                                     s_altitude_runtime.baro_vario_filt_cms,
+                                                     imu_vertical_cms2,
+                                                     imu_vector_valid,
+                                                     (uint16_t)APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.imu_attitude_trust_permille));
+
+    s_altitude_runtime.zupt_active = core_rest_active;
+
+    if (core_rest_active != false)
+    {
+        if (s_altitude_runtime.kf_noimu.valid != false)
+        {
+            APP_ALTITUDE_Kf3_UpdateScalar(s_altitude_runtime.kf_noimu.x,
+                                          s_altitude_runtime.kf_noimu.P,
+                                          H_zero_vel3,
+                                          0.0f,
+                                          APP_ALTITUDE_SquareF(APP_ALTITUDE_ZUPT_VELOCITY_NOISE_CMS));
+        }
+
+        if (s_altitude_runtime.kf_imu.valid != false)
+        {
+            APP_ALTITUDE_Kf4_UpdateScalar(s_altitude_runtime.kf_imu.x,
+                                          s_altitude_runtime.kf_imu.P,
+                                          H_zero_vel4,
+                                          0.0f,
+                                          APP_ALTITUDE_SquareF(APP_ALTITUDE_ZUPT_VELOCITY_NOISE_CMS));
+        }
+    }
+
     if ((settings->auto_home_capture_enabled != 0u) &&
-        (g_app_state.altitude.home_valid == false) &&
+        (alt_prev->home_valid == false) &&
         (s_altitude_runtime.kf_noimu.valid != false))
     {
         s_altitude_runtime.home_capture_request = true;
     }
 
-    APP_ALTITUDE_ApplyPendingActions(alt_qnh_cm);
+    APP_ALTITUDE_ApplyPendingActions((alt_prev->baro_valid != false) ? alt_qnh_cm : 0.0f);
 
     if (s_altitude_runtime.kf_noimu.valid != false)
     {
@@ -1388,11 +2285,11 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
                                                                        dt_s);
     }
 
-    display_target_cm = (settings->imu_aid_enabled != 0u && (s_altitude_runtime.kf_imu.valid != false)) ?
+    display_target_cm = ((settings->imu_aid_enabled != 0u) && (s_altitude_runtime.kf_imu.valid != false)) ?
                         s_altitude_runtime.kf_imu.x[0] :
                         (s_altitude_runtime.kf_noimu.valid ? s_altitude_runtime.kf_noimu.x[0] : alt_qnh_cm);
 
-    display_source_vario_cms = (settings->imu_aid_enabled != 0u && (s_altitude_runtime.kf_imu.valid != false)) ?
+    display_source_vario_cms = ((settings->imu_aid_enabled != 0u) && (s_altitude_runtime.kf_imu.valid != false)) ?
                                s_altitude_runtime.vario_slow_imu_cms :
                                s_altitude_runtime.vario_slow_noimu_cms;
 
@@ -1405,11 +2302,6 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
     {
         display_tau_ms = settings->rest_display_tau_ms;
 
-        /* -------------------------------------------------------------- */
-        /*  정지 상태에서 target과 display가 아주 조금만 다르면            */
-        /*  숫자를 그대로 붙잡아 최종 표시 떨림을 줄인다.                 */
-        /*  core state / vario에는 전혀 개입하지 않는다.                  */
-        /* -------------------------------------------------------------- */
         if (fabsf(display_target_cm - s_altitude_runtime.display_alt_filt_cm) <
             (float)settings->rest_display_hold_cm)
         {
@@ -1422,61 +2314,76 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
                                                                     display_tau_ms,
                                                                     dt_s);
 
-    if (g_app_state.altitude.home_valid != false)
+    if (alt_prev->home_valid != false)
     {
-        g_app_state.altitude.alt_rel_home_noimu_cm = APP_ALTITUDE_RoundFloatToS32((s_altitude_runtime.kf_noimu.valid ? s_altitude_runtime.kf_noimu.x[0] : alt_qnh_cm) - s_altitude_runtime.home_noimu_cm);
-        g_app_state.altitude.alt_rel_home_imu_cm   = APP_ALTITUDE_RoundFloatToS32((s_altitude_runtime.kf_imu.valid ? s_altitude_runtime.kf_imu.x[0] : alt_qnh_cm) - s_altitude_runtime.home_imu_cm);
+        g_app_state.altitude.alt_rel_home_noimu_cm =
+            APP_ALTITUDE_RoundFloatToS32((s_altitude_runtime.kf_noimu.valid ? s_altitude_runtime.kf_noimu.x[0] : alt_qnh_cm) -
+                                         s_altitude_runtime.home_noimu_cm);
+
+        g_app_state.altitude.alt_rel_home_imu_cm =
+            APP_ALTITUDE_RoundFloatToS32((s_altitude_runtime.kf_imu.valid ? s_altitude_runtime.kf_imu.x[0] : alt_qnh_cm) -
+                                         s_altitude_runtime.home_imu_cm);
     }
     else
     {
         g_app_state.altitude.alt_rel_home_noimu_cm = 0;
-        g_app_state.altitude.alt_rel_home_imu_cm   = 0;
+        g_app_state.altitude.alt_rel_home_imu_cm = 0;
     }
 
-    g_app_state.altitude.initialized             = true;
-    g_app_state.altitude.baro_valid              = (new_baro_sample != false) || (g_app_state.altitude.baro_valid != false);
-    g_app_state.altitude.gps_valid               = gps_valid;
-    g_app_state.altitude.imu_vector_valid        = imu_vector_valid;
-    g_app_state.altitude.gps_quality_permille    = gps_quality_permille;
-    g_app_state.altitude.last_update_ms          = now_ms;
+    g_app_state.altitude.initialized                = true;
+    g_app_state.altitude.baro_valid                 = (new_baro_sample != false) || (alt_prev->baro_valid != false);
+    g_app_state.altitude.gps_valid                  = gps_valid;
+    g_app_state.altitude.home_valid                 = (g_app_state.altitude.home_valid != false) || (alt_prev->home_valid != false);
+    g_app_state.altitude.imu_vector_valid           = imu_vector_valid;
+    g_app_state.altitude.gps_quality_permille       = gps_quality_permille;
+    g_app_state.altitude.last_update_ms             = now_ms;
 
-    g_app_state.altitude.pressure_raw_hpa_x100   = APP_ALTITUDE_RoundFloatToS32(pressure_raw_hpa * 100.0f);
-    g_app_state.altitude.pressure_filt_hpa_x100  = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.pressure_filt_hpa * 100.0f);
+    g_app_state.altitude.pressure_raw_hpa_x100      = APP_ALTITUDE_RoundFloatToS32(pressure_raw_hpa * 100.0f);
+    g_app_state.altitude.pressure_prefilt_hpa_x100  = APP_ALTITUDE_RoundFloatToS32(pressure_prefilt_hpa * 100.0f);
+    g_app_state.altitude.pressure_filt_hpa_x100     = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.pressure_filt_hpa * 100.0f);
     g_app_state.altitude.pressure_residual_hpa_x100 = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.pressure_residual_hpa * 100.0f);
-    g_app_state.altitude.qnh_manual_hpa_x100     = settings->manual_qnh_hpa_x100;
-    g_app_state.altitude.qnh_equiv_gps_hpa_x100  = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.qnh_equiv_filt_hpa * 100.0f);
 
-    g_app_state.altitude.alt_pressure_std_cm     = APP_ALTITUDE_RoundFloatToS32(alt_std_cm);
-    g_app_state.altitude.alt_qnh_manual_cm       = APP_ALTITUDE_RoundFloatToS32(alt_qnh_cm);
-    g_app_state.altitude.alt_gps_hmsl_cm         = APP_ALTITUDE_RoundFloatToS32(alt_gps_cm);
-    g_app_state.altitude.alt_fused_noimu_cm      = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.kf_noimu.valid ? s_altitude_runtime.kf_noimu.x[0] : alt_qnh_cm);
-    g_app_state.altitude.alt_fused_imu_cm        = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.kf_imu.valid ? s_altitude_runtime.kf_imu.x[0] : alt_qnh_cm);
-    g_app_state.altitude.alt_display_cm          = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.display_alt_filt_cm);
+    g_app_state.altitude.qnh_manual_hpa_x100        = settings->manual_qnh_hpa_x100;
+    g_app_state.altitude.qnh_equiv_gps_hpa_x100     = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.qnh_equiv_filt_hpa * 100.0f);
 
-    g_app_state.altitude.home_alt_noimu_cm       = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.home_noimu_cm);
-    g_app_state.altitude.home_alt_imu_cm         = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.home_imu_cm);
+    g_app_state.altitude.alt_pressure_std_cm        = APP_ALTITUDE_RoundFloatToS32(alt_std_cm);
+    g_app_state.altitude.alt_qnh_manual_cm          = APP_ALTITUDE_RoundFloatToS32(alt_qnh_cm);
+    g_app_state.altitude.alt_gps_hmsl_cm            = APP_ALTITUDE_RoundFloatToS32(alt_gps_cm);
+    g_app_state.altitude.alt_fused_noimu_cm         = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.kf_noimu.valid ? s_altitude_runtime.kf_noimu.x[0] : alt_qnh_cm);
+    g_app_state.altitude.alt_fused_imu_cm           = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.kf_imu.valid ? s_altitude_runtime.kf_imu.x[0] : alt_qnh_cm);
+    g_app_state.altitude.alt_display_cm             = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.display_alt_filt_cm);
 
-    g_app_state.altitude.baro_bias_noimu_cm      = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.kf_noimu.valid ? s_altitude_runtime.kf_noimu.x[2] : 0.0f);
-    g_app_state.altitude.baro_bias_imu_cm        = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.kf_imu.valid ? s_altitude_runtime.kf_imu.x[2] : 0.0f);
-    g_app_state.altitude.baro_noise_used_cm      = (uint16_t)APP_ALTITUDE_RoundFloatToS32(baro_noise_cm);
-    g_app_state.altitude.display_rest_active     = display_rest_active ? 1u : 0u;
-    g_app_state.altitude.debug_audio_source      = settings->debug_audio_source;
+    g_app_state.altitude.home_alt_noimu_cm          = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.home_noimu_cm);
+    g_app_state.altitude.home_alt_imu_cm            = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.home_imu_cm);
 
-    g_app_state.altitude.vario_fast_noimu_cms    = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.vario_fast_noimu_cms);
-    g_app_state.altitude.vario_slow_noimu_cms    = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.vario_slow_noimu_cms);
-    g_app_state.altitude.vario_fast_imu_cms      = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.vario_fast_imu_cms);
-    g_app_state.altitude.vario_slow_imu_cms      = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.vario_slow_imu_cms);
+    g_app_state.altitude.baro_bias_noimu_cm         = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.kf_noimu.valid ? s_altitude_runtime.kf_noimu.x[2] : 0.0f);
+    g_app_state.altitude.baro_bias_imu_cm           = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.kf_imu.valid ? s_altitude_runtime.kf_imu.x[2] : 0.0f);
+    g_app_state.altitude.baro_noise_used_cm         = (uint16_t)APP_ALTITUDE_RoundFloatToS32(baro_noise_cm);
+    g_app_state.altitude.display_rest_active        = display_rest_active ? 1u : 0u;
+    g_app_state.altitude.zupt_active                = s_altitude_runtime.zupt_active ? 1u : 0u;
+    g_app_state.altitude.debug_audio_source         = settings->debug_audio_source;
 
-    g_app_state.altitude.grade_noimu_x10         = APP_ALTITUDE_ComputeGradeX10(s_altitude_runtime.vario_slow_noimu_cms, gps_fix);
-    g_app_state.altitude.grade_imu_x10           = APP_ALTITUDE_ComputeGradeX10(s_altitude_runtime.vario_slow_imu_cms, gps_fix);
+    g_app_state.altitude.vario_fast_noimu_cms       = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.vario_fast_noimu_cms);
+    g_app_state.altitude.vario_slow_noimu_cms       = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.vario_slow_noimu_cms);
+    g_app_state.altitude.vario_fast_imu_cms         = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.vario_fast_imu_cms);
+    g_app_state.altitude.vario_slow_imu_cms         = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.vario_slow_imu_cms);
+    g_app_state.altitude.baro_vario_raw_cms         = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.baro_vario_raw_cms);
+    g_app_state.altitude.baro_vario_filt_cms        = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.baro_vario_filt_cms);
 
-    g_app_state.altitude.imu_vertical_accel_mg   = APP_ALTITUDE_RoundFloatToS32((imu_vertical_cms2 / (APP_ALTITUDE_GRAVITY_MPS2 * 100.0f)) * 1000.0f);
-    g_app_state.altitude.imu_vertical_accel_cms2 = APP_ALTITUDE_RoundFloatToS32(imu_vertical_cms2);
+    g_app_state.altitude.grade_noimu_x10            = APP_ALTITUDE_ComputeGradeX10(s_altitude_runtime.vario_slow_noimu_cms, gps_fix);
+    g_app_state.altitude.grade_imu_x10              = APP_ALTITUDE_ComputeGradeX10(s_altitude_runtime.vario_slow_imu_cms, gps_fix);
 
-    g_app_state.altitude.gps_vacc_mm             = gps_fix->vAcc;
-    g_app_state.altitude.gps_pdop_x100           = gps_fix->pDOP;
-    g_app_state.altitude.gps_numsv_used          = gps_fix->numSV_used;
-    g_app_state.altitude.gps_fix_type            = gps_fix->fixType;
+    g_app_state.altitude.imu_vertical_accel_mg      = APP_ALTITUDE_RoundFloatToS32((imu_vertical_cms2 / (APP_ALTITUDE_GRAVITY_MPS2 * 100.0f)) * 1000.0f);
+    g_app_state.altitude.imu_vertical_accel_cms2    = APP_ALTITUDE_RoundFloatToS32(imu_vertical_cms2);
+    g_app_state.altitude.imu_gravity_norm_mg        = s_altitude_runtime.gravity_est_valid ? 1000 : 0;
+    g_app_state.altitude.imu_accel_norm_mg          = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.imu_accel_norm_mg);
+    g_app_state.altitude.imu_attitude_trust_permille = (uint16_t)APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.imu_attitude_trust_permille);
+    g_app_state.altitude.imu_predict_weight_permille = (uint16_t)APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.imu_predict_weight_permille);
+
+    g_app_state.altitude.gps_vacc_mm                = gps_fix->vAcc;
+    g_app_state.altitude.gps_pdop_x100              = gps_fix->pDOP;
+    g_app_state.altitude.gps_numsv_used             = gps_fix->numSV_used;
+    g_app_state.altitude.gps_fix_type               = gps_fix->fixType;
 
     APP_ALTITUDE_HandleDebugAudio(now_ms, settings);
 }
