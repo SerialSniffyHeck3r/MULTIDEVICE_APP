@@ -8,6 +8,7 @@
 #include "ui_boot.h"
 #include "ui_screen_test.h"
 #include "ui_screen_engine_oil.h"
+#include "ui_screen_gps.h"
 #include "ui_debug_legacy.h"
 #include "APP_STATE.h"
 #include "button.h"
@@ -80,6 +81,7 @@ static ui_bluetooth_stub_state_t s_bt_stub_state = UI_BT_STUB_ON;
 static uint8_t                   s_imperial_units = 0u;
 static uint32_t                  s_pressed_mask = 0u;
 static uint8_t                   s_force_redraw = 1u;
+static ui_screen_id_t            s_return_screen_from_gps = UI_SCREEN_TEST;
 
 /* -------------------------------------------------------------------------- */
 /*  Legacy debug screen F1 long-press return tracking                          */
@@ -124,11 +126,15 @@ static void ui_engine_reset_debug_f1_hold(void);
 static void ui_engine_activate_test_screen(void);
 static void ui_engine_activate_debug_legacy_screen(void);
 static void ui_engine_activate_engine_oil_screen(void);
+static void ui_engine_activate_gps_screen(ui_screen_id_t return_screen);
+static void ui_engine_return_from_gps(void);
 static void ui_engine_process_test_screen(uint32_t now_ms);
+static void ui_engine_process_gps_screen(uint32_t now_ms);
 static void ui_engine_process_engine_oil_screen(uint32_t now_ms);
 static void ui_engine_process_debug_legacy_screen(uint32_t now_ms);
 static void ui_engine_handle_test_screen_action(ui_screen_test_action_t action);
 static void ui_engine_handle_engine_oil_screen_action(ui_screen_engine_oil_action_t action);
+static void ui_engine_handle_gps_screen_action(ui_screen_gps_action_t action);
 static void ui_engine_update_debug_f1_hold_return(uint32_t now_ms);
 static void ui_engine_build_status_model(ui_statusbar_model_t *out_model);
 static void ui_engine_build_compose_plan(uint32_t now_ms,
@@ -201,6 +207,69 @@ static void ui_engine_activate_engine_oil_screen(void)
     s_force_redraw = 1u;
 }
 
+/* -------------------------------------------------------------------------- */
+/*  Activate GPS screen                                                        */
+/*                                                                            */
+/*  GPS 화면은 F1으로 "이전 메뉴" 복귀를 해야 하므로                            */
+/*  진입할 때 root screen id를 함께 기억한다.                                  */
+/*                                                                            */
+/*  주의                                                                      */
+/*  - return_screen이 GPS 자신이면 순환 복귀를 막기 위해 TEST로 보정한다.       */
+/*  - 진입 시 이전 화면의 toast / popup은 정리한다.                            */
+/* -------------------------------------------------------------------------- */
+static void ui_engine_activate_gps_screen(ui_screen_id_t return_screen)
+{
+    if (return_screen == UI_SCREEN_GPS)
+    {
+        return_screen = UI_SCREEN_TEST;
+    }
+
+    s_return_screen_from_gps = return_screen;
+    s_current_screen = UI_SCREEN_GPS;
+
+    UI_ScreenGps_OnEnter();
+    UI_Toast_Hide();
+    UI_Popup_Hide();
+
+    s_pressed_mask = Button_GetPressedMask();
+    s_force_redraw = 1u;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Return from GPS screen                                                     */
+/*                                                                            */
+/*  GPS 화면은 "이전 메뉴 상태를 기억하고 거기로 복귀" 해야 하므로              */
+/*  진입 시 저장해 둔 root screen id를 보고 적절한 on-enter / on-resume를       */
+/*  호출한다.                                                                  */
+/*                                                                            */
+/*  - TEST       : 일반 on-enter                                               */
+/*  - ENGINE OIL : edit 상태를 살리기 위해 on-resume                           */
+/*  - DEBUG      : 기존 debug init 흐름 재사용                                 */
+/* -------------------------------------------------------------------------- */
+static void ui_engine_return_from_gps(void)
+{
+    switch (s_return_screen_from_gps)
+    {
+    case UI_SCREEN_ENGINE_OIL_INTERVAL:
+        s_current_screen = UI_SCREEN_ENGINE_OIL_INTERVAL;
+        UI_ScreenEngineOil_OnResume();
+        s_pressed_mask = Button_GetPressedMask();
+        s_force_redraw = 1u;
+        break;
+
+    case UI_SCREEN_DEBUG_LEGACY:
+        ui_engine_activate_debug_legacy_screen();
+        break;
+
+    case UI_SCREEN_TEST:
+    case UI_SCREEN_GPS:
+    case UI_SCREEN_COUNT:
+    default:
+        ui_engine_activate_test_screen();
+        break;
+    }
+}
+
 void UI_Engine_Init(void)
 {
     UI_BottomBar_Init();
@@ -214,11 +283,13 @@ void UI_Engine_Init(void)
     s_imperial_units = 0u;
     s_pressed_mask = Button_GetPressedMask();
     s_force_redraw = 1u;
+    s_return_screen_from_gps = UI_SCREEN_TEST;
 
     ui_engine_reset_debug_f1_hold();
 
     UI_ScreenTest_Init((uint32_t)s_ui_tick_20hz);
     UI_ScreenEngineOil_Init();
+    UI_ScreenGps_Init();
     UI_ScreenTest_OnEnter();
 }
 
@@ -239,6 +310,11 @@ void UI_Engine_EarlyBootDraw(void)
 void UI_Engine_RequestRedraw(void)
 {
     s_force_redraw = 1u;
+}
+
+void UI_Engine_EnterGpsScreen(void)
+{
+    ui_engine_activate_gps_screen(s_current_screen);
 }
 
 void UI_Engine_SetRecordState(uint8_t record_state)
@@ -387,6 +463,36 @@ static void ui_engine_process_engine_oil_screen(uint32_t now_ms)
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Process GPS screen                                                         */
+/*                                                                            */
+/*  이 화면 역시 event queue 소비는 UI 엔진이 하고,                             */
+/*  실제 버튼 의미 해석과 UBX 송신은                                           */
+/*  ui_screen_gps.c가 담당한다.                                                */
+/* -------------------------------------------------------------------------- */
+static void ui_engine_process_gps_screen(uint32_t now_ms)
+{
+    button_event_t event;
+
+    s_pressed_mask = Button_GetPressedMask();
+
+    while (Button_PopEvent(&event) != false)
+    {
+        ui_screen_gps_action_t action;
+
+        action = UI_ScreenGps_HandleButtonEvent(&event, now_ms);
+        s_force_redraw = 1u;
+
+        if (action != UI_SCREEN_GPS_ACTION_NONE)
+        {
+            ui_engine_handle_gps_screen_action(action);
+            break;
+        }
+    }
+
+    s_pressed_mask = Button_GetPressedMask();
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Process legacy debug screen                                                */
 /*                                                                            */
 /*  debug 모듈은 기존처럼 자체 task / 자체 event 소비를 유지한다.               */
@@ -411,6 +517,10 @@ static void ui_engine_handle_test_screen_action(ui_screen_test_action_t action)
 
     case UI_SCREEN_TEST_ACTION_ENTER_ENGINE_OIL:
         ui_engine_activate_engine_oil_screen();
+        break;
+
+    case UI_SCREEN_TEST_ACTION_ENTER_GPS:
+        UI_Engine_EnterGpsScreen();
         break;
 
     case UI_SCREEN_TEST_ACTION_NONE:
@@ -442,6 +552,28 @@ static void ui_engine_handle_engine_oil_screen_action(ui_screen_engine_oil_actio
         break;
 
     case UI_SCREEN_ENGINE_OIL_ACTION_NONE:
+    default:
+        break;
+    }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Handle GPS screen action                                                   */
+/*                                                                            */
+/*  F1 복귀 시에는 GPS 화면에서 띄운 toast / popup을 정리하고                   */
+/*  진입 전 root screen으로 돌아간다.                                          */
+/* -------------------------------------------------------------------------- */
+static void ui_engine_handle_gps_screen_action(ui_screen_gps_action_t action)
+{
+    switch (action)
+    {
+    case UI_SCREEN_GPS_ACTION_BACK_TO_PREVIOUS:
+        UI_Toast_Hide();
+        UI_Popup_Hide();
+        ui_engine_return_from_gps();
+        break;
+
+    case UI_SCREEN_GPS_ACTION_NONE:
     default:
         break;
     }
@@ -491,6 +623,10 @@ void UI_Engine_Task(uint32_t now_ms)
 
     case UI_SCREEN_ENGINE_OIL_INTERVAL:
         ui_engine_process_engine_oil_screen(now_ms);
+        break;
+
+    case UI_SCREEN_GPS:
+        ui_engine_process_gps_screen(now_ms);
         break;
 
     case UI_SCREEN_DEBUG_LEGACY:
@@ -608,6 +744,12 @@ static void ui_engine_build_compose_plan(uint32_t now_ms,
         out_plan->layout_mode = UI_ScreenEngineOil_GetLayoutMode();
         out_plan->draw_statusbar = UI_ScreenEngineOil_IsStatusBarVisible();
         out_plan->draw_bottombar = UI_ScreenEngineOil_IsBottomBarVisible();
+        break;
+
+    case UI_SCREEN_GPS:
+        out_plan->layout_mode = UI_ScreenGps_GetLayoutMode();
+        out_plan->draw_statusbar = UI_ScreenGps_IsStatusBarVisible();
+        out_plan->draw_bottombar = UI_ScreenGps_IsBottomBarVisible();
         break;
 
     case UI_SCREEN_DEBUG_LEGACY:
@@ -786,6 +928,12 @@ static void ui_engine_draw_main_viewport(u8g2_t *u8g2,
                                 viewport,
                                 UI_ScreenEngineOil_GetIntervalValue(),
                                 UI_ScreenEngineOil_GetSelectedDigitIndex());
+        break;
+
+    case UI_SCREEN_GPS:
+        UI_ScreenGps_Draw(u8g2,
+                          viewport,
+                          s_imperial_units);
         break;
 
     case UI_SCREEN_DEBUG_LEGACY:

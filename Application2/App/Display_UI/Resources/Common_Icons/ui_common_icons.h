@@ -20,6 +20,9 @@ extern "C" {
 #define ICON11_W  11
 #define ICON11_H  7
 
+#define ICON13_W  13
+#define ICON13_H  13
+
 #define ICON7X4_W 7
 #define ICON7X4_H 4
 
@@ -57,6 +60,16 @@ extern const uint8_t blank_7x7[ICON7_H];
 extern const uint8_t icon_antenna_shape[ICON5_H];
 extern const uint8_t icon_degrees[ICON7_H];
 extern const uint8_t icon_bluetooth_bits[ICON7_H];
+
+/* -------------------------------------------------------------------------- */
+/*  GPS info-pane 13x13 icons                                                  */
+/*                                                                            */
+/*  사용자가 지정한 XBM bit pattern을 그대로 넣는다.                           */
+/*  - altitude accuracy  : 높이 정확도                                        */
+/*  - position accuracy  : 위치 정확도                                        */
+/* -------------------------------------------------------------------------- */
+extern const uint8_t icon_gps_altitude_accuracy_13x13[ICON13_H * 2];
+extern const uint8_t icon_gps_position_accuracy_13x13[ICON13_H * 2];
 
 /* -------------------------------------------------------------------------- */
 /*  Bottom bar 4-pixel-high arrows                                             */

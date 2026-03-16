@@ -128,6 +128,44 @@ const uint8_t icon_bluetooth_bits[ICON7_H] U8X8_PROGMEM = {
 };
 
 /* -------------------------------------------------------------------------- */
+/*  GPS page 13x13 accuracy icons                                              */
+/*                                                                            */
+/*  사용자가 직접 제공한 XBM payload를 그대로 사용한다.                        */
+/*  각 행은 13bit 이므로 2byte 정렬을 가져 총 26byte가 된다.                   */
+/* -------------------------------------------------------------------------- */
+const uint8_t icon_gps_altitude_accuracy_13x13[ICON13_H * 2] U8X8_PROGMEM = {
+    0x40, 0xe0,
+    0xe0, 0xe0,
+    0x50, 0xe1,
+    0x48, 0xe2,
+    0x40, 0xe0,
+    0x40, 0xe0,
+    0x40, 0xe0,
+    0x40, 0xe0,
+    0x40, 0xe0,
+    0x48, 0xe2,
+    0x50, 0xe1,
+    0xe0, 0xe0,
+    0x40, 0xe0
+};
+
+const uint8_t icon_gps_position_accuracy_13x13[ICON13_H * 2] U8X8_PROGMEM = {
+    0x00, 0xe0,
+    0x00, 0xe7,
+    0x80, 0xe8,
+    0x80, 0xe8,
+    0x80, 0xe8,
+    0x80, 0xe7,
+    0x40, 0xe0,
+    0x20, 0xe0,
+    0x10, 0xe0,
+    0x08, 0xe0,
+    0x04, 0xe0,
+    0x02, 0xe0,
+    0x00, 0xe0
+};
+
+/* -------------------------------------------------------------------------- */
 /*  Bottom bar arrows                                                          */
 /*                                                                            */
 /*  높이 4px 제약 안에서 방향이 보이도록 단순화한 화살표들이다.                */

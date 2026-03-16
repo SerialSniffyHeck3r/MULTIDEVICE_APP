@@ -85,6 +85,7 @@ typedef enum
 /*  - TEST 홈 화면                                                             */
 /*  - 레거시 디버그 화면                                                       */
 /*  - 엔진 오일 교체 주기 설정 스텁 화면                                       */
+/*  - GPS 화면                                                                 */
 /*  을 함께 올린다.                                                            */
 /* -------------------------------------------------------------------------- */
 typedef enum
@@ -92,6 +93,7 @@ typedef enum
     UI_SCREEN_TEST = 0,
     UI_SCREEN_DEBUG_LEGACY,
     UI_SCREEN_ENGINE_OIL_INTERVAL,
+    UI_SCREEN_GPS,
 
     UI_SCREEN_COUNT
 } ui_screen_id_t;

@@ -19,7 +19,8 @@ typedef enum
 {
     UI_SCREEN_TEST_ACTION_NONE = 0,
     UI_SCREEN_TEST_ACTION_ENTER_DEBUG_LEGACY,
-    UI_SCREEN_TEST_ACTION_ENTER_ENGINE_OIL
+    UI_SCREEN_TEST_ACTION_ENTER_ENGINE_OIL,
+    UI_SCREEN_TEST_ACTION_ENTER_GPS
 } ui_screen_test_action_t;
 
 /* -------------------------------------------------------------------------- */

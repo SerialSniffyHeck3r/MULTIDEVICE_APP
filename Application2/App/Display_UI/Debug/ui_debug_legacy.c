@@ -2077,6 +2077,11 @@
       APP_ALT_PARAM_VARIO_FAST_TAU,
       APP_ALT_PARAM_VARIO_SLOW_TAU,
       APP_ALT_PARAM_DISPLAY_LPF_TAU,
+      APP_ALT_PARAM_REST_ENABLE,
+      APP_ALT_PARAM_REST_VARIO,
+      APP_ALT_PARAM_REST_ACCEL,
+      APP_ALT_PARAM_REST_TAU,
+      APP_ALT_PARAM_REST_HOLD,
       APP_ALT_PARAM_GPS_MAX_VACC,
       APP_ALT_PARAM_GPS_MAX_PDOP,
       APP_ALT_PARAM_GPS_MIN_SATS,
@@ -2086,6 +2091,7 @@
       APP_ALT_PARAM_IMU_DEADBAND,
       APP_ALT_PARAM_IMU_CLIP,
       APP_ALT_PARAM_AUDIO_ENABLE,
+      APP_ALT_PARAM_AUDIO_SOURCE,
       APP_ALT_PARAM_AUDIO_DEADBAND,
       APP_ALT_PARAM_AUDIO_MIN_FREQ,
       APP_ALT_PARAM_AUDIO_MAX_FREQ,
@@ -2096,6 +2102,7 @@
       APP_ALT_PARAM_KF_Q_B,
       APP_ALT_PARAM_KF_Q_A,
       APP_ALT_PARAM_BARO_R,
+      APP_ALT_PARAM_BARO_R_ADAPT_MAX,
       APP_ALT_PARAM_GPS_R,
       APP_ALT_PARAM_COUNT
   } app_altitude_param_t;
@@ -2191,6 +2198,11 @@
       case APP_ALT_PARAM_VARIO_FAST_TAU:    return "VF_TAU";
       case APP_ALT_PARAM_VARIO_SLOW_TAU:    return "VS_TAU";
       case APP_ALT_PARAM_DISPLAY_LPF_TAU:   return "DSP_TAU";
+      case APP_ALT_PARAM_REST_ENABLE:       return "REST_EN";
+      case APP_ALT_PARAM_REST_VARIO:        return "REST_V";
+      case APP_ALT_PARAM_REST_ACCEL:        return "REST_A";
+      case APP_ALT_PARAM_REST_TAU:          return "REST_TAU";
+      case APP_ALT_PARAM_REST_HOLD:         return "REST_HLD";
       case APP_ALT_PARAM_GPS_MAX_VACC:      return "GPS_VACC";
       case APP_ALT_PARAM_GPS_MAX_PDOP:      return "GPS_PDOP";
       case APP_ALT_PARAM_GPS_MIN_SATS:      return "GPS_SATS";
@@ -2200,6 +2212,7 @@
       case APP_ALT_PARAM_IMU_DEADBAND:      return "A_DBMG";
       case APP_ALT_PARAM_IMU_CLIP:          return "A_CLIP";
       case APP_ALT_PARAM_AUDIO_ENABLE:      return "AUD_EN";
+      case APP_ALT_PARAM_AUDIO_SOURCE:      return "AUD_SRC";
       case APP_ALT_PARAM_AUDIO_DEADBAND:    return "AUD_DB";
       case APP_ALT_PARAM_AUDIO_MIN_FREQ:    return "AUD_FMN";
       case APP_ALT_PARAM_AUDIO_MAX_FREQ:    return "AUD_FMX";
@@ -2210,6 +2223,7 @@
       case APP_ALT_PARAM_KF_Q_B:            return "KF_Q_B";
       case APP_ALT_PARAM_KF_Q_A:            return "KF_Q_A";
       case APP_ALT_PARAM_BARO_R:            return "BARO_R";
+      case APP_ALT_PARAM_BARO_R_ADAPT_MAX:  return "BARO_RX";
       case APP_ALT_PARAM_GPS_R:             return "GPS_R";
       case APP_ALT_PARAM_COUNT:
       default:                              return "UNKNOWN";
@@ -2264,6 +2278,23 @@
       case APP_ALT_PARAM_DISPLAY_LPF_TAU:
           snprintf(out, out_size, "%u ms", (unsigned)alt->display_lpf_tau_ms);
           break;
+      case APP_ALT_PARAM_REST_ENABLE:
+          snprintf(out, out_size, "%u", alt->rest_display_enabled ? 1u : 0u);
+          break;
+      case APP_ALT_PARAM_REST_VARIO:
+          APP_FormatSignedCmsAsMpsText(text, sizeof(text), (int32_t)alt->rest_detect_vario_cms);
+          snprintf(out, out_size, "%s m/s", text);
+          break;
+      case APP_ALT_PARAM_REST_ACCEL:
+          snprintf(out, out_size, "%u mg", (unsigned)alt->rest_detect_accel_mg);
+          break;
+      case APP_ALT_PARAM_REST_TAU:
+          snprintf(out, out_size, "%u ms", (unsigned)alt->rest_display_tau_ms);
+          break;
+      case APP_ALT_PARAM_REST_HOLD:
+          APP_FormatSignedCmAsMeterText(text, sizeof(text), (int32_t)alt->rest_display_hold_cm);
+          snprintf(out, out_size, "%s m", text);
+          break;
       case APP_ALT_PARAM_GPS_MAX_VACC:
           snprintf(out, out_size, "%u mm", (unsigned)alt->gps_max_vacc_mm);
           break;
@@ -2291,6 +2322,9 @@
           break;
       case APP_ALT_PARAM_AUDIO_ENABLE:
           snprintf(out, out_size, "%u", alt->debug_audio_enabled ? 1u : 0u);
+          break;
+      case APP_ALT_PARAM_AUDIO_SOURCE:
+          snprintf(out, out_size, "%s", (alt->debug_audio_source != 0u) ? "IMU" : "NOI");
           break;
       case APP_ALT_PARAM_AUDIO_DEADBAND:
           APP_FormatSignedCmsAsMpsText(text, sizeof(text), (int32_t)alt->audio_deadband_cms);
@@ -2322,6 +2356,10 @@
           break;
       case APP_ALT_PARAM_BARO_R:
           APP_FormatSignedCmAsMeterText(text, sizeof(text), (int32_t)alt->baro_measurement_noise_cm);
+          snprintf(out, out_size, "%s m", text);
+          break;
+      case APP_ALT_PARAM_BARO_R_ADAPT_MAX:
+          APP_FormatSignedCmAsMeterText(text, sizeof(text), (int32_t)alt->baro_adaptive_noise_max_cm);
           snprintf(out, out_size, "%s m", text);
           break;
       case APP_ALT_PARAM_GPS_R:
@@ -2379,6 +2417,21 @@
       case APP_ALT_PARAM_DISPLAY_LPF_TAU:
           alt->display_lpf_tau_ms = APP_ClampToU16((int32_t)alt->display_lpf_tau_ms + ((direction > 0) ? 25 : -25), 0, 10000);
           break;
+      case APP_ALT_PARAM_REST_ENABLE:
+          alt->rest_display_enabled = (uint8_t)(alt->rest_display_enabled ? 0u : 1u);
+          break;
+      case APP_ALT_PARAM_REST_VARIO:
+          alt->rest_detect_vario_cms = APP_ClampToU16((int32_t)alt->rest_detect_vario_cms + ((direction > 0) ? 1 : -1), 0, 300);
+          break;
+      case APP_ALT_PARAM_REST_ACCEL:
+          alt->rest_detect_accel_mg = APP_ClampToU16((int32_t)alt->rest_detect_accel_mg + ((direction > 0) ? 1 : -1), 0, 300);
+          break;
+      case APP_ALT_PARAM_REST_TAU:
+          alt->rest_display_tau_ms = APP_ClampToU16((int32_t)alt->rest_display_tau_ms + ((direction > 0) ? 50 : -50), 0, 10000);
+          break;
+      case APP_ALT_PARAM_REST_HOLD:
+          alt->rest_display_hold_cm = APP_ClampToU16((int32_t)alt->rest_display_hold_cm + ((direction > 0) ? 1 : -1), 0, 300);
+          break;
       case APP_ALT_PARAM_GPS_MAX_VACC:
           alt->gps_max_vacc_mm = APP_ClampToU16((int32_t)alt->gps_max_vacc_mm + ((direction > 0) ? 100 : -100), 500, 20000);
           break;
@@ -2405,6 +2458,9 @@
           break;
       case APP_ALT_PARAM_AUDIO_ENABLE:
           alt->debug_audio_enabled = (uint8_t)(alt->debug_audio_enabled ? 0u : 1u);
+          break;
+      case APP_ALT_PARAM_AUDIO_SOURCE:
+          alt->debug_audio_source = (uint8_t)(alt->debug_audio_source ? 0u : 1u);
           break;
       case APP_ALT_PARAM_AUDIO_DEADBAND:
           alt->audio_deadband_cms = APP_ClampToU16((int32_t)alt->audio_deadband_cms + ((direction > 0) ? 5 : -5), 0, 1000);
@@ -2439,6 +2495,17 @@
           break;
       case APP_ALT_PARAM_BARO_R:
           alt->baro_measurement_noise_cm = APP_ClampToU16((int32_t)alt->baro_measurement_noise_cm + ((direction > 0) ? 5 : -5), 1, 5000);
+          if (alt->baro_adaptive_noise_max_cm < alt->baro_measurement_noise_cm)
+          {
+              alt->baro_adaptive_noise_max_cm = alt->baro_measurement_noise_cm;
+          }
+          break;
+      case APP_ALT_PARAM_BARO_R_ADAPT_MAX:
+          alt->baro_adaptive_noise_max_cm = APP_ClampToU16((int32_t)alt->baro_adaptive_noise_max_cm + ((direction > 0) ? 5 : -5), 1, 5000);
+          if (alt->baro_adaptive_noise_max_cm < alt->baro_measurement_noise_cm)
+          {
+              alt->baro_adaptive_noise_max_cm = alt->baro_measurement_noise_cm;
+          }
           break;
       case APP_ALT_PARAM_GPS_R:
           alt->gps_measurement_noise_floor_cm = APP_ClampToU16((int32_t)alt->gps_measurement_noise_floor_cm + ((direction > 0) ? 10 : -10), 10, 20000);
@@ -2537,9 +2604,26 @@
       snprintf(line, sizeof(line), "SEL:%s", APP_AltitudeParamName((app_altitude_param_t)g_altitude_selected_param));
       APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
 
+      /* ------------------------------------------------------------------ */
+      /*  좌측 컬럼 X=0                                                      */
+      /*  - 화면 왼쪽 절반에는 altitude engine이 실제로 계산/보관하는         */
+      /*    핵심 상태값들을 위에서 아래로 나열한다.                           */
+      /*  - 첫 줄 P는 raw/filt pressure를 동시에 보여준다.                    */
+      /*    format : P raw_hPa/filt_hPa                                       */
+      /* ------------------------------------------------------------------ */
       APP_FormatSignedCentiText(text_a, sizeof(text_a), altitude->pressure_raw_hpa_x100);
       APP_FormatSignedCentiText(text_b, sizeof(text_b), altitude->pressure_filt_hpa_x100);
       snprintf(line, sizeof(line), "P %s/%s", text_a, text_b);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      /* ------------------------------------------------------------------ */
+      /*  PR : pressure residual                                             */
+      /*  - 새 raw pressure와 직전 LPF pressure 차이                         */
+      /*  - adaptive baro trust가 현재 얼마나 거칠게 보고 있는지             */
+      /*    추정하는 입력으로 사용된다.                                       */
+      /* ------------------------------------------------------------------ */
+      APP_FormatSignedCentiText(text_a, sizeof(text_a), altitude->pressure_residual_hpa_x100);
+      snprintf(line, sizeof(line), "PR %s", text_a);
       APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
 
       APP_FormatSignedCentiText(text_a, sizeof(text_a), altitude->qnh_manual_hpa_x100);
@@ -2567,6 +2651,15 @@
       snprintf(line, sizeof(line), "IMU %sm", text_a);
       APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
 
+      /* ------------------------------------------------------------------ */
+      /*  DSP : 현재 화면 표시용 altitude                                     */
+      /*  - core KF 결과와 별개로, 정지 상태에서만 추가 안정화를 먹인         */
+      /*    최종 display altitude를 보여준다.                                */
+      /* ------------------------------------------------------------------ */
+      APP_FormatSignedCmAsMeterText(text_a, sizeof(text_a), altitude->alt_display_cm);
+      snprintf(line, sizeof(line), "DSP %sm", text_a);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
       APP_FormatSignedCmAsMeterText(text_a, sizeof(text_a), altitude->alt_rel_home_noimu_cm);
       APP_FormatSignedCmAsMeterText(text_b, sizeof(text_b), altitude->alt_rel_home_imu_cm);
       snprintf(line, sizeof(line), "REL %s/%s", text_a, text_b);
@@ -2590,6 +2683,15 @@
       APP_FormatSignedCmAsMeterText(text_a, sizeof(text_a), altitude->baro_bias_noimu_cm);
       APP_FormatSignedCmAsMeterText(text_b, sizeof(text_b), altitude->baro_bias_imu_cm);
       snprintf(line, sizeof(line), "BI %s/%s", text_a, text_b);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      /* ------------------------------------------------------------------ */
+      /*  BR : 이번 baro measurement update에 실제로 사용된 R(cm)            */
+      /*  - calm 환경에서는 nominal BARO_R 근처                              */
+      /*  - 난류/에어플로우가 커지면 adaptive logic이 이 값을 키운다.         */
+      /* ------------------------------------------------------------------ */
+      APP_FormatSignedCmAsMeterText(text_a, sizeof(text_a), (int32_t)altitude->baro_noise_used_cm);
+      snprintf(line, sizeof(line), "BR %sm", text_a);
       APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
 
       APP_FormatSignedCmsAsMpsText(text_a, sizeof(text_a), altitude->imu_vertical_accel_cms2);
@@ -2621,6 +2723,23 @@
       APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
 
       snprintf(line, sizeof(line), "IMUV %u", altitude->imu_vector_valid ? 1u : 0u);
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+
+      /* ------------------------------------------------------------------ */
+      /*  REST / AUDIO source 정보                                           */
+      /*  - REST : display stabilizer가 현재 정지 상태로 판단했는지          */
+      /*  - AUD  : debug vario tone이 no-IMU fast / IMU fast 중              */
+      /*           무엇을 듣고 있는지 표시                                   */
+      /*  - AVAR : 실제 audio 구동에 사용된 source vario(cm/s)               */
+      /* ------------------------------------------------------------------ */
+      snprintf(line, sizeof(line), "REST %u", altitude->display_rest_active ? 1u : 0u);
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+
+      snprintf(line, sizeof(line), "AUD %s", (altitude->debug_audio_source != 0u) ? "IMU" : "NOI");
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+
+      APP_FormatSignedCmsAsMpsText(text_a, sizeof(text_a), altitude->debug_audio_vario_cms);
+      snprintf(line, sizeof(line), "AVAR %s", text_a);
       APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
 
       APP_AltitudeDebugFormatSelectedValue(settings, value_text, sizeof(value_text));

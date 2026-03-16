@@ -145,6 +145,18 @@ void UI_ScreenEngineOil_OnEnter(void)
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Public on-resume                                                          */
+/*                                                                            */
+/*  GPS 화면으로 잠깐 나갔다가 다시 돌아올 때                                  */
+/*  현재 편집값(edit)과 선택 자릿수를 유지한 채                                */
+/*  이 화면 전용 하단바만 복구한다.                                            */
+/* -------------------------------------------------------------------------- */
+void UI_ScreenEngineOil_OnResume(void)
+{
+    ui_screen_engine_oil_configure_bottom_bar();
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Public button handler                                                     */
 /* -------------------------------------------------------------------------- */
 ui_screen_engine_oil_action_t UI_ScreenEngineOil_HandleButtonEvent(const button_event_t *event,

@@ -337,6 +337,18 @@ ui_screen_test_action_t UI_ScreenTest_HandleButtonEvent(const button_event_t *ev
      return UI_SCREEN_TEST_ACTION_NONE;
    }
 
+   /* ---------------------------------------------------------------------- */
+   /* TEST 홈 F6 long press -> GPS 화면 진입                                  */
+   /*                                                                        */
+   /* F6 short press의 cute icon cycle은 그대로 유지하고,                    */
+   /* long press만 새 GPS 화면 진입 action으로 분리한다.                     */
+   /* ---------------------------------------------------------------------- */
+   if ((event->id == BUTTON_ID_6) &&
+       (event->type == BUTTON_EVENT_LONG_PRESS))
+   {
+     return UI_SCREEN_TEST_ACTION_ENTER_GPS;
+   }
+
    if (event->type != BUTTON_EVENT_SHORT_PRESS)
    {
      return UI_SCREEN_TEST_ACTION_NONE;

@@ -210,9 +210,39 @@ typedef struct
     uint16_t display_lpf_tau_ms;
 
     /* ---------------------------------------------------------------------- */
+    /*  정지 상태(rest) 전용 표시 안정화                                        */
+    /*                                                                        */
+    /*  rest_display_enabled                                                   */
+    /*  - core filter / vario는 그대로 두고                                   */
+    /*    "최종 표시 altitude" 에만 정지 상태용 추가 안정화를 건다.            */
+    /*  - 따라서 바리오 반응성은 유지하면서,                                  */
+    /*    책상 위 정지 상태에서 숫자가 달달 떨리는 현상을 줄일 수 있다.       */
+    /*                                                                        */
+    /*  rest_detect_vario_cms                                                 */
+    /*  - 정지 판정에 사용하는 slow vario 절대값 기준                         */
+    /*                                                                        */
+    /*  rest_detect_accel_mg                                                  */
+    /*  - IMU가 유효할 때 정지 판정에 사용하는 수직 specific-force 기준       */
+    /*                                                                        */
+    /*  rest_display_tau_ms                                                   */
+    /*  - 정지 상태일 때 display altitude에 적용되는 추가 LPF 시정수          */
+    /*                                                                        */
+    /*  rest_display_hold_cm                                                  */
+    /*  - 정지 상태에서 display altitude와 target altitude 차이가              */
+    /*    이 값보다 작으면, 화면 숫자를 그대로 붙잡아 미세 떨림을 막는다.     */
+    /* ---------------------------------------------------------------------- */
+    uint8_t  rest_display_enabled;
+    uint8_t  reserved_rest0;
+    uint16_t rest_detect_vario_cms;
+    uint16_t rest_detect_accel_mg;
+    uint16_t rest_display_tau_ms;
+    uint16_t rest_display_hold_cm;
+
+    /* ---------------------------------------------------------------------- */
     /*  GPS gate / measurement noise 관련                                      */
     /* ---------------------------------------------------------------------- */
     uint16_t baro_measurement_noise_cm;
+    uint16_t baro_adaptive_noise_max_cm;
     uint16_t gps_measurement_noise_floor_cm;
     uint16_t gps_max_vacc_mm;
     uint16_t gps_max_pdop_x100;
@@ -252,9 +282,16 @@ typedef struct
 
     /* ---------------------------------------------------------------------- */
     /*  Debug altitude 페이지 전용 vario beep 파라미터                         */
+    /*                                                                        */
+    /*  debug_audio_source                                                    */
+    /*  - 0 : no-IMU fast vario                                              */
+    /*  - 1 : IMU-aided fast vario                                           */
+    /*                                                                        */
+    /*  사용자는 현장에서 두 소스를 직접 번갈아 들으면서                      */
+    /*  어떤 추정이 더 자연스러운지 비교할 수 있다.                           */
     /* ---------------------------------------------------------------------- */
     uint8_t  debug_audio_enabled;
-    uint8_t  reserved3;
+    uint8_t  debug_audio_source;
     uint16_t audio_deadband_cms;
     uint16_t audio_min_freq_hz;
     uint16_t audio_max_freq_hz;
@@ -1354,6 +1391,7 @@ typedef struct
 
     int32_t  pressure_raw_hpa_x100;       /* 원본 pressure, 0.01 hPa                */
     int32_t  pressure_filt_hpa_x100;      /* LPF 후 pressure, 0.01 hPa              */
+    int32_t  pressure_residual_hpa_x100;  /* raw - LPF pressure residual, 0.01 hPa  */
     int32_t  qnh_manual_hpa_x100;         /* 설정 manual QNH, 0.01 hPa              */
     int32_t  qnh_equiv_gps_hpa_x100;      /* GPS 역산 등가 sea-level pressure       */
 
@@ -1371,6 +1409,10 @@ typedef struct
 
     int32_t  baro_bias_noimu_cm;          /* no-IMU filter의 baro bias 상태         */
     int32_t  baro_bias_imu_cm;            /* IMU filter의 baro bias 상태            */
+    uint16_t baro_noise_used_cm;          /* 현재 baro update에 사용된 noise(cm)    */
+    uint8_t  display_rest_active;         /* 정지 상태 display stabilizer 활성      */
+    uint8_t  debug_audio_source;          /* 디버그 audio가 현재 쓰는 source        */
+    int32_t  debug_audio_vario_cms;       /* 디버그 audio source vario(cm/s)        */
 
     int32_t  vario_fast_noimu_cms;        /* no-IMU fast vario                      */
     int32_t  vario_slow_noimu_cms;        /* no-IMU slow vario                      */
@@ -1389,6 +1431,9 @@ typedef struct
     uint8_t  gps_numsv_used;              /* 마지막 사용 numSV_used                 */
     uint8_t  gps_fix_type;                /* 마지막 사용 fixType                    */
 } app_altitude_state_t;
+
+
+
 
 /* -------------------------------------------------------------------------- */
 /*  app_state_t                                                                 */
