@@ -59,6 +59,10 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 #define BACKLIGHT_Pin GPIO_PIN_2
 #define BACKLIGHT_GPIO_Port GPIOE
+#define SOFT_PWR_OFF_Pin GPIO_PIN_3
+#define SOFT_PWR_OFF_GPIO_Port GPIOE
+#define SOFT_PWR_PUSH_Pin GPIO_PIN_4
+#define SOFT_PWR_PUSH_GPIO_Port GPIOE
 #define BEEP_SOUND_Pin GPIO_PIN_5
 #define BEEP_SOUND_GPIO_Port GPIOE
 #define LED11_Pin GPIO_PIN_6
