@@ -56,6 +56,30 @@
 #define AUDIO_WAV_IO_STAGE_CHUNK_BYTES 1024u
 #endif
 
+#ifndef AUDIO_VARIO_VOICE_INDEX
+#define AUDIO_VARIO_VOICE_INDEX 0u
+#endif
+
+#ifndef AUDIO_VARIO_LONG_NOTE_SAMPLES
+#define AUDIO_VARIO_LONG_NOTE_SAMPLES 0x7fffffffu
+#endif
+
+#ifndef AUDIO_VARIO_MIN_FREQ_HZ
+#define AUDIO_VARIO_MIN_FREQ_HZ 50u
+#endif
+
+#ifndef AUDIO_VARIO_MAX_FREQ_HZ
+#define AUDIO_VARIO_MAX_FREQ_HZ 5000u
+#endif
+
+#ifndef AUDIO_VARIO_DEFAULT_GLIDE_MS
+#define AUDIO_VARIO_DEFAULT_GLIDE_MS 80u
+#endif
+
+#ifndef AUDIO_VARIO_DEFAULT_RELEASE_MS
+#define AUDIO_VARIO_DEFAULT_RELEASE_MS 120u
+#endif
+
 typedef char audio_wav_io_stage_chunk_must_be_word_multiple[
     ((AUDIO_WAV_IO_STAGE_CHUNK_BYTES != 0u) &&
      ((AUDIO_WAV_IO_STAGE_CHUNK_BYTES % 4u) == 0u)) ? 1 : -1];
@@ -151,6 +175,38 @@ typedef struct
     char     full_path[AUDIO_WAV_FULL_PATH_MAX];
 } audio_wav_runtime_t;
 
+
+typedef struct
+{
+    /* ---------------------------------------------------------------------- */
+    /*  연속 위상 유지형 바리오 음 합성 runtime                                 */
+    /*                                                                        */
+    /*  이 구조체는 "주파수/레벨 target을 서서히 따라가는 단일 oscillator"      */
+    /*  정책만 따로 들고 있고, 실제 파형 발생 자체는 기존 voice 엔진을 재사용한다.*/
+    /*                                                                        */
+    /*  active              : 바리오 연속 음 모드가 현재 살아 있는가            */
+    /*  stop_requested      : level을 0까지 내린 뒤 voice를 정리해야 하는가     */
+    /*  waveform_id         : 현재 사용 중인 app_audio_waveform_t raw          */
+    /*  freq_slew_samples   : 주파수 target을 몇 sample에 걸쳐 따라갈 것인가    */
+    /*  level_slew_samples  : 레벨 target을 몇 sample에 걸쳐 따라갈 것인가      */
+    /*  target_freq_hz_x100 : 최종 목표 주파수                                  */
+    /*  target_phase_inc_q32: 위 주파수에 대응하는 oscillator 증분              */
+    /*  target_level_q15    : 최종 목표 레벨                                    */
+    /* ---------------------------------------------------------------------- */
+    uint8_t  active;
+    uint8_t  stop_requested;
+    uint8_t  waveform_id;
+    uint8_t  reserved0;
+
+    uint32_t freq_slew_samples;
+    uint32_t level_slew_samples;
+    uint32_t target_freq_hz_x100;
+    uint32_t target_phase_inc_q32;
+
+    uint16_t target_level_q15;
+    uint16_t reserved1;
+} audio_vario_runtime_t;
+
 typedef struct
 {
     uint8_t  initialized;
@@ -183,6 +239,7 @@ typedef struct
     audio_voice_runtime_t    voices[APP_AUDIO_MAX_VOICES];
     audio_sequence_runtime_t sequence;
     audio_wav_runtime_t      wav;
+    audio_vario_runtime_t    vario;
 } audio_driver_runtime_t;
 
 static audio_driver_runtime_t s_audio_rt;
@@ -216,6 +273,10 @@ static uint32_t s_audio_wav_io_stage_words[AUDIO_WAV_IO_STAGE_CHUNK_BYTES / 4u];
 /*  정적 prototype를 여기에서 한 번 선언해 둔다.                               */
 /* -------------------------------------------------------------------------- */
 static void Audio_Driver_FillBufferWithSilence(uint16_t *dst, uint32_t sample_count);
+static void Audio_Driver_ClearVarioState(void);
+static void Audio_Driver_VarioAdvanceOneSample(void);
+static void Audio_Driver_ClearVoice(uint32_t voice_index);
+static audio_timbre_preset_id_t Audio_Driver_MapWaveformToPureTimbre(app_audio_waveform_t waveform);
 
 /* -------------------------------------------------------------------------- */
 /*  내부 유틸: 매우 짧은 임계 구역 진입/이탈                                   */
@@ -1301,6 +1362,179 @@ static uint32_t Audio_Driver_FrequencyToPhaseIncQ32(uint32_t note_hz_x100)
     return phase_inc;
 }
 
+
+/* -------------------------------------------------------------------------- */
+/*  내부 유틸: ms -> 현재 출력 sample 수                                        */
+/* -------------------------------------------------------------------------- */
+static uint32_t Audio_Driver_MillisecondsToSamples(uint32_t time_ms)
+{
+    uint64_t numerator;
+    uint32_t samples;
+
+    numerator = (uint64_t)Audio_Driver_GetActiveOutputSampleRate() * (uint64_t)time_ms;
+    samples = (uint32_t)((numerator + 999ull) / 1000ull);
+    if (samples == 0u)
+    {
+        samples = 1u;
+    }
+
+    return samples;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  내부 유틸: app waveform -> pure timbre 매핑                                 */
+/*                                                                            */
+/*  continuous vario tone은                                                    */
+/*  - 음색의 화려함보다 위상 연속성과 저지연 갱신이 더 중요하므로              */
+/*  - 기존 pure timbre를 그대로 재사용한다.                                   */
+/* -------------------------------------------------------------------------- */
+static audio_timbre_preset_id_t Audio_Driver_MapWaveformToPureTimbre(app_audio_waveform_t waveform)
+{
+    switch (waveform)
+    {
+    case APP_AUDIO_WAVEFORM_SAW:
+        return AUDIO_TIMBRE_PURE_SAW;
+
+    case APP_AUDIO_WAVEFORM_SQUARE:
+        return AUDIO_TIMBRE_PURE_SQUARE;
+
+    case APP_AUDIO_WAVEFORM_SINE:
+    default:
+        return AUDIO_TIMBRE_PURE_SINE;
+    }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  내부 유틸: continuous vario runtime 즉시 clear                              */
+/* -------------------------------------------------------------------------- */
+static void Audio_Driver_ClearVarioState(void)
+{
+    memset(&s_audio_rt.vario, 0, sizeof(s_audio_rt.vario));
+}
+
+/* -------------------------------------------------------------------------- */
+/*  내부 유틸: current 값을 target 쪽으로 1 sample 전진                         */
+/*                                                                            */
+/*  step 계산 정책                                                             */
+/*  - target과 current의 차이를                                               */
+/*    남은 slew sample 수로 나눈 ceil 값을 1-step으로 사용한다.                */
+/*  - 이렇게 하면 target이 바뀌더라도                                          */
+/*    항상 유한 시간 안에 부드럽게 도착한다.                                  */
+/* -------------------------------------------------------------------------- */
+static void Audio_Driver_VarioAdvanceOneSample(void)
+{
+    audio_vario_runtime_t *vario;
+    audio_voice_runtime_t *voice;
+    uint32_t denom;
+
+    vario = &s_audio_rt.vario;
+    if (vario->active == 0u)
+    {
+        return;
+    }
+
+    if (AUDIO_VARIO_VOICE_INDEX >= APP_AUDIO_MAX_VOICES)
+    {
+        Audio_Driver_ClearVarioState();
+        return;
+    }
+
+    voice = &s_audio_rt.voices[AUDIO_VARIO_VOICE_INDEX];
+    if ((voice->active == 0u) || (voice->timbre == 0))
+    {
+        Audio_Driver_ClearVarioState();
+        return;
+    }
+
+    if (voice->phase_inc_q32 != vario->target_phase_inc_q32)
+    {
+        uint64_t diff;
+        uint32_t step;
+
+        diff = (voice->phase_inc_q32 > vario->target_phase_inc_q32) ?
+               ((uint64_t)voice->phase_inc_q32 - (uint64_t)vario->target_phase_inc_q32) :
+               ((uint64_t)vario->target_phase_inc_q32 - (uint64_t)voice->phase_inc_q32);
+
+        denom = (vario->freq_slew_samples == 0u) ? 1u : vario->freq_slew_samples;
+        step = (uint32_t)((diff + (uint64_t)denom - 1ull) / (uint64_t)denom);
+        if (step == 0u)
+        {
+            step = 1u;
+        }
+
+        if (voice->phase_inc_q32 < vario->target_phase_inc_q32)
+        {
+            if (diff <= (uint64_t)step)
+            {
+                voice->phase_inc_q32 = vario->target_phase_inc_q32;
+            }
+            else
+            {
+                voice->phase_inc_q32 += step;
+            }
+        }
+        else
+        {
+            if (diff <= (uint64_t)step)
+            {
+                voice->phase_inc_q32 = vario->target_phase_inc_q32;
+            }
+            else
+            {
+                voice->phase_inc_q32 -= step;
+            }
+        }
+    }
+
+    if (voice->velocity_q15 != vario->target_level_q15)
+    {
+        uint32_t diff;
+        uint32_t step;
+
+        diff = (voice->velocity_q15 > vario->target_level_q15) ?
+               ((uint32_t)voice->velocity_q15 - (uint32_t)vario->target_level_q15) :
+               ((uint32_t)vario->target_level_q15 - (uint32_t)voice->velocity_q15);
+
+        denom = (vario->level_slew_samples == 0u) ? 1u : vario->level_slew_samples;
+        step = (diff + denom - 1u) / denom;
+        if (step == 0u)
+        {
+            step = 1u;
+        }
+
+        if (voice->velocity_q15 < vario->target_level_q15)
+        {
+            if (diff <= step)
+            {
+                voice->velocity_q15 = vario->target_level_q15;
+            }
+            else
+            {
+                voice->velocity_q15 = (uint16_t)(voice->velocity_q15 + step);
+            }
+        }
+        else
+        {
+            if (diff <= step)
+            {
+                voice->velocity_q15 = vario->target_level_q15;
+            }
+            else
+            {
+                voice->velocity_q15 = (uint16_t)(voice->velocity_q15 - step);
+            }
+        }
+    }
+
+    if ((vario->stop_requested != 0u) &&
+        (voice->velocity_q15 == 0u))
+    {
+        Audio_Driver_ClearVoice(AUDIO_VARIO_VOICE_INDEX);
+        Audio_Driver_ClearVarioState();
+        Audio_Driver_UpdateActiveVoiceCount();
+    }
+}
+
 /* -------------------------------------------------------------------------- */
 /*  내부 유틸: content name 갱신                                               */
 /* -------------------------------------------------------------------------- */
@@ -1323,6 +1557,16 @@ static void Audio_Driver_ClearVoice(uint32_t voice_index)
 
     memset(&s_audio_rt.voices[voice_index], 0, sizeof(s_audio_rt.voices[voice_index]));
     s_audio_rt.voices[voice_index].env_phase = APP_AUDIO_ENV_OFF;
+
+    /* ------------------------------------------------------------------ */
+    /*  voice 0은 continuous vario tone 전용 slot로 재사용될 수 있으므로    */
+    /*  외부 이유로 이 voice가 비워졌다면 vario runtime도 함께 내린다.      */
+    /* ------------------------------------------------------------------ */
+    if (voice_index == AUDIO_VARIO_VOICE_INDEX)
+    {
+        Audio_Driver_ClearVarioState();
+    }
+
     Audio_Driver_PublishVoiceSnapshot(voice_index);
 }
 
@@ -1378,6 +1622,7 @@ static void Audio_Driver_StopContentInternal(void)
 
     Audio_Driver_ClearSequence();
     Audio_Driver_WavClose();
+    Audio_Driver_ClearVarioState();
     Audio_Driver_ClearAllVoices();
 
     /* ---------------------------------------------------------------------- */
@@ -2544,6 +2789,15 @@ static void Audio_Driver_RenderBlock(uint16_t *dst,
             Audio_Driver_SequenceAdvanceOneSample();
         }
 
+        /* ------------------------------------------------------------------ */
+        /*  continuous vario tone은                                             */
+        /*  voice를 재시작하지 않고                                             */
+        /*  sample 단위로 phase increment / level을 천천히 움직인다.            */
+        /*  이 호출이 바로 "끊어치는 note" 대신                                */
+        /*  "연속 oscillator glide" 를 만드는 핵심이다.                        */
+        /* ------------------------------------------------------------------ */
+        Audio_Driver_VarioAdvanceOneSample();
+
         mixed_accum_s16 = 0;
         active_source_count = 0u;
 
@@ -2820,6 +3074,181 @@ static HAL_StatusTypeDef Audio_Driver_PlaySimpleTone(audio_timbre_preset_id_t ti
 
     Audio_Driver_PrimeWholeBuffer(HAL_GetTick());
     return HAL_OK;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  공개 API: continuous vario tone 시작                                       */
+/* -------------------------------------------------------------------------- */
+HAL_StatusTypeDef Audio_Driver_VarioStart(app_audio_waveform_t waveform,
+                                          uint32_t initial_freq_hz,
+                                          uint16_t initial_level_permille)
+{
+    audio_timbre_preset_id_t timbre_id;
+    audio_voice_runtime_t *voice;
+    char name_buffer[APP_AUDIO_NAME_MAX];
+    const char *wave_name;
+
+    if (initial_freq_hz < AUDIO_VARIO_MIN_FREQ_HZ)
+    {
+        initial_freq_hz = AUDIO_VARIO_MIN_FREQ_HZ;
+    }
+    if (initial_freq_hz > AUDIO_VARIO_MAX_FREQ_HZ)
+    {
+        initial_freq_hz = AUDIO_VARIO_MAX_FREQ_HZ;
+    }
+    if (initial_level_permille > 1000u)
+    {
+        initial_level_permille = 1000u;
+    }
+
+    if (Audio_Driver_ApplyOutputSampleRate(AUDIO_SAMPLE_RATE_HZ) != HAL_OK)
+    {
+        return HAL_ERROR;
+    }
+
+    timbre_id = Audio_Driver_MapWaveformToPureTimbre(waveform);
+
+    /* ------------------------------------------------------------------ */
+    /*  새 waveform으로 바뀌는 순간에는                                     */
+    /*  이전 content/FIFO를 비우고 voice 하나를 긴 sustain note로 다시 건다. */
+    /*  이후의 변화는 Start가 아니라 SetTarget만으로 처리한다.              */
+    /* ------------------------------------------------------------------ */
+    Audio_Driver_StopContentInternal();
+
+    Audio_Driver_StartVoice(AUDIO_VARIO_VOICE_INDEX,
+                            0u,
+                            timbre_id,
+                            initial_freq_hz * 100u,
+                            AUDIO_VARIO_LONG_NOTE_SAMPLES,
+                            AUDIO_VARIO_LONG_NOTE_SAMPLES,
+                            initial_level_permille);
+
+    voice = &s_audio_rt.voices[AUDIO_VARIO_VOICE_INDEX];
+    voice->note_hz_x100 = initial_freq_hz * 100u;
+    voice->phase_inc_q32 = Audio_Driver_FrequencyToPhaseIncQ32(initial_freq_hz * 100u);
+    voice->velocity_q15 = Audio_Driver_PermilleToQ15(initial_level_permille);
+
+    memset(&s_audio_rt.vario, 0, sizeof(s_audio_rt.vario));
+    s_audio_rt.vario.active = 1u;
+    s_audio_rt.vario.waveform_id = (uint8_t)waveform;
+    s_audio_rt.vario.freq_slew_samples = Audio_Driver_MillisecondsToSamples(AUDIO_VARIO_DEFAULT_GLIDE_MS);
+    s_audio_rt.vario.level_slew_samples = Audio_Driver_MillisecondsToSamples(AUDIO_VARIO_DEFAULT_GLIDE_MS);
+    s_audio_rt.vario.target_freq_hz_x100 = initial_freq_hz * 100u;
+    s_audio_rt.vario.target_phase_inc_q32 = voice->phase_inc_q32;
+    s_audio_rt.vario.target_level_q15 = voice->velocity_q15;
+
+    ((app_audio_state_t *)&g_app_state.audio)->mode = APP_AUDIO_MODE_TONE;
+    ((app_audio_state_t *)&g_app_state.audio)->content_active = true;
+    ((app_audio_state_t *)&g_app_state.audio)->wav_active = false;
+    ((app_audio_state_t *)&g_app_state.audio)->wav_native_rate_active = false;
+    ((app_audio_state_t *)&g_app_state.audio)->playback_start_ms = HAL_GetTick();
+
+    switch (waveform)
+    {
+    case APP_AUDIO_WAVEFORM_SAW:
+        wave_name = "VARIO_SAW";
+        break;
+    case APP_AUDIO_WAVEFORM_SQUARE:
+        wave_name = "VARIO_SQUARE";
+        break;
+    case APP_AUDIO_WAVEFORM_SINE:
+    default:
+        wave_name = "VARIO_SINE";
+        break;
+    }
+
+    Audio_Driver_BuildToneName(name_buffer, sizeof(name_buffer), wave_name, initial_freq_hz);
+    Audio_Driver_SetCurrentName(name_buffer);
+    Audio_Driver_PublishVoiceSnapshot(AUDIO_VARIO_VOICE_INDEX);
+    Audio_Driver_UpdateActiveVoiceCount();
+    Audio_Driver_PrimeWholeBuffer(HAL_GetTick());
+
+    return HAL_OK;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  공개 API: continuous vario target 갱신                                     */
+/* -------------------------------------------------------------------------- */
+HAL_StatusTypeDef Audio_Driver_VarioSetTarget(uint32_t target_freq_hz,
+                                              uint16_t target_level_permille,
+                                              uint32_t glide_time_ms)
+{
+    audio_voice_runtime_t *voice;
+
+    if (s_audio_rt.vario.active == 0u)
+    {
+        return HAL_ERROR;
+    }
+
+    if (target_freq_hz < AUDIO_VARIO_MIN_FREQ_HZ)
+    {
+        target_freq_hz = AUDIO_VARIO_MIN_FREQ_HZ;
+    }
+    if (target_freq_hz > AUDIO_VARIO_MAX_FREQ_HZ)
+    {
+        target_freq_hz = AUDIO_VARIO_MAX_FREQ_HZ;
+    }
+    if (target_level_permille > 1000u)
+    {
+        target_level_permille = 1000u;
+    }
+    if (glide_time_ms == 0u)
+    {
+        glide_time_ms = AUDIO_VARIO_DEFAULT_GLIDE_MS;
+    }
+
+    voice = &s_audio_rt.voices[AUDIO_VARIO_VOICE_INDEX];
+    if (voice->active == 0u)
+    {
+        return HAL_ERROR;
+    }
+
+    s_audio_rt.vario.stop_requested = 0u;
+    s_audio_rt.vario.freq_slew_samples = Audio_Driver_MillisecondsToSamples(glide_time_ms);
+    s_audio_rt.vario.level_slew_samples = Audio_Driver_MillisecondsToSamples(glide_time_ms);
+    s_audio_rt.vario.target_freq_hz_x100 = target_freq_hz * 100u;
+    s_audio_rt.vario.target_phase_inc_q32 = Audio_Driver_FrequencyToPhaseIncQ32(target_freq_hz * 100u);
+    s_audio_rt.vario.target_level_q15 = Audio_Driver_PermilleToQ15(target_level_permille);
+
+    /* ------------------------------------------------------------------ */
+    /*  APP_STATE snapshot은 현재 voice의 note_hz_x100 필드를 자주 보므로     */
+    /*  여기에는 최종 target 주파수를 기록해 두어                            */
+    /*  디버그 화면에서 "현재 어디를 향해 가는지" 를 알 수 있게 한다.       */
+    /* ------------------------------------------------------------------ */
+    voice->note_hz_x100 = s_audio_rt.vario.target_freq_hz_x100;
+    Audio_Driver_PublishVoiceSnapshot(AUDIO_VARIO_VOICE_INDEX);
+    return HAL_OK;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  공개 API: continuous vario tone 정지                                       */
+/* -------------------------------------------------------------------------- */
+HAL_StatusTypeDef Audio_Driver_VarioStop(uint32_t release_time_ms)
+{
+    if (s_audio_rt.vario.active == 0u)
+    {
+        return HAL_OK;
+    }
+
+    if (release_time_ms == 0u)
+    {
+        Audio_Driver_StopContentInternal();
+        return HAL_OK;
+    }
+
+    s_audio_rt.vario.stop_requested = 1u;
+    s_audio_rt.vario.target_level_q15 = 0u;
+    s_audio_rt.vario.level_slew_samples = Audio_Driver_MillisecondsToSamples(release_time_ms);
+    s_audio_rt.vario.freq_slew_samples = Audio_Driver_MillisecondsToSamples(release_time_ms);
+    return HAL_OK;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  공개 API: continuous vario active 여부                                     */
+/* -------------------------------------------------------------------------- */
+bool Audio_Driver_IsVarioActive(void)
+{
+    return (s_audio_rt.vario.active != 0u) ? true : false;
 }
 
 /* -------------------------------------------------------------------------- */

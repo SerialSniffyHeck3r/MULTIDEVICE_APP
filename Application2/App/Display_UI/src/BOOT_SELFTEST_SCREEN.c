@@ -265,11 +265,25 @@ static void BOOT_SELFTEST_SCREEN_BuildItemStateText(const selftest_item_report_t
         break;
 
     case SELFTEST_ITEM_STATE_PASS:
-        (void)snprintf(out_text, out_size, "OK");
+        if (item->short_text[0] != '\0')
+        {
+            (void)snprintf(out_text, out_size, "%s", item->short_text);
+        }
+        else
+        {
+            (void)snprintf(out_text, out_size, "OK");
+        }
         break;
 
     case SELFTEST_ITEM_STATE_FAIL:
-        (void)snprintf(out_text, out_size, "FAIL");
+        if (item->short_text[0] != '\0')
+        {
+            (void)snprintf(out_text, out_size, "%s", item->short_text);
+        }
+        else
+        {
+            (void)snprintf(out_text, out_size, "FAIL");
+        }
         break;
 
     case SELFTEST_ITEM_STATE_IDLE:

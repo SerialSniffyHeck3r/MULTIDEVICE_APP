@@ -526,7 +526,7 @@ static void SELFTEST_TaskGps(uint32_t now_ms)
     {
         if (SELFTEST_TimeDue(now_ms, item->deadline_ms) != 0u)
         {
-            SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_GPS, "FAIL RX TIMEOUT");
+            SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_GPS, "ERROR G-3");
         }
         return;
     }
@@ -555,13 +555,13 @@ static void SELFTEST_TaskGps(uint32_t now_ms)
 
     if (s_selftest.gps.hit_count >= SELFTEST_GPS_REQUIRED_HITS)
     {
-        SELFTEST_FinishPass(item, now_ms, "OK RX 5/5");
+        SELFTEST_FinishPass(item, now_ms, "GPS OK!");
         return;
     }
 
     if (SELFTEST_TimeDue(now_ms, item->deadline_ms) != 0u)
     {
-        SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_GPS, "FAIL RX TIMEOUT");
+        SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_GPS, "ERROR G-3L"); // FAIL RX TIMEOUT
     }
 }
 
@@ -598,31 +598,31 @@ static void SELFTEST_TaskImu(uint32_t now_ms)
         {
             if (s_selftest.imu.mpu_id_ok == 0u)
             {
-                SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, "FAIL MPU ID");
+                SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, "ERROR 1-1");
             }
             else if (s_selftest.imu.mag_id_ok == 0u)
             {
-                SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, "FAIL MAG ID");
+                SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, "ERROR 2-1");
             }
             else if (s_selftest.imu.mpu_flow_ok == 0u)
             {
-                SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, "FAIL MPU FLOW");
+                SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, "ERROR 2-2");
             }
             else if (s_selftest.imu.mag_flow_ok == 0u)
             {
-                SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, "FAIL MAG FLOW");
+                SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, "ERROR 3-2");
             }
             else if (s_selftest.imu.baro_flow_ok == 0u)
             {
-                SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, "FAIL BARO FLOW");
+                SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, "ERROR 4-2");
             }
             else if (s_selftest.imu.accel_sanity_ok == 0u)
             {
-                SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, "FAIL ACCEL SANITY");
+                SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, "ERROR 5-3");
             }
             else
             {
-                SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, "FAIL BARO SANITY");
+                SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, "ERROR 4-3");
             }
         }
         return;
@@ -692,12 +692,59 @@ static void SELFTEST_TaskImu(uint32_t now_ms)
         s_selftest.imu.accel_sanity_ok = 1u;
     }
 
-    if ((imu_snapshot.baro.pressure_pa > 30000) &&
-        (imu_snapshot.baro.pressure_pa < 120000) &&
-        (imu_snapshot.baro.temp_cdeg > -5000) &&
-        (imu_snapshot.baro.temp_cdeg < 8500))
+    /* ---------------------------------------------------------------------- */
+    /* BARO sanity check                                                       */
+    /*                                                                        */
+    /* 기존 구현은 pressure_pa 와 temp_cdeg 가 부팅 초반부터 즉시             */
+    /* 현실 범위에 들어와야만 PASS 시켰다.                                     */
+    /*                                                                        */
+    /* 그러나 실제 장비에서는 BARO flow/sample_count 와 VALID 비트는 먼저     */
+    /* 올라오고, pressure_pa 최종값은 몇 샘플 뒤에 안정화될 수 있다.          */
+    /* 그래서 여기서는 다음 조건을 만족하면 BARO sanity 를 PASS 시킨다.       */
+    /*                                                                        */
+    /* 1) BARO init 성공 비트가 이미 올라와 있을 것                            */
+    /* 2) BARO VALID 비트가 이미 올라와 있을 것                                */
+    /* 3) baseline 대비 새 BARO 샘플이 2회 이상 들어왔을 것                    */
+    /* 4) pressure_pa 또는 pressure_hpa_x100 중 하나가 현실 범위일 것          */
+    /*                                                                        */
+    /* 주의                                                                    */
+    /* - pressure_hpa_x100 는 0.01 hPa 단위이며, 숫자 크기상 sea-level 부근     */
+    /*   값이 pressure_pa 와 동일한 101325 근처가 된다.                        */
+    /* - 온도는 부트 초반 변동 때문에 hard fail 조건에서 제외하고,             */
+    /*   pressure 값 안정성과 샘플 진행성을 더 중요하게 본다.                  */
+    /* ---------------------------------------------------------------------- */
     {
-        s_selftest.imu.baro_sanity_ok = 1u;
+        uint32_t baro_new_samples;
+        uint8_t baro_pressure_ok;
+
+        baro_new_samples = 0u;
+        if (imu_snapshot.baro.sample_count > s_selftest.imu.baseline_baro_samples)
+        {
+            baro_new_samples =
+                imu_snapshot.baro.sample_count - s_selftest.imu.baseline_baro_samples;
+        }
+
+        baro_pressure_ok = 0u;
+
+        if ((imu_snapshot.baro.pressure_pa > 30000) &&
+            (imu_snapshot.baro.pressure_pa < 120000))
+        {
+            baro_pressure_ok = 1u;
+        }
+
+        if ((imu_snapshot.baro.pressure_hpa_x100 > 30000) &&
+            (imu_snapshot.baro.pressure_hpa_x100 < 120000))
+        {
+            baro_pressure_ok = 1u;
+        }
+
+        if (((imu_snapshot.debug.init_ok_mask & APP_GY86_DEVICE_BARO) != 0u) &&
+            ((imu_snapshot.status_flags & APP_GY86_STATUS_BARO_VALID) != 0u) &&
+            (baro_new_samples >= 2u) &&
+            (baro_pressure_ok != 0u))
+        {
+            s_selftest.imu.baro_sanity_ok = 1u;
+        }
     }
 
     item->progress_value = SELFTEST_ImuScore();
@@ -709,7 +756,7 @@ static void SELFTEST_TaskImu(uint32_t now_ms)
 
     if (item->progress_value >= item->progress_target)
     {
-        SELFTEST_FinishPass(item, now_ms, "OK MPU/MAG/BARO");
+        SELFTEST_FinishPass(item, now_ms, "SENSORS OK!"); // OK MPU/MAG/BARO
         return;
     }
 
@@ -717,31 +764,31 @@ static void SELFTEST_TaskImu(uint32_t now_ms)
     {
         if (s_selftest.imu.mpu_id_ok == 0u)
         {
-            SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, "FAIL MPU ID");
+            SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, "ERROR 1-1L"); //FAIL MPU ID
         }
         else if (s_selftest.imu.mag_id_ok == 0u)
         {
-            SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, "FAIL MAG ID");
+            SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, "ERROR 2-1L"); //FAIL MAG ID
         }
         else if (s_selftest.imu.mpu_flow_ok == 0u)
         {
-            SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, "FAIL MPU FLOW");
+            SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, "ERROR 2-2L"); //FAIL MPU FLOW
         }
         else if (s_selftest.imu.mag_flow_ok == 0u)
         {
-            SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, "FAIL MAG FLOW");
+            SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, "ERROR 3-2L"); //FAIL MAG FLOW
         }
         else if (s_selftest.imu.baro_flow_ok == 0u)
         {
-            SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, "FAIL BARO FLOW");
+            SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, "ERROR 4-2L"); //FAIL BARO FLOW
         }
         else if (s_selftest.imu.accel_sanity_ok == 0u)
         {
-            SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, "FAIL ACCEL SANITY");
+            SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, "ERROR 5-3L"); //FAIL ACCEL SANITY
         }
         else
         {
-            SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, "FAIL BARO SANITY");
+            SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, "ERROR 4-3L"); //FAIL BARO SANITY
         }
     }
 }
@@ -771,11 +818,11 @@ static void SELFTEST_TaskSensors(uint32_t now_ms)
         {
             if (s_selftest.sensors.ds18_ok == 0u)
             {
-                SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_SENSORS, "FAIL DS18");
+                SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_SENSORS, "ERROR T-1"); // ds18 fail
             }
             else
             {
-                SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_SENSORS, "FAIL BRIGHTNESS");
+                SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_SENSORS, "ERROR B-1"); // brt fail
             }
         }
         return;
@@ -815,7 +862,7 @@ static void SELFTEST_TaskSensors(uint32_t now_ms)
 
     if (item->progress_value >= item->progress_target)
     {
-        SELFTEST_FinishPass(item, now_ms, "OK DS18/LUX");
+        SELFTEST_FinishPass(item, now_ms, "SENSORS OK!");
         return;
     }
 
@@ -823,11 +870,11 @@ static void SELFTEST_TaskSensors(uint32_t now_ms)
     {
         if (s_selftest.sensors.ds18_ok == 0u)
         {
-            SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_SENSORS, "FAIL DS18");
+            SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_SENSORS, "ERROR T-2");
         }
         else
         {
-            SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_SENSORS, "FAIL BRIGHTNESS");
+            SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_SENSORS, "ERROR B-2");
         }
     }
 }
@@ -863,15 +910,15 @@ static void SELFTEST_TaskHardware(uint32_t now_ms)
         {
             if (s_selftest.hardware.flash_ok == 0u)
             {
-                SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_HARDWARE, "FAIL SPI FLASH");
+                SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_HARDWARE, "ERROR F-1"); // flash err
             }
             else if (s_selftest.hardware.rtc_ok == 0u)
             {
-                SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_HARDWARE, "FAIL RTC");
+                SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_HARDWARE, "ERROR R-1"); // rtc err
             }
             else
             {
-                SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_HARDWARE, "FAIL SD");
+                SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_HARDWARE, "ERROR S-1"); // d err
             }
         }
         return;
@@ -957,11 +1004,11 @@ static void SELFTEST_TaskHardware(uint32_t now_ms)
     {
         if (s_selftest.hardware.sd_required != 0u)
         {
-            SELFTEST_FinishPass(item, now_ms, "OK RTC/FLASH/SD");
+            SELFTEST_FinishPass(item, now_ms, "H/W OK");
         }
         else
         {
-            SELFTEST_FinishPass(item, now_ms, "OK RTC/FLASH");
+            SELFTEST_FinishPass(item, now_ms, "RTC/FLASH OK");
         }
         return;
     }
@@ -970,15 +1017,15 @@ static void SELFTEST_TaskHardware(uint32_t now_ms)
     {
         if (s_selftest.hardware.flash_ok == 0u)
         {
-            SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_HARDWARE, "FAIL SPI FLASH");
+            SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_HARDWARE, "ERROR F-2");
         }
         else if (s_selftest.hardware.rtc_ok == 0u)
         {
-            SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_HARDWARE, "FAIL RTC");
+            SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_HARDWARE, "ERROR R-2");
         }
         else
         {
-            SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_HARDWARE, "FAIL SD");
+            SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_HARDWARE, "ERROR S-2");
         }
     }
 }

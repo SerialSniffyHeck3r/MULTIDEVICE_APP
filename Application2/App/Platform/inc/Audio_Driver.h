@@ -294,6 +294,30 @@ HAL_StatusTypeDef Audio_Driver_PlaySquareWaveMs(uint32_t freq_hz,
 HAL_StatusTypeDef Audio_Driver_PlaySawToothWaveMs(uint32_t freq_hz,
                                                   uint32_t time_ms);
 
+/* -------------------------------------------------------------------------- */
+/*  연속 위상 유지형 variometer tone API                                        */
+/*                                                                            */
+/*  설계 의도                                                                  */
+/*  - 기존 simple tone API는 호출할 때마다 FIFO/content를 새로 시작하므로       */
+/*    수십 ms 단위로 다시 호출하면 tone이 끊겨 들릴 수 있다.                   */
+/*  - 아래 API는 voice 1개를 길게 유지한 채                                    */
+/*    주파수와 레벨 target만 부드럽게 갱신해서                                 */
+/*    "뚜우~" 형태의 연속 vario tone을 만들기 위한 전용 경로다.                */
+/*                                                                            */
+/*  사용 규칙                                                                  */
+/*  - Start : waveform과 초기 freq/level로 연속 tone runtime을 시작            */
+/*  - SetTarget : 새 target freq/level을 glide_time_ms 동안 부드럽게 추종      */
+/*  - Stop : release_time_ms 동안 레벨을 0으로 낮춘 뒤 voice를 정리           */
+/* -------------------------------------------------------------------------- */
+HAL_StatusTypeDef Audio_Driver_VarioStart(app_audio_waveform_t waveform,
+                                          uint32_t initial_freq_hz,
+                                          uint16_t initial_level_permille);
+HAL_StatusTypeDef Audio_Driver_VarioSetTarget(uint32_t target_freq_hz,
+                                              uint16_t target_level_permille,
+                                              uint32_t glide_time_ms);
+HAL_StatusTypeDef Audio_Driver_VarioStop(uint32_t release_time_ms);
+bool Audio_Driver_IsVarioActive(void);
+
 /* square / saw는 자주 눌러 보는 quick test 용도로 default duration wrapper를 둔다. */
 #define Audio_Driver_PlaySquareWave(freq_hz) \
     Audio_Driver_PlaySquareWaveMs((freq_hz), AUDIO_DEFAULT_TEST_TONE_MS)

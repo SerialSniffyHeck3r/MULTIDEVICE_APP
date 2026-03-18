@@ -188,6 +188,83 @@
 #define APP_ALTITUDE_AUDIO_SINK_WARBLE_RATE_MAX_HZ 5.0f
 #endif
 
+
+#ifndef APP_ALTITUDE_AUDIO_CONTROL_TAU_MS
+#define APP_ALTITUDE_AUDIO_CONTROL_TAU_MS 260u
+#endif
+
+#ifndef APP_ALTITUDE_AUDIO_CONTROL_FREQ_GLIDE_MS
+#define APP_ALTITUDE_AUDIO_CONTROL_FREQ_GLIDE_MS 90u
+#endif
+
+#ifndef APP_ALTITUDE_AUDIO_CONTROL_LEVEL_GLIDE_MS
+#define APP_ALTITUDE_AUDIO_CONTROL_LEVEL_GLIDE_MS 36u
+#endif
+
+#ifndef APP_ALTITUDE_AUDIO_CONTROL_STOP_RELEASE_MS
+#define APP_ALTITUDE_AUDIO_CONTROL_STOP_RELEASE_MS 140u
+#endif
+
+#ifndef APP_ALTITUDE_AUDIO_MODE_ENTER_HOLD_MS
+#define APP_ALTITUDE_AUDIO_MODE_ENTER_HOLD_MS 80u
+#endif
+
+#ifndef APP_ALTITUDE_AUDIO_MODE_EXIT_HOLD_MS
+#define APP_ALTITUDE_AUDIO_MODE_EXIT_HOLD_MS 150u
+#endif
+
+#ifndef APP_ALTITUDE_AUDIO_LEVEL_MIN_PERMILLE
+#define APP_ALTITUDE_AUDIO_LEVEL_MIN_PERMILLE 620u
+#endif
+
+#ifndef APP_ALTITUDE_AUDIO_LEVEL_MAX_PERMILLE
+#define APP_ALTITUDE_AUDIO_LEVEL_MAX_PERMILLE 950u
+#endif
+
+#ifndef APP_ALTITUDE_AUDIO_CLIMB_ENTER_SCALE
+#define APP_ALTITUDE_AUDIO_CLIMB_ENTER_SCALE 1.30f
+#endif
+
+#ifndef APP_ALTITUDE_AUDIO_CLIMB_EXIT_SCALE
+#define APP_ALTITUDE_AUDIO_CLIMB_EXIT_SCALE 0.55f
+#endif
+
+#ifndef APP_ALTITUDE_AUDIO_SINK_ENTER_SCALE
+#define APP_ALTITUDE_AUDIO_SINK_ENTER_SCALE 3.40f
+#endif
+
+#ifndef APP_ALTITUDE_AUDIO_SINK_EXIT_SCALE
+#define APP_ALTITUDE_AUDIO_SINK_EXIT_SCALE 2.00f
+#endif
+
+#ifndef APP_ALTITUDE_AUDIO_CLIMB_ENTER_FLOOR_CMS
+#define APP_ALTITUDE_AUDIO_CLIMB_ENTER_FLOOR_CMS 45.0f
+#endif
+
+#ifndef APP_ALTITUDE_AUDIO_CLIMB_EXIT_FLOOR_CMS
+#define APP_ALTITUDE_AUDIO_CLIMB_EXIT_FLOOR_CMS 18.0f
+#endif
+
+#ifndef APP_ALTITUDE_AUDIO_SINK_ENTER_FLOOR_CMS
+#define APP_ALTITUDE_AUDIO_SINK_ENTER_FLOOR_CMS 120.0f
+#endif
+
+#ifndef APP_ALTITUDE_AUDIO_SINK_EXIT_FLOOR_CMS
+#define APP_ALTITUDE_AUDIO_SINK_EXIT_FLOOR_CMS 70.0f
+#endif
+
+#ifndef APP_ALTITUDE_BARO_VARIO_NOISE_SPREAD_GAIN
+#define APP_ALTITUDE_BARO_VARIO_NOISE_SPREAD_GAIN 0.45f
+#endif
+
+#ifndef APP_ALTITUDE_BARO_VARIO_NOISE_RESIDUAL_GAIN
+#define APP_ALTITUDE_BARO_VARIO_NOISE_RESIDUAL_GAIN 0.12f
+#endif
+
+#ifndef APP_ALTITUDE_BARO_VARIO_NOISE_MAX_SCALE
+#define APP_ALTITUDE_BARO_VARIO_NOISE_MAX_SCALE 5.0f
+#endif
+
 /* -------------------------------------------------------------------------- */
 /*  내부 런타임 저장소                                                         */
 /* -------------------------------------------------------------------------- */
@@ -218,6 +295,7 @@ typedef struct
     uint32_t last_audio_ms;
     uint32_t last_audio_owner_ms;
     uint32_t audio_cycle_start_ms;
+    uint32_t audio_mode_candidate_since_ms;
     uint32_t last_baro_sample_count;
     uint32_t last_baro_timestamp_ms;
     uint32_t last_gps_fix_update_ms;
@@ -225,6 +303,7 @@ typedef struct
     uint32_t last_mpu_timestamp_ms;
 
     int8_t   audio_mode;               /* -1: sink, 0: silent, +1: climb          */
+    int8_t   audio_mode_candidate;     /* hysteresis + hold 전 후보 mode          */
 
     /* ---------------------------------------------------------------------- */
     /*  Pressure / altitude intermediate states                                */
@@ -270,6 +349,20 @@ typedef struct
     /* ---------------------------------------------------------------------- */
     float home_noimu_cm;               /* no-IMU home absolute altitude           */
     float home_imu_cm;                 /* IMU home absolute altitude              */
+
+    /* ---------------------------------------------------------------------- */
+    /*  audio 전용 smoothing branch                                            */
+    /*                                                                        */
+    /*  core filter의 fast vario를 그대로 speaker에 꽂지 않고                  */
+    /*  귀에 들려줄 전용 branch를 한 번 더 둔다.                               */
+    /*                                                                        */
+    /*  audio_vario_smooth_cms는                                               */
+    /*  - mode hysteresis 판단                                                 */
+    /*  - 연속 oscillator target freq 산출                                     */
+    /*  - beep cadence gate target 산출                                        */
+    /*  에 공통으로 쓰이며, 화면/로그용 fast vario와는 의도적으로 분리된다.     */
+    /* ---------------------------------------------------------------------- */
+    float audio_vario_smooth_cms;
 
     float vario_fast_noimu_cms;        /* no-IMU fast display vario               */
     float vario_slow_noimu_cms;        /* no-IMU slow display vario               */
@@ -772,6 +865,58 @@ static float APP_ALTITUDE_ComputeAdaptiveBaroNoiseCm(const app_altitude_settings
 
     s_altitude_runtime.adaptive_baro_noise_cm = adaptive_noise_cm;
     return adaptive_noise_cm;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  baro velocity observation용 adaptive noise                                 */
+/*                                                                            */
+/*  핵심 아이디어                                                              */
+/*  - altitude update용 adaptive R는 이미 pressure residual을 보고 있다.       */
+/*  - 그런데 실제로 오디오와 fast vario를 가장 시끄럽게 만드는 경로는          */
+/*    altitude의 시간미분으로 만든 velocity observation이다.                   */
+/*                                                                            */
+/*  따라서 velocity observation에도                                            */
+/*  - raw derivative와 LPF derivative의 벌어짐                                */
+/*  - pressure residual envelope가 보여 주는 현재 공력/노이즈 상태             */
+/*  를 반영해 R를 자동으로 키워 준다.                                          */
+/*                                                                            */
+/*  결과                                                                      */
+/*  - 정지 bench에서 ±0.1hPa 수준 흔들림이 있을 때                            */
+/*    derivative 관측을 덜 믿게 되어 오디오 sign flip / 고속 잔떨림이 줄어든다. */
+/* -------------------------------------------------------------------------- */
+static float APP_ALTITUDE_ComputeAdaptiveBaroVarioNoiseCms(const app_altitude_settings_t *settings)
+{
+    float base_noise_cms;
+    float max_noise_cms;
+    float spread_cms;
+    float residual_cms;
+    float adaptive_noise_cms;
+
+    if (settings == 0)
+    {
+        return 50.0f;
+    }
+
+    base_noise_cms = (float)settings->baro_vario_measurement_noise_cms;
+    if (base_noise_cms < 1.0f)
+    {
+        base_noise_cms = 1.0f;
+    }
+
+    spread_cms = fabsf(s_altitude_runtime.baro_vario_raw_cms -
+                       s_altitude_runtime.baro_vario_filt_cms);
+    residual_cms = fabsf(s_altitude_runtime.baro_residual_lp_cm);
+
+    adaptive_noise_cms = base_noise_cms +
+                         (spread_cms * APP_ALTITUDE_BARO_VARIO_NOISE_SPREAD_GAIN) +
+                         (residual_cms * APP_ALTITUDE_BARO_VARIO_NOISE_RESIDUAL_GAIN);
+
+    max_noise_cms = base_noise_cms * APP_ALTITUDE_BARO_VARIO_NOISE_MAX_SCALE;
+    adaptive_noise_cms = APP_ALTITUDE_ClampF(adaptive_noise_cms,
+                                             base_noise_cms,
+                                             APP_ALTITUDE_ClampF(max_noise_cms, base_noise_cms, 500.0f));
+
+    return adaptive_noise_cms;
 }
 
 static bool APP_ALTITUDE_IsDisplayRestActive(const app_altitude_settings_t *settings,
@@ -1804,29 +1949,210 @@ static void APP_ALTITUDE_ResetAudioCycleIfNeeded(uint32_t now_ms, int8_t mode)
     }
 }
 
+/* -------------------------------------------------------------------------- */
+/*  audio hysteresis threshold 계산 helper                                     */
+/* -------------------------------------------------------------------------- */
+static float APP_ALTITUDE_ComputeAudioClimbEnterCms(const app_altitude_settings_t *settings)
+{
+    float deadband_cms;
+
+    deadband_cms = (settings != 0) ? (float)settings->audio_deadband_cms : 35.0f;
+    return APP_ALTITUDE_ClampF(APP_ALTITUDE_ClampF(deadband_cms * APP_ALTITUDE_AUDIO_CLIMB_ENTER_SCALE,
+                                                   APP_ALTITUDE_AUDIO_CLIMB_ENTER_FLOOR_CMS,
+                                                   500.0f),
+                               1.0f,
+                               500.0f);
+}
+
+static float APP_ALTITUDE_ComputeAudioClimbExitCms(const app_altitude_settings_t *settings)
+{
+    float deadband_cms;
+
+    deadband_cms = (settings != 0) ? (float)settings->audio_deadband_cms : 35.0f;
+    return APP_ALTITUDE_ClampF(APP_ALTITUDE_ClampF(deadband_cms * APP_ALTITUDE_AUDIO_CLIMB_EXIT_SCALE,
+                                                   APP_ALTITUDE_AUDIO_CLIMB_EXIT_FLOOR_CMS,
+                                                   500.0f),
+                               1.0f,
+                               500.0f);
+}
+
+static float APP_ALTITUDE_ComputeAudioSinkEnterCms(const app_altitude_settings_t *settings)
+{
+    float deadband_cms;
+
+    deadband_cms = (settings != 0) ? (float)settings->audio_deadband_cms : 35.0f;
+    return APP_ALTITUDE_ClampF(APP_ALTITUDE_ClampF(deadband_cms * APP_ALTITUDE_AUDIO_SINK_ENTER_SCALE,
+                                                   APP_ALTITUDE_AUDIO_SINK_ENTER_FLOOR_CMS,
+                                                   1200.0f),
+                               1.0f,
+                               1200.0f);
+}
+
+static float APP_ALTITUDE_ComputeAudioSinkExitCms(const app_altitude_settings_t *settings)
+{
+    float deadband_cms;
+
+    deadband_cms = (settings != 0) ? (float)settings->audio_deadband_cms : 35.0f;
+    return APP_ALTITUDE_ClampF(APP_ALTITUDE_ClampF(deadband_cms * APP_ALTITUDE_AUDIO_SINK_EXIT_SCALE,
+                                                   APP_ALTITUDE_AUDIO_SINK_EXIT_FLOOR_CMS,
+                                                   1200.0f),
+                               1.0f,
+                               1200.0f);
+}
+
+/* -------------------------------------------------------------------------- */
+/*  현재 smooth vario 기준으로 audio mode를 무엇으로 보고 싶은지 계산          */
+/*                                                                            */
+/*  mode 의미                                                                  */
+/*  - +1 : climb square waveform                                              */
+/*  -  0 : silent / neutral                                                   */
+/*  - -1 : sink saw waveform                                                  */
+/* -------------------------------------------------------------------------- */
+static int8_t APP_ALTITUDE_ComputeRequestedAudioMode(const app_altitude_settings_t *settings,
+                                                     float audio_vario_cms)
+{
+    float climb_enter_cms;
+    float climb_exit_cms;
+    float sink_enter_cms;
+    float sink_exit_cms;
+    int8_t current_mode;
+
+    climb_enter_cms = APP_ALTITUDE_ComputeAudioClimbEnterCms(settings);
+    climb_exit_cms  = APP_ALTITUDE_ComputeAudioClimbExitCms(settings);
+    sink_enter_cms  = APP_ALTITUDE_ComputeAudioSinkEnterCms(settings);
+    sink_exit_cms   = APP_ALTITUDE_ComputeAudioSinkExitCms(settings);
+    current_mode    = s_altitude_runtime.audio_mode;
+
+    if (current_mode > 0)
+    {
+        if (audio_vario_cms >= climb_exit_cms)
+        {
+            return 1;
+        }
+
+        if (audio_vario_cms <= -sink_enter_cms)
+        {
+            return -1;
+        }
+
+        return 0;
+    }
+
+    if (current_mode < 0)
+    {
+        if (audio_vario_cms <= -sink_exit_cms)
+        {
+            return -1;
+        }
+
+        if (audio_vario_cms >= climb_enter_cms)
+        {
+            return 1;
+        }
+
+        return 0;
+    }
+
+    if (audio_vario_cms >= climb_enter_cms)
+    {
+        return 1;
+    }
+
+    if (audio_vario_cms <= -sink_enter_cms)
+    {
+        return -1;
+    }
+
+    return 0;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  requested mode를 hold time까지 만족했을 때만 committed mode로 승격         */
+/*                                                                            */
+/*  이유                                                                       */
+/*  - fast vario가 threshold를 잠깐 스치는 순간                                 */
+/*    climb/sink waveform이 즉시 뒤집히면 귀에 매우 거칠게 들린다.            */
+/*  - 그래서 requested mode가 일정 시간 유지됐을 때만                         */
+/*    실제 audio mode를 바꾼다.                                                */
+/* -------------------------------------------------------------------------- */
+static int8_t APP_ALTITUDE_UpdateCommittedAudioMode(uint32_t now_ms,
+                                                    int8_t requested_mode)
+{
+    uint32_t hold_ms;
+
+    if (requested_mode != s_altitude_runtime.audio_mode_candidate)
+    {
+        s_altitude_runtime.audio_mode_candidate = requested_mode;
+        s_altitude_runtime.audio_mode_candidate_since_ms = now_ms;
+    }
+
+    if (requested_mode == s_altitude_runtime.audio_mode)
+    {
+        return s_altitude_runtime.audio_mode;
+    }
+
+    hold_ms = (requested_mode == 0) ?
+              APP_ALTITUDE_AUDIO_MODE_EXIT_HOLD_MS :
+              APP_ALTITUDE_AUDIO_MODE_ENTER_HOLD_MS;
+
+    if ((uint32_t)(now_ms - s_altitude_runtime.audio_mode_candidate_since_ms) < hold_ms)
+    {
+        return s_altitude_runtime.audio_mode;
+    }
+
+    return requested_mode;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  현재 speed scale로 audio level target을 계산                               */
+/* -------------------------------------------------------------------------- */
+static uint16_t APP_ALTITUDE_ComputeAudioLevelPermille(float scale, bool tone_on)
+{
+    float level_f;
+
+    if (tone_on == false)
+    {
+        return 0u;
+    }
+
+    scale = APP_ALTITUDE_Clamp01F(scale);
+    level_f = (float)APP_ALTITUDE_AUDIO_LEVEL_MIN_PERMILLE +
+              (((float)(APP_ALTITUDE_AUDIO_LEVEL_MAX_PERMILLE - APP_ALTITUDE_AUDIO_LEVEL_MIN_PERMILLE)) * scale);
+
+    return (uint16_t)APP_ALTITUDE_ClampU32((uint32_t)(level_f + 0.5f),
+                                           APP_ALTITUDE_AUDIO_LEVEL_MIN_PERMILLE,
+                                           APP_ALTITUDE_AUDIO_LEVEL_MAX_PERMILLE);
+}
+
 static void APP_ALTITUDE_HandleDebugAudio(uint32_t now_ms, const app_altitude_settings_t *settings)
 {
-    float vario_cms;
+    float vario_raw_cms;
+    float audio_dt_s;
+    float audio_vario_cms;
     float speed_abs_cms;
     float deadband_cms;
-    float audio_release_threshold_cms;
     float full_scale_cms;
     float scale;
+    float glide_ms_f;
     uint32_t cycle_period_ms;
     uint32_t tone_window_ms;
     uint32_t cycle_elapsed_ms;
-    uint32_t remaining_tone_ms;
-    uint32_t segment_target_ms;
-    uint32_t segment_ms;
+    uint32_t glide_ms;
     uint32_t freq_hz;
-    HAL_StatusTypeDef status;
-    int8_t audio_mode;
+    uint16_t level_permille;
+    int8_t previous_mode;
+    int8_t requested_mode;
+    int8_t committed_mode;
+    bool tone_on;
+    bool sink_mode;
+    app_audio_waveform_t waveform;
 
     if ((settings == 0) || (s_altitude_runtime.ui_active == false) || (settings->debug_audio_enabled == 0u))
     {
         g_app_state.altitude.debug_audio_active = 0u;
         g_app_state.altitude.debug_audio_vario_cms = 0;
         s_altitude_runtime.audio_mode = 0;
+        s_altitude_runtime.audio_mode_candidate = 0;
         APP_ALTITUDE_StopOwnedAudioIfNeeded();
         return;
     }
@@ -1834,88 +2160,98 @@ static void APP_ALTITUDE_HandleDebugAudio(uint32_t now_ms, const app_altitude_se
     g_app_state.altitude.debug_audio_active = 1u;
 
     /* ------------------------------------------------------------------ */
-    /*  사용자가 현재 비교 청취하고 싶은 vario source를 고른다.             */
-    /*  - 0 : no-IMU fast vario                                           */
-    /*  - 1 : IMU-aided fast vario                                        */
+    /*  neutral 상태에서 이미 우리 continuous vario voice가 완전히 내려갔다면 */
+    /*  ownership 플래그도 함께 해제해,                                     */
+    /*  이후 다른 오디오를 잘못 "내 소유" 로 오해하지 않게 한다.            */
     /* ------------------------------------------------------------------ */
-    vario_cms = APP_ALTITUDE_GetDebugAudioSourceVarioCms(settings);
-    g_app_state.altitude.debug_audio_vario_cms = APP_ALTITUDE_RoundFloatToS32(vario_cms);
-
-    speed_abs_cms = fabsf(vario_cms);
-    deadband_cms = (float)settings->audio_deadband_cms;
-
-    /* ------------------------------------------------------------------ */
-    /*  오디오 게이트에는 작은 hysteresis를 넣는다.                         */
-    /*                                                                      */
-    /*  이유                                                               */
-    /*  - fast vario가 deadband 근처에서 ±수 cm/s 흔들릴 때                */
-    /*    audio start/stop이 너무 자주 뒤집히면                            */
-    /*    "소리가 계속 켜졌다 꺼졌다"는 인상을 준다.                       */
-    /*  - estimator와 표시값은 그대로 두고                                 */
-    /*    오디오 게이트만 살짝 보수적으로 만들어                           */
-    /*    near-zero chatter만 줄인다.                                      */
-    /*                                                                      */
-    /*  현재 이미 audible mode 안에 들어와 있으면                           */
-    /*  exit threshold를 deadband의 75%로 낮춰                              */
-    /*  소리가 조금 더 매끈하게 이어지게 한다.                              */
-    /* ------------------------------------------------------------------ */
-    audio_release_threshold_cms = deadband_cms;
-    if (s_altitude_runtime.audio_mode != 0)
+    if ((Audio_Driver_IsVarioActive() == false) && (s_altitude_runtime.audio_mode == 0))
     {
-        audio_release_threshold_cms = deadband_cms * APP_ALTITUDE_AUDIO_GATE_EXIT_SCALE;
+        s_altitude_runtime.audio_owned = false;
     }
 
-    if (speed_abs_cms < audio_release_threshold_cms)
-    {
-        if ((s_altitude_runtime.audio_owned != false) &&
-            ((uint32_t)(now_ms - s_altitude_runtime.last_audio_owner_ms) > APP_ALTITUDE_UI_ONLY_AUDIO_OWNER_TIMEOUT_MS))
-        {
-            APP_ALTITUDE_StopOwnedAudioIfNeeded();
-        }
+    /* ------------------------------------------------------------------ */
+    /*  현재 선택된 fast vario source를 가져오고                            */
+    /*  audio 전용 branch에서 한 번 더 LPF 처리한다.                        */
+    /*  이 분기는 화면 표시용 fast vario와 의도적으로 분리되어 있다.        */
+    /* ------------------------------------------------------------------ */
+    vario_raw_cms = APP_ALTITUDE_GetDebugAudioSourceVarioCms(settings);
+    g_app_state.altitude.debug_audio_vario_cms = APP_ALTITUDE_RoundFloatToS32(vario_raw_cms);
 
-        s_altitude_runtime.audio_mode = 0;
-        return;
+    audio_dt_s = ((float)(now_ms - s_altitude_runtime.last_audio_ms)) * 0.001f;
+    audio_dt_s = APP_ALTITUDE_ClampF(audio_dt_s, APP_ALTITUDE_MIN_DT_S, APP_ALTITUDE_MAX_DT_S);
+    s_altitude_runtime.last_audio_ms = now_ms;
+
+    if (s_altitude_runtime.audio_vario_smooth_cms == 0.0f)
+    {
+        s_altitude_runtime.audio_vario_smooth_cms = vario_raw_cms;
+    }
+    else
+    {
+        s_altitude_runtime.audio_vario_smooth_cms = APP_ALTITUDE_LpfUpdate(s_altitude_runtime.audio_vario_smooth_cms,
+                                                                           vario_raw_cms,
+                                                                           APP_ALTITUDE_AUDIO_CONTROL_TAU_MS,
+                                                                           audio_dt_s);
     }
 
-    if (Audio_Driver_IsBusy() != false)
-    {
-        return;
-    }
+    audio_vario_cms = s_altitude_runtime.audio_vario_smooth_cms;
+    speed_abs_cms   = fabsf(audio_vario_cms);
+    deadband_cms    = (float)settings->audio_deadband_cms;
+    full_scale_cms  = APP_ALTITUDE_DEFAULT_CLIMB_FULL_SCALE_CMS;
 
-    full_scale_cms = APP_ALTITUDE_DEFAULT_CLIMB_FULL_SCALE_CMS;
     scale = (speed_abs_cms - deadband_cms) /
             APP_ALTITUDE_ClampF(full_scale_cms - deadband_cms, 1.0f, 10000.0f);
     scale = APP_ALTITUDE_Clamp01F(scale);
 
-    /* ------------------------------------------------------------------ */
-    /*  climb/sink mode에 따라 cadence cycle을 따로 가진다.                */
-    /*                                                                      */
-    /*  여기서 중요한 수정 포인트                                           */
-    /*  - 이전 버전은 tone window를 14ms 고정 조각으로 잘라                 */
-    /*    매 segment마다 simple tone API를 다시 시작했다.                  */
-    /*  - 그런데 현재 Audio_Driver simple tone API는                        */
-    /*    호출할 때마다 기존 content/FIFO를 정리하고 새 tone을 prime한다.   */
-    /*  - 그래서 14ms처럼 너무 짧은 조각은                                 */
-    /*    본래 의도보다 훨씬 끊겨 들릴 수 있다.                              */
-    /*                                                                      */
-    /*  이번 버전은                                                         */
-    /*  - cadence는 그대로 유지하고                                         */
-    /*  - 단일 beep 내부 FM/warble도 유지하되                               */
-    /*  - segment 길이를 "warble 주기"와 "DMA half-buffer 시간"을 기준으로 */
-    /*    동적으로 크게 잡아, audible continuity를 우선 확보한다.           */
-    /* ------------------------------------------------------------------ */
-    audio_mode = (vario_cms >= 0.0f) ? 1 : -1;
-    APP_ALTITUDE_ResetAudioCycleIfNeeded(now_ms, audio_mode);
+    previous_mode  = s_altitude_runtime.audio_mode;
+    requested_mode = APP_ALTITUDE_ComputeRequestedAudioMode(settings, audio_vario_cms);
+    committed_mode = APP_ALTITUDE_UpdateCommittedAudioMode(now_ms, requested_mode);
 
-    if (audio_mode > 0)
+    /* ------------------------------------------------------------------ */
+    /*  neutral zone에 들어가면 current oscillator를 서서히 감쇠시킨다.     */
+    /*  이렇게 하면 UI는 켜져 있어도 near-zero chatter가 바로 소리로        */
+    /*  튀어나오지 않는다.                                                   */
+    /* ------------------------------------------------------------------ */
+    if (committed_mode == 0)
     {
-        cycle_period_ms = APP_ALTITUDE_ComputeClimbCadencePeriodMs(settings, vario_cms);
-        tone_window_ms  = APP_ALTITUDE_ComputeClimbToneWindowMs(settings, vario_cms, cycle_period_ms);
+        s_altitude_runtime.audio_mode = 0;
+
+        if (Audio_Driver_IsVarioActive() != false)
+        {
+            (void)Audio_Driver_VarioStop(APP_ALTITUDE_AUDIO_CONTROL_STOP_RELEASE_MS);
+            s_altitude_runtime.last_audio_owner_ms = now_ms;
+            s_altitude_runtime.audio_owned = true;
+        }
+        else
+        {
+            s_altitude_runtime.audio_owned = false;
+        }
+
+        return;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  다른 오디오가 이미 재생 중인데 우리가 아직 owner가 아니면            */
+    /*  debug vario가 강제로 steal하지 않는다.                               */
+    /* ------------------------------------------------------------------ */
+    if ((Audio_Driver_IsBusy() != false) && (Audio_Driver_IsVarioActive() == false))
+    {
+        return;
+    }
+
+    APP_ALTITUDE_ResetAudioCycleIfNeeded(now_ms, committed_mode);
+
+    sink_mode = (committed_mode < 0) ? true : false;
+    waveform = sink_mode ? APP_AUDIO_WAVEFORM_SAW : APP_AUDIO_WAVEFORM_SQUARE;
+
+    if (committed_mode > 0)
+    {
+        cycle_period_ms = APP_ALTITUDE_ComputeClimbCadencePeriodMs(settings, audio_vario_cms);
+        tone_window_ms  = APP_ALTITUDE_ComputeClimbToneWindowMs(settings, audio_vario_cms, cycle_period_ms);
     }
     else
     {
-        tone_window_ms = APP_ALTITUDE_ComputeSinkToneWindowMs(settings, vario_cms);
-        cycle_period_ms = tone_window_ms + APP_ALTITUDE_ComputeSinkGapMs(settings, vario_cms);
+        tone_window_ms  = APP_ALTITUDE_ComputeSinkToneWindowMs(settings, audio_vario_cms);
+        cycle_period_ms = tone_window_ms + APP_ALTITUDE_ComputeSinkGapMs(settings, audio_vario_cms);
     }
 
     if (cycle_period_ms == 0u)
@@ -1929,52 +2265,55 @@ static void APP_ALTITUDE_HandleDebugAudio(uint32_t now_ms, const app_altitude_se
     }
 
     cycle_elapsed_ms = (uint32_t)(now_ms - s_altitude_runtime.audio_cycle_start_ms);
-    if (cycle_elapsed_ms >= tone_window_ms)
+    tone_on = (cycle_elapsed_ms < tone_window_ms) ? true : false;
+
+    if (committed_mode > 0)
     {
-        return;
-    }
-
-    remaining_tone_ms = tone_window_ms - cycle_elapsed_ms;
-
-    /* ------------------------------------------------------------------ */
-    /*  segment_target_ms는                                               */
-    /*  - climb: 대개 24~52ms                                              */
-    /*  - sink : 대개 24~88ms                                              */
-    /*  안쪽으로 잡힌다.                                                    */
-    /*                                                                      */
-    /*  결과적으로                                                          */
-    /*  - 단일 beep 내부에서 FM은 여전히 살아 있고                           */
-    /*  - "너무 잘게 쪼개서 틱틱 끊기는" 현상은 크게 줄어든다.               */
-    /* ------------------------------------------------------------------ */
-    segment_target_ms = APP_ALTITUDE_ComputeAudioSegmentTargetMs(scale,
-                                                                 tone_window_ms,
-                                                                 (audio_mode < 0) ? true : false);
-    segment_ms = (remaining_tone_ms < segment_target_ms) ?
-                 remaining_tone_ms :
-                 segment_target_ms;
-
-    if (audio_mode > 0)
-    {
-        freq_hz = APP_ALTITUDE_ApplyAudioWarbleHz(APP_ALTITUDE_ComputeClimbBaseFreqHz(settings, vario_cms),
-                                                  vario_cms,
+        freq_hz = APP_ALTITUDE_ApplyAudioWarbleHz(APP_ALTITUDE_ComputeClimbBaseFreqHz(settings, audio_vario_cms),
+                                                  audio_vario_cms,
                                                   scale,
                                                   now_ms,
                                                   false);
-        status = Audio_Driver_PlaySquareWaveMs(freq_hz, segment_ms);
     }
     else
     {
-        freq_hz = APP_ALTITUDE_ApplyAudioWarbleHz(APP_ALTITUDE_ComputeSinkBaseFreqHz(settings, vario_cms),
-                                                  vario_cms,
+        freq_hz = APP_ALTITUDE_ApplyAudioWarbleHz(APP_ALTITUDE_ComputeSinkBaseFreqHz(settings, audio_vario_cms),
+                                                  audio_vario_cms,
                                                   scale,
                                                   now_ms,
                                                   true);
-        status = Audio_Driver_PlaySawToothWaveMs(freq_hz, segment_ms);
     }
 
-    if (status == HAL_OK)
+    glide_ms_f = (float)APP_ALTITUDE_ComputeAudioSegmentTargetMs(scale,
+                                                                 tone_window_ms,
+                                                                 sink_mode);
+    glide_ms_f = APP_ALTITUDE_ClampF(glide_ms_f,
+                                     (float)APP_ALTITUDE_AUDIO_CONTROL_LEVEL_GLIDE_MS,
+                                     (float)APP_ALTITUDE_AUDIO_CONTROL_FREQ_GLIDE_MS);
+    glide_ms = (uint32_t)(glide_ms_f + 0.5f);
+    if (glide_ms < APP_ALTITUDE_AUDIO_CONTROL_LEVEL_GLIDE_MS)
     {
-        s_altitude_runtime.last_audio_ms = now_ms;
+        glide_ms = APP_ALTITUDE_AUDIO_CONTROL_LEVEL_GLIDE_MS;
+    }
+
+    level_permille = APP_ALTITUDE_ComputeAudioLevelPermille(scale, tone_on);
+
+    /* ------------------------------------------------------------------ */
+    /*  waveform이 바뀌거나 아직 continuous vario가 살아 있지 않으면         */
+    /*  여기서 한 번만 Start 하고, 그 뒤에는 SetTarget만 반복한다.          */
+    /* ------------------------------------------------------------------ */
+    if ((Audio_Driver_IsVarioActive() == false) || (previous_mode != committed_mode))
+    {
+        if (Audio_Driver_VarioStart(waveform, freq_hz, level_permille) != HAL_OK)
+        {
+            return;
+        }
+    }
+
+    if (Audio_Driver_VarioSetTarget(freq_hz,
+                                    level_permille,
+                                    glide_ms) == HAL_OK)
+    {
         s_altitude_runtime.last_audio_owner_ms = now_ms;
         s_altitude_runtime.audio_owned = true;
     }
@@ -1990,6 +2329,9 @@ void APP_ALTITUDE_Init(uint32_t now_ms)
     s_altitude_runtime.last_task_ms = now_ms;
     s_altitude_runtime.qnh_equiv_filt_hpa = ((float)g_app_state.settings.altitude.manual_qnh_hpa_x100) * 0.01f;
     s_altitude_runtime.audio_mode = 0;
+    s_altitude_runtime.audio_mode_candidate = 0;
+    s_altitude_runtime.audio_mode_candidate_since_ms = now_ms;
+    s_altitude_runtime.last_audio_ms = now_ms;
 
     g_app_state.altitude.initialized = true;
     g_app_state.altitude.qnh_manual_hpa_x100 = g_app_state.settings.altitude.manual_qnh_hpa_x100;
@@ -2027,6 +2369,7 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
     float baro_noise_cm;
     float baro_altitude_residual_cm;
     float baro_velocity_meas_cms;
+    float baro_velocity_noise_cms;
     float imu_vertical_cms2;
     float imu_predict_weight;
     float imu_predict_cms2;
@@ -2156,6 +2499,7 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
         baro_velocity_meas_cms = APP_ALTITUDE_UpdateBaroVarioMeasurement(settings,
                                                                          alt_qnh_cm,
                                                                          baro_dt_s);
+        baro_velocity_noise_cms = APP_ALTITUDE_ComputeAdaptiveBaroVarioNoiseCms(settings);
     }
     else if (alt_prev->baro_valid != false)
     {
@@ -2170,6 +2514,7 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
         }
 
         baro_velocity_meas_cms = (float)alt_prev->baro_vario_filt_cms;
+        baro_velocity_noise_cms = (float)settings->baro_vario_measurement_noise_cms;
     }
 
     /* ------------------------------------------------------------------ */
@@ -2235,7 +2580,21 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
     imu_vertical_cms2 = APP_ALTITUDE_UpdateImuVerticalAccelCms2(settings, mpu, dt_s, &imu_vector_valid);
 
     imu_predict_weight = APP_ALTITUDE_ClampF(s_altitude_runtime.imu_predict_weight_permille * 0.001f, 0.0f, 1.0f);
-    imu_predict_cms2 = imu_vertical_cms2 * imu_predict_weight;
+
+    /* ------------------------------------------------------------------ */
+    /*  APP_ALTITUDE_UpdateImuVerticalAccelCms2() 내부에서                  */
+    /*  vertical dynamic acceleration에는 이미 predict_weight가 한 번       */
+    /*  곱해져 있다.                                                        */
+    /*                                                                    */
+    /*  여기서 다시 한 번 곱하면 near-zero 구간에서                         */
+    /*  trust가 출렁일 때 가속도 입력이 과도하게 왜곡되고,                   */
+    /*  stationary burst tuning 감각도 나빠진다.                            */
+    /*                                                                    */
+    /*  따라서 KF4 predict에는                                              */
+    /*  "이미 trust-weighted 된 imu_vertical_cms2" 를 그대로 넣고,          */
+    /*  대신 measurement/process noise 쪽만 trust에 따라 키운다.             */
+    /* ------------------------------------------------------------------ */
+    imu_predict_cms2 = imu_vertical_cms2;
 
     imu_predict_noise_cms2 = (float)settings->imu_measurement_noise_cms2;
     imu_predict_noise_cms2 *= (1.0f + ((1.0f - imu_predict_weight) * 2.5f));
@@ -2315,12 +2674,12 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
     /*  - no-IMU filter의 반응성을 끌어올리고,                              */
     /*    IMU filter에도 velocity anchor를 하나 더 준다.                    */
     /* ------------------------------------------------------------------ */
-    if ((new_baro_sample != false) && (settings->baro_vario_measurement_noise_cms > 0u))
+    if ((new_baro_sample != false) && (baro_velocity_noise_cms > 0.0f))
     {
         if (s_altitude_runtime.kf_noimu.valid != false)
         {
             if (APP_ALTITUDE_IsResidualAccepted(baro_velocity_meas_cms - s_altitude_runtime.kf_noimu.x[1],
-                                                (float)settings->baro_vario_measurement_noise_cms,
+                                                baro_velocity_noise_cms,
                                                 APP_ALTITUDE_BARO_VELOCITY_GATE_SIGMA,
                                                 APP_ALTITUDE_BARO_VELOCITY_GATE_FLOOR_CMS) != false)
             {
@@ -2328,14 +2687,14 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
                                               s_altitude_runtime.kf_noimu.P,
                                               H_vel3,
                                               baro_velocity_meas_cms,
-                                              APP_ALTITUDE_SquareF((float)settings->baro_vario_measurement_noise_cms));
+                                              APP_ALTITUDE_SquareF(baro_velocity_noise_cms));
             }
         }
 
         if (s_altitude_runtime.kf_imu.valid != false)
         {
             if (APP_ALTITUDE_IsResidualAccepted(baro_velocity_meas_cms - s_altitude_runtime.kf_imu.x[1],
-                                                (float)settings->baro_vario_measurement_noise_cms,
+                                                baro_velocity_noise_cms,
                                                 APP_ALTITUDE_BARO_VELOCITY_GATE_SIGMA,
                                                 APP_ALTITUDE_BARO_VELOCITY_GATE_FLOOR_CMS) != false)
             {
@@ -2343,7 +2702,7 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
                                               s_altitude_runtime.kf_imu.P,
                                               H_vel4,
                                               baro_velocity_meas_cms,
-                                              APP_ALTITUDE_SquareF((float)settings->baro_vario_measurement_noise_cms));
+                                              APP_ALTITUDE_SquareF(baro_velocity_noise_cms));
             }
         }
     }
