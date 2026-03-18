@@ -91,13 +91,30 @@ static void APP_STATE_ApplyDefaultSettingsUnlocked(void)
         /*  - stationary burst 억제를 위해 rest display와 ZUPT를 켠다.        */
         /* ------------------------------------------------------------------ */
         g_app_state.settings.altitude.manual_qnh_hpa_x100            = 101325;
-        g_app_state.settings.altitude.gps_auto_equiv_qnh_enabled     = 1u;
-        g_app_state.settings.altitude.gps_bias_correction_enabled    = 1u;
-        g_app_state.settings.altitude.imu_aid_enabled                = 0u;
-        g_app_state.settings.altitude.auto_home_capture_enabled      = 1u;
-        g_app_state.settings.altitude.imu_vertical_sign              = 1;
-        g_app_state.settings.altitude.reserved0                      = 0u;
-        g_app_state.settings.altitude.reserved1                      = 0u;
+               g_app_state.settings.altitude.gps_auto_equiv_qnh_enabled     = 1u;
+               g_app_state.settings.altitude.gps_bias_correction_enabled    = 1u;
+               g_app_state.settings.altitude.imu_aid_enabled                = 0u;
+               g_app_state.settings.altitude.auto_home_capture_enabled      = 1u;
+
+               /* ------------------------------------------------------------------ */
+               /*  IMU sign + sensor poll debug gate 기본값                           */
+               /*                                                                    */
+               /*  imu_vertical_sign = +1                                             */
+               /*  - 현재 기준 장착 방향에서 vertical specific-force 부호 기본값      */
+               /*                                                                    */
+               /*  imu_poll_enabled = 1                                               */
+               /*  - MPU6050 polling은 평상시 기본 ON                                 */
+               /*                                                                    */
+               /*  mag_poll_enabled = 1                                               */
+               /*  - HMC5883L polling도 기존 동작과 동일하게 기본 ON                  */
+               /*                                                                    */
+               /*  ms5611_only = 0                                                    */
+               /*  - 평상시에는 강제 barometer-only 진단 모드를 끈 상태로 시작한다.   */
+               /* ------------------------------------------------------------------ */
+               g_app_state.settings.altitude.imu_vertical_sign              = 1;
+               g_app_state.settings.altitude.imu_poll_enabled               = 1u;
+               g_app_state.settings.altitude.mag_poll_enabled               = 1u;
+               g_app_state.settings.altitude.ms5611_only                    = 0u;
 
         /* ------------------------------------------------------------------ */
         /*  pressure / vario / display 반응 속도                               */

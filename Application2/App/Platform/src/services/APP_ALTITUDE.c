@@ -148,6 +148,10 @@
 #define APP_ALTITUDE_IMU_ACCEL_NORM_REF_MG 1000.0f
 #endif
 
+#ifndef APP_ALTITUDE_IMU_STALE_TIMEOUT_MS
+#define APP_ALTITUDE_IMU_STALE_TIMEOUT_MS 80u
+#endif
+
 #ifndef APP_ALTITUDE_AUDIO_SEGMENT_MARGIN_MS
 #define APP_ALTITUDE_AUDIO_SEGMENT_MARGIN_MS 4u
 #endif
@@ -996,9 +1000,45 @@ static bool APP_ALTITUDE_IsCoreRestActive(const app_altitude_settings_t *setting
     return true;
 }
 
+static bool APP_ALTITUDE_IsImuInputEnabled(const app_altitude_settings_t *settings)
+{
+    if (settings == 0)
+    {
+        return false;
+    }
+
+    if (settings->ms5611_only != 0u)
+    {
+        return false;
+    }
+
+    if (settings->imu_poll_enabled == 0u)
+    {
+        return false;
+    }
+
+    return true;
+}
+
+static void APP_ALTITUDE_ResetImuRuntimeForUnavailableInput(void)
+{
+    /* ---------------------------------------------------------------------- */
+    /*  IMU가 의도적으로 꺼졌거나 stale sample만 남아 있는 경우                 */
+    /*  gravity / trust / predict weight를 모두 0으로 내려                     */
+    /*  stale acceleration이 KF4 predict에 반복 주입되는 일을 막는다.          */
+    /* ---------------------------------------------------------------------- */
+    s_altitude_runtime.gravity_est_valid = false;
+    s_altitude_runtime.imu_vertical_lp_cms2 = 0.0f;
+    s_altitude_runtime.imu_accel_norm_mg = 0.0f;
+    s_altitude_runtime.imu_attitude_trust_permille = 0.0f;
+    s_altitude_runtime.imu_predict_weight_permille = 0.0f;
+}
+
 static float APP_ALTITUDE_GetDebugAudioSourceVarioCms(const app_altitude_settings_t *settings)
 {
-    if ((settings != 0) && (settings->debug_audio_source != 0u))
+    if ((settings != 0) &&
+        (settings->debug_audio_source != 0u) &&
+        (APP_ALTITUDE_IsImuInputEnabled(settings) != false))
     {
         return s_altitude_runtime.vario_fast_imu_cms;
     }
@@ -1324,6 +1364,7 @@ static void APP_ALTITUDE_Kf4_Predict(float x[4],
 /* -------------------------------------------------------------------------- */
 static float APP_ALTITUDE_UpdateImuVerticalAccelCms2(const app_altitude_settings_t *settings,
                                                       const app_gy86_mpu_raw_t *mpu,
+                                                      uint32_t now_ms,
                                                       float task_dt_s,
                                                       bool *out_vector_valid)
 {
@@ -1365,6 +1406,29 @@ static float APP_ALTITUDE_UpdateImuVerticalAccelCms2(const app_altitude_settings
 
     if ((settings == 0) || (mpu == 0) || (settings->imu_accel_lsb_per_g == 0u))
     {
+        return 0.0f;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  settings에서 IMU input을 꺼 둔 경우                                   */
+    /*  stale sample을 다시 쓰지 않도록 즉시 predict 입력을 0으로 만든다.     */
+    /* ------------------------------------------------------------------ */
+    if (APP_ALTITUDE_IsImuInputEnabled(settings) == false)
+    {
+        APP_ALTITUDE_ResetImuRuntimeForUnavailableInput();
+        return 0.0f;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  bus 차단 / freeze / 통신 정지 등으로                                  */
+    /*  MPU timestamp가 오래 멈춘 경우에도                                     */
+    /*  마지막 accel 값을 매 task마다 재사용하지 않도록 stale guard를 둔다.   */
+    /* ------------------------------------------------------------------ */
+    if ((mpu->sample_count == 0u) ||
+        (mpu->timestamp_ms == 0u) ||
+        ((uint32_t)(now_ms - mpu->timestamp_ms) > APP_ALTITUDE_IMU_STALE_TIMEOUT_MS))
+    {
+        APP_ALTITUDE_ResetImuRuntimeForUnavailableInput();
         return 0.0f;
     }
 
@@ -2354,6 +2418,8 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
     bool new_gps_sample;
     bool gps_valid;
     bool imu_vector_valid;
+    bool imu_input_enabled;
+    bool imu_display_enabled;
     bool core_rest_active;
     uint16_t gps_quality_permille;
     float dt_s;
@@ -2419,6 +2485,8 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
     new_gps_sample  = false;
     gps_valid       = false;
     imu_vector_valid = false;
+    imu_input_enabled = APP_ALTITUDE_IsImuInputEnabled(settings);
+    imu_display_enabled = false;
     core_rest_active = false;
     gps_quality_permille = 0u;
 
@@ -2577,7 +2645,11 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
     /*  - 6-axis complementary gravity estimator 사용                       */
     /*  - trust가 낮으면 KF4 입력 가속도를 자동으로 줄인다.                 */
     /* ------------------------------------------------------------------ */
-    imu_vertical_cms2 = APP_ALTITUDE_UpdateImuVerticalAccelCms2(settings, mpu, dt_s, &imu_vector_valid);
+    imu_vertical_cms2 = APP_ALTITUDE_UpdateImuVerticalAccelCms2(settings,
+                                                               mpu,
+                                                               now_ms,
+                                                               dt_s,
+                                                               &imu_vector_valid);
 
     imu_predict_weight = APP_ALTITUDE_ClampF(s_altitude_runtime.imu_predict_weight_permille * 0.001f, 0.0f, 1.0f);
 
@@ -2816,11 +2888,15 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
                                                                        dt_s);
     }
 
-    display_target_cm = ((settings->imu_aid_enabled != 0u) && (s_altitude_runtime.kf_imu.valid != false)) ?
+    imu_display_enabled = ((settings->imu_aid_enabled != 0u) &&
+                           (imu_input_enabled != false) &&
+                           (s_altitude_runtime.kf_imu.valid != false));
+
+    display_target_cm = imu_display_enabled ?
                         s_altitude_runtime.kf_imu.x[0] :
                         (s_altitude_runtime.kf_noimu.valid ? s_altitude_runtime.kf_noimu.x[0] : alt_qnh_cm);
 
-    display_source_vario_cms = ((settings->imu_aid_enabled != 0u) && (s_altitude_runtime.kf_imu.valid != false)) ?
+    display_source_vario_cms = imu_display_enabled ?
                                s_altitude_runtime.vario_slow_imu_cms :
                                s_altitude_runtime.vario_slow_noimu_cms;
 
@@ -2892,7 +2968,8 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
     g_app_state.altitude.baro_noise_used_cm         = (uint16_t)APP_ALTITUDE_RoundFloatToS32(baro_noise_cm);
     g_app_state.altitude.display_rest_active        = display_rest_active ? 1u : 0u;
     g_app_state.altitude.zupt_active                = s_altitude_runtime.zupt_active ? 1u : 0u;
-    g_app_state.altitude.debug_audio_source         = settings->debug_audio_source;
+    g_app_state.altitude.debug_audio_source         = ((settings->debug_audio_source != 0u) &&
+                                                       (imu_input_enabled != false)) ? 1u : 0u;
 
     g_app_state.altitude.vario_fast_noimu_cms       = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.vario_fast_noimu_cms);
     g_app_state.altitude.vario_slow_noimu_cms       = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.vario_slow_noimu_cms);

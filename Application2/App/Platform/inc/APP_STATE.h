@@ -189,15 +189,32 @@ typedef struct
     uint8_t auto_home_capture_enabled;
 
     /* ---------------------------------------------------------------------- */
-    /*  IMU 수직축 부호                                                        */
-    /*                                                                        */
-    /*  gravity projection을 사용해도 실제 장착 방향이 뒤집혀 있으면          */
-    /*  수직 specific-force 부호가 반대로 나올 수 있으므로                    */
-    /*  +1 / -1 을 런타임에서 바꿀 수 있게 유지한다.                           */
-    /* ---------------------------------------------------------------------- */
-    int8_t  imu_vertical_sign;
-    uint8_t reserved0;
-    uint16_t reserved1;
+       /*  IMU 수직축 부호 + GY-86 poll gate                                      */
+       /*                                                                        */
+       /*  imu_vertical_sign                                                     */
+       /*  - gravity projection을 사용해도 실제 장착 방향이 뒤집혀 있으면         */
+       /*    수직 specific-force 부호가 반대로 나올 수 있으므로                   */
+       /*    +1 / -1 을 런타임에서 바꿀 수 있게 유지한다.                         */
+       /*                                                                        */
+       /*  imu_poll_enabled                                                      */
+       /*  - 1이면 MPU6050 polling을 기존 주기대로 수행한다.                     */
+       /*  - 0이면 GY86_IMU_Task()가 MPU I2C read를 완전히 건너뛴다.              */
+       /*                                                                        */
+       /*  mag_poll_enabled                                                      */
+       /*  - 1이면 HMC5883L polling을 기존 주기대로 수행한다.                    */
+       /*  - 0이면 magnetometer I2C read를 건너뛰어 bus 부하를 줄인다.            */
+       /*                                                                        */
+       /*  ms5611_only                                                           */
+       /*  - 1이면 "barometer only" 진단 모드다.                                */
+       /*  - MPU/HMC probe와 polling을 모두 막고,                                */
+       /*    ALTITUDE 서비스도 IMU aid / IMU audio source를 자동 비활성화한다.   */
+       /*  - imu_poll_enabled / mag_poll_enabled 값은 보존되지만                 */
+       /*    이 플래그가 1인 동안에는 무시된다.                                  */
+       /* ---------------------------------------------------------------------- */
+       int8_t  imu_vertical_sign;
+       uint8_t imu_poll_enabled;
+       uint8_t mag_poll_enabled;
+       uint8_t ms5611_only;
 
     /* ---------------------------------------------------------------------- */
     /*  Pressure / display LPF 시정수                                          */

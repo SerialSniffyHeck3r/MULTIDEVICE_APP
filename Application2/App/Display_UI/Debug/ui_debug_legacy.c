@@ -2079,6 +2079,9 @@
       APP_ALT_PARAM_GPS_BIAS_ENABLE,
       APP_ALT_PARAM_IMU_AID_ENABLE,
       APP_ALT_PARAM_AUTO_HOME_ENABLE,
+      APP_ALT_PARAM_IMU_POLL_ENABLE,
+      APP_ALT_PARAM_MAG_POLL_ENABLE,
+      APP_ALT_PARAM_MS5611_ONLY,
       APP_ALT_PARAM_IMU_SIGN,
       APP_ALT_PARAM_PRESSURE_LPF_TAU,
       APP_ALT_PARAM_VARIO_FAST_TAU,
@@ -2206,6 +2209,9 @@
       case APP_ALT_PARAM_GPS_BIAS_ENABLE:   return "GPS_BIAS";
       case APP_ALT_PARAM_IMU_AID_ENABLE:    return "IMU_AID";
       case APP_ALT_PARAM_AUTO_HOME_ENABLE:  return "AUTO_HOME";
+      case APP_ALT_PARAM_IMU_POLL_ENABLE:   return "MPU_POLL";
+      case APP_ALT_PARAM_MAG_POLL_ENABLE:   return "MAG_POLL";
+      case APP_ALT_PARAM_MS5611_ONLY:       return "MS5611_ONLY";
       case APP_ALT_PARAM_IMU_SIGN:          return "IMU_SIGN";
       case APP_ALT_PARAM_PRESSURE_LPF_TAU:  return "P_TAU";
       case APP_ALT_PARAM_VARIO_FAST_TAU:    return "VF_TAU";
@@ -2285,6 +2291,18 @@
 
       case APP_ALT_PARAM_AUTO_HOME_ENABLE:
           snprintf(out, out_size, "%u", alt->auto_home_capture_enabled ? 1u : 0u);
+          break;
+
+      case APP_ALT_PARAM_IMU_POLL_ENABLE:
+          snprintf(out, out_size, "%u", alt->imu_poll_enabled ? 1u : 0u);
+          break;
+
+      case APP_ALT_PARAM_MAG_POLL_ENABLE:
+          snprintf(out, out_size, "%u", alt->mag_poll_enabled ? 1u : 0u);
+          break;
+
+      case APP_ALT_PARAM_MS5611_ONLY:
+          snprintf(out, out_size, "%u", alt->ms5611_only ? 1u : 0u);
           break;
 
       case APP_ALT_PARAM_IMU_SIGN:
@@ -2486,6 +2504,18 @@
 
       case APP_ALT_PARAM_AUTO_HOME_ENABLE:
           alt->auto_home_capture_enabled = (uint8_t)(alt->auto_home_capture_enabled ? 0u : 1u);
+          break;
+
+      case APP_ALT_PARAM_IMU_POLL_ENABLE:
+          alt->imu_poll_enabled = (uint8_t)(alt->imu_poll_enabled ? 0u : 1u);
+          break;
+
+      case APP_ALT_PARAM_MAG_POLL_ENABLE:
+          alt->mag_poll_enabled = (uint8_t)(alt->mag_poll_enabled ? 0u : 1u);
+          break;
+
+      case APP_ALT_PARAM_MS5611_ONLY:
+          alt->ms5611_only = (uint8_t)(alt->ms5611_only ? 0u : 1u);
           break;
 
       case APP_ALT_PARAM_IMU_SIGN:
@@ -2891,6 +2921,24 @@
 
       APP_FormatSignedCmsAsMpsText(text_a, sizeof(text_a), altitude->debug_audio_vario_cms);
       snprintf(line, sizeof(line), "AVAR %s", text_a);
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+
+      /* ------------------------------------------------------------------ */
+      /*  우측 컬럼 POLL status                                               */
+      /*  - I : MPU6050 polling gate                                         */
+      /*  - M : HMC5883L polling gate                                        */
+      /*  - O : MS5611_ONLY override                                         */
+      /*                                                                    */
+      /*  이 줄은 우측 상태 컬럼의 하단부에 배치되며,                          */
+      /*  ALTITUDE debug page에서 sensor bus 차단 상태를                      */
+      /*  숫자 0/1로 즉시 확인하는 용도다.                                    */
+      /* ------------------------------------------------------------------ */
+      snprintf(line,
+               sizeof(line),
+               "POLL I:%u M:%u O:%u",
+               settings->altitude.imu_poll_enabled ? 1u : 0u,
+               settings->altitude.mag_poll_enabled ? 1u : 0u,
+               settings->altitude.ms5611_only ? 1u : 0u);
       APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
 
       APP_AltitudeDebugFormatSelectedValue(settings, value_text, sizeof(value_text));
