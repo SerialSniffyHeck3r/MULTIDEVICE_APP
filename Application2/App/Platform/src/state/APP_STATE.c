@@ -255,6 +255,60 @@ static void APP_STATE_ApplyDefaultSettingsUnlocked(void)
         g_app_state.settings.altitude.audio_max_freq_hz              = 2200u;
         g_app_state.settings.altitude.audio_repeat_ms                = 170u;
         g_app_state.settings.altitude.audio_beep_ms                  = 65u;
+
+        /* ---------------------------------------------------------------------- */
+        /*  BIKE DYNAMICS 기본 설정                                                 */
+        /*                                                                        */
+        /*  기본 장착 가정                                                         */
+        /*  - sensor +X : 차량 forward                                             */
+        /*  - sensor +Y : 차량 left                                                */
+        /*  - sensor +Z : 차량 up                                                  */
+        /*                                                                        */
+        /*  현재 GY86_IMU driver 기준 scale                                         */
+        /*  - accel ±4g     -> 8192 LSB/g                                           */
+        /*  - gyro  ±500dps -> 65.5 LSB/dps -> x10 scale로 655                      */
+        /*                                                                        */
+        /*  필터 성격                                                               */
+        /*  - gravity_tau 700ms   : lean/grade 기준축은 너무 민감하지 않게          */
+        /*  - linear_tau  120ms   : lat/lon 가속도는 진동을 약간 누르되             */
+        /*                            투어링 컴퓨터 응답성은 유지                   */
+        /*  - GNSS bias tau 4.0s  : GNSS는 저주파 anchor로만 천천히 먹인다.        */
+        /* ---------------------------------------------------------------------- */
+        g_app_state.settings.bike.enabled                        = 1u;
+        g_app_state.settings.bike.auto_zero_on_boot              = 1u;
+        g_app_state.settings.bike.gnss_aid_enabled               = 1u;
+        g_app_state.settings.bike.obd_aid_enabled                = 1u;
+
+        g_app_state.settings.bike.mount_forward_axis             = (uint8_t)APP_BIKE_AXIS_POS_X;
+        g_app_state.settings.bike.mount_left_axis                = (uint8_t)APP_BIKE_AXIS_POS_Y;
+        g_app_state.settings.bike.mount_yaw_trim_deg_x10         = 0;
+
+        g_app_state.settings.bike.imu_accel_lsb_per_g            = 8192u;
+        g_app_state.settings.bike.imu_gyro_lsb_per_dps_x10       = 655u;
+
+        g_app_state.settings.bike.imu_gravity_tau_ms             = 700u;
+        g_app_state.settings.bike.imu_linear_tau_ms              = 120u;
+        g_app_state.settings.bike.imu_attitude_accel_gate_mg     = 120u;
+        g_app_state.settings.bike.imu_jerk_gate_mg_per_s         = 3500u;
+        g_app_state.settings.bike.imu_predict_min_trust_permille = 500u;
+        g_app_state.settings.bike.imu_stale_timeout_ms           = 250u;
+
+        g_app_state.settings.bike.output_deadband_mg             = 12u;
+        g_app_state.settings.bike.output_clip_mg                 = 1800u;
+        g_app_state.settings.bike.lean_display_tau_ms            = 180u;
+        g_app_state.settings.bike.grade_display_tau_ms           = 250u;
+        g_app_state.settings.bike.accel_display_tau_ms           = 180u;
+
+        g_app_state.settings.bike.gnss_min_speed_kmh_x10         = 80u;   /* 8.0 km/h */
+        g_app_state.settings.bike.gnss_max_speed_acc_kmh_x10     = 15u;   /* 1.5 km/h */
+        g_app_state.settings.bike.gnss_max_head_acc_deg_x10      = 80u;   /* 8.0 deg  */
+        g_app_state.settings.bike.gnss_bias_tau_ms               = 4000u;
+        g_app_state.settings.bike.gnss_outlier_gate_mg           = 450u;
+
+        g_app_state.settings.bike.obd_stale_timeout_ms           = 500u;
+        g_app_state.settings.bike.reserved0                      = 0u;
+
+
 }
 
 /* -------------------------------------------------------------------------- */
@@ -596,6 +650,72 @@ static void APP_STATE_ResetAltitudeUnlocked(void)
     g_app_state.altitude.gps_fix_type            = 0u;
 }
 
+static void APP_STATE_ResetBikeUnlocked(void)
+{
+    memset((void *)&g_app_state.bike, 0, sizeof(g_app_state.bike));
+
+    g_app_state.bike.initialized                 = false;
+    g_app_state.bike.zero_valid                  = false;
+    g_app_state.bike.imu_valid                   = false;
+    g_app_state.bike.gnss_aid_valid              = false;
+    g_app_state.bike.gnss_heading_valid          = false;
+    g_app_state.bike.obd_speed_valid             = false;
+    g_app_state.bike.speed_source                = (uint8_t)APP_BIKE_SPEED_SOURCE_NONE;
+    g_app_state.bike.estimator_mode              = (uint8_t)APP_BIKE_ESTIMATOR_MODE_IMU_ONLY;
+    g_app_state.bike.confidence_permille         = 0u;
+
+    g_app_state.bike.last_update_ms              = 0u;
+    g_app_state.bike.last_imu_update_ms          = 0u;
+    g_app_state.bike.last_zero_capture_ms        = 0u;
+    g_app_state.bike.last_gnss_aid_ms            = 0u;
+    g_app_state.bike.zero_request_count          = 0u;
+    g_app_state.bike.hard_rezero_count           = 0u;
+
+    g_app_state.bike.banking_angle_deg_x10       = 0;
+    g_app_state.bike.banking_angle_display_deg   = 0;
+    g_app_state.bike.grade_deg_x10               = 0;
+    g_app_state.bike.grade_display_deg           = 0;
+    g_app_state.bike.bank_rate_dps_x10           = 0;
+    g_app_state.bike.grade_rate_dps_x10          = 0;
+
+    g_app_state.bike.lat_accel_mg                = 0;
+    g_app_state.bike.lon_accel_mg                = 0;
+    g_app_state.bike.lat_accel_cms2              = 0;
+    g_app_state.bike.lon_accel_cms2              = 0;
+
+    g_app_state.bike.lat_accel_imu_mg            = 0;
+    g_app_state.bike.lon_accel_imu_mg            = 0;
+    g_app_state.bike.lat_accel_ref_mg            = 0;
+    g_app_state.bike.lon_accel_ref_mg            = 0;
+    g_app_state.bike.lat_bias_mg                 = 0;
+    g_app_state.bike.lon_bias_mg                 = 0;
+
+    g_app_state.bike.imu_accel_norm_mg           = 0;
+    g_app_state.bike.imu_jerk_mg_per_s           = 0;
+    g_app_state.bike.imu_attitude_trust_permille = 0u;
+    g_app_state.bike.up_bx_milli                 = 0;
+    g_app_state.bike.up_by_milli                 = 0;
+    g_app_state.bike.up_bz_milli                 = 0;
+
+    g_app_state.bike.speed_mmps                  = 0;
+    g_app_state.bike.speed_kmh_x10               = 0u;
+    g_app_state.bike.gnss_speed_acc_kmh_x10      = 0u;
+    g_app_state.bike.gnss_head_acc_deg_x10       = 0u;
+    g_app_state.bike.mount_yaw_trim_deg_x10      = g_app_state.settings.bike.mount_yaw_trim_deg_x10;
+
+    g_app_state.bike.gnss_fix_ok                 = 0u;
+    g_app_state.bike.gnss_numsv_used             = 0u;
+    g_app_state.bike.gnss_pdop_x100              = 0u;
+
+    /* ---------------------------------------------------------------------- */
+    /*  future OBD 입력 필드는 reset 시에만 0으로 둔다.                         */
+    /*  추후 OBD service가 이 필드들을 다시 채우면 BIKE_DYNAMICS가 읽는다.      */
+    /* ---------------------------------------------------------------------- */
+    g_app_state.bike.obd_input_speed_valid       = false;
+    g_app_state.bike.obd_input_speed_mmps        = 0u;
+    g_app_state.bike.obd_input_last_update_ms    = 0u;
+}
+
 /* -------------------------------------------------------------------------- */
 /*  공개 API: GPS slice만 초기화                                                */
 /* -------------------------------------------------------------------------- */
@@ -632,6 +752,7 @@ void APP_STATE_Init(void)
     APP_STATE_ResetDebugUartUnlocked();
     APP_STATE_ResetSdUnlocked();
     APP_STATE_ResetAltitudeUnlocked();
+    APP_STATE_ResetBikeUnlocked();
 
     __enable_irq();
 }
@@ -832,6 +953,24 @@ void APP_STATE_CopyAltitudeSnapshot(app_altitude_state_t *dst)
     /*  따라서 plain memcpy로 충분하다.                                        */
     /* ---------------------------------------------------------------------- */
     memcpy((void *)dst, (const void *)&g_app_state.altitude, sizeof(*dst));
+}
+
+/* -------------------------------------------------------------------------- */
+/*  공개 API: BIKE DYNAMICS 전체 스냅샷 복사                                    */
+/* -------------------------------------------------------------------------- */
+void APP_STATE_CopyBikeSnapshot(app_bike_state_t *dst)
+{
+    if (dst == 0)
+    {
+        return;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /*  bike slice는 main loop의 BIKE_DYNAMICS_Task()에서만 갱신된다.           */
+    /*  future OBD service도 main context에서 쓴다는 전제를 두고 plain memcpy    */
+    /*  로 유지한다. 만약 추후 ISR writer가 생기면 그때만 임계구역으로 바꾼다.    */
+    /* ---------------------------------------------------------------------- */
+    memcpy((void *)dst, (const void *)&g_app_state.bike, sizeof(*dst));
 }
 
 /* -------------------------------------------------------------------------- */

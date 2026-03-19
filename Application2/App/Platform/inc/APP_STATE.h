@@ -338,6 +338,111 @@ typedef struct
     uint16_t audio_beep_ms;
 } app_altitude_settings_t;
 
+/* -------------------------------------------------------------------------- */
+/*  BIKE DYNAMICS 사용자 설정                                                   */
+/*                                                                            */
+/*  기본 철학                                                                   */
+/*  - lean / grade / lat-G / accel-decel 은                                    */
+/*    모두 "프레임 기준 + reset 기준 + IMU core" 로 계산한다.                  */
+/*  - GNSS / future OBD speed는 bias anchor 역할만 한다.                       */
+/*  - mount axis / yaw trim 을 설정으로 노출해서                               */
+/*    enclosure / PCB 장착 오차를 현장에서 바로 잡을 수 있게 한다.             */
+/* -------------------------------------------------------------------------- */
+typedef enum
+{
+    APP_BIKE_AXIS_POS_X = 0u,   /* sensor +X 가 차량 forward/left/up 방향일 때 */
+    APP_BIKE_AXIS_NEG_X = 1u,   /* sensor -X 가 해당 방향일 때                  */
+    APP_BIKE_AXIS_POS_Y = 2u,
+    APP_BIKE_AXIS_NEG_Y = 3u,
+    APP_BIKE_AXIS_POS_Z = 4u,
+    APP_BIKE_AXIS_NEG_Z = 5u
+} app_bike_axis_t;
+
+typedef enum
+{
+    APP_BIKE_SPEED_SOURCE_NONE         = 0u,
+    APP_BIKE_SPEED_SOURCE_IMU_FALLBACK = 1u,
+    APP_BIKE_SPEED_SOURCE_GNSS         = 2u,
+    APP_BIKE_SPEED_SOURCE_OBD          = 3u
+} app_bike_speed_source_t;
+
+typedef enum
+{
+    APP_BIKE_ESTIMATOR_MODE_IMU_ONLY   = 0u,
+    APP_BIKE_ESTIMATOR_MODE_GNSS_AIDED = 1u,
+    APP_BIKE_ESTIMATOR_MODE_OBD_AIDED  = 2u
+} app_bike_estimator_mode_t;
+
+typedef struct
+{
+    /* ---------------------------------------------------------------------- */
+    /*  서비스 on/off 및 zero 정책                                              */
+    /* ---------------------------------------------------------------------- */
+    uint8_t enabled;                     /* 1이면 BIKE_DYNAMICS 서비스 사용         */
+    uint8_t auto_zero_on_boot;           /* 1이면 첫 유효 IMU 샘플에서 자동 reset   */
+    uint8_t gnss_aid_enabled;            /* 1이면 GNSS speed/course aid 사용        */
+    uint8_t obd_aid_enabled;             /* 1이면 future OBD speed aid 사용         */
+
+    /* ---------------------------------------------------------------------- */
+    /*  장착 축 / yaw trim                                                      */
+    /*                                                                        */
+    /*  mount_forward_axis                                                     */
+    /*  - 센서 보드의 어떤 축이 차량 forward 를 보는가                          */
+    /*                                                                        */
+    /*  mount_left_axis                                                        */
+    /*  - 센서 보드의 어떤 축이 차량 left 를 보는가                             */
+    /*                                                                        */
+    /*  mount_yaw_trim_deg_x10                                                 */
+    /*  - enclosure / PCB 기계 오차를 보정하는 수직축 주위 trim                */
+    /*  - 단위: 0.1 deg                                                        */
+    /* ---------------------------------------------------------------------- */
+    uint8_t mount_forward_axis;          /* app_bike_axis_t raw                    */
+    uint8_t mount_left_axis;             /* app_bike_axis_t raw                    */
+    int16_t mount_yaw_trim_deg_x10;      /* 0.1 deg                                */
+
+    /* ---------------------------------------------------------------------- */
+    /*  IMU 스케일 / observer gate                                              */
+    /*                                                                        */
+    /*  imu_accel_lsb_per_g                                                    */
+    /*  - 현재 MPU6050 ±4g 기본값은 8192                                       */
+    /*                                                                        */
+    /*  imu_gyro_lsb_per_dps_x10                                               */
+    /*  - 0.1 LSB/dps 단위                                                     */
+    /*  - 현재 MPU6050 ±500dps 기본값은 655 (=65.5 LSB/dps)                    */
+    /* ---------------------------------------------------------------------- */
+    uint16_t imu_accel_lsb_per_g;
+    uint16_t imu_gyro_lsb_per_dps_x10;
+
+    uint16_t imu_gravity_tau_ms;             /* gravity correction LPF tau           */
+    uint16_t imu_linear_tau_ms;              /* level accel LPF tau                  */
+    uint16_t imu_attitude_accel_gate_mg;     /* norm trust gate                      */
+    uint16_t imu_jerk_gate_mg_per_s;         /* rough-road jerk trust gate           */
+    uint16_t imu_predict_min_trust_permille; /* bias update를 허용할 최소 trust      */
+    uint16_t imu_stale_timeout_ms;           /* raw sample stale timeout             */
+
+    /* ---------------------------------------------------------------------- */
+    /*  출력 후처리                                                             */
+    /* ---------------------------------------------------------------------- */
+    uint16_t output_deadband_mg;         /* lat/lon 출력 deadband                 */
+    uint16_t output_clip_mg;             /* lat/lon 출력 clip                     */
+    uint16_t lean_display_tau_ms;        /* lean 표시 LPF                         */
+    uint16_t grade_display_tau_ms;       /* grade 표시 LPF                        */
+    uint16_t accel_display_tau_ms;       /* lat/lon 표시 LPF                      */
+
+    /* ---------------------------------------------------------------------- */
+    /*  GNSS / OBD aid gate                                                     */
+    /* ---------------------------------------------------------------------- */
+    uint16_t gnss_min_speed_kmh_x10;         /* heading aid 최소 속도                */
+    uint16_t gnss_max_speed_acc_kmh_x10;     /* GNSS speed accuracy gate             */
+    uint16_t gnss_max_head_acc_deg_x10;      /* GNSS heading accuracy gate           */
+    uint16_t gnss_bias_tau_ms;               /* external ref -> bias 적응 tau        */
+    uint16_t gnss_outlier_gate_mg;           /* ref outlier reject gate              */
+
+    uint16_t obd_stale_timeout_ms;           /* future OBD speed stale timeout       */
+    uint16_t reserved0;                      /* 향후 확장용                          */
+} app_bike_settings_t;
+
+
 typedef struct
 {
     app_gps_settings_t       gps;
@@ -345,8 +450,8 @@ typedef struct
     app_backlight_settings_t backlight;
     app_uc1608_settings_t    uc1608;
     app_altitude_settings_t  altitude;
+    app_bike_settings_t      bike;       /* 모터사이클 전용 dynamics 설정 저장소     */
 } app_settings_t;
-
 
 
 /* -------------------------------------------------------------------------- */
@@ -1506,6 +1611,108 @@ typedef struct
 } app_altitude_state_t;
 
 
+/* -------------------------------------------------------------------------- */
+/*  BIKE DYNAMICS 공개 상태                                                     */
+/*                                                                            */
+/*  sign 규칙                                                                   */
+/*  - banking angle : + = left lean,  - = right lean                           */
+/*  - grade         : + = nose up,    - = nose down                            */
+/*  - lat accel     : + = left,       - = right                                */
+/*  - lon accel     : + = accel,      - = braking                              */
+/*                                                                            */
+/*  input / output 분리                                                         */
+/*  - 아래 구조체의 대부분은 BIKE_DYNAMICS.c가 갱신하는 출력 필드다.            */
+/*  - 단, obd_input_* 필드는 추후 OBD service가 app_state를 통해 써 넣는        */
+/*    입력 필드다. BIKE_DYNAMICS는 이 값을 읽기만 하고, 리셋 외에는             */
+/*    덮어쓰지 않는다.                                                          */
+/* -------------------------------------------------------------------------- */
+typedef struct
+{
+    /* ---------------------------------------------------------------------- */
+    /*  공개 플래그 / mode                                                     */
+    /* ---------------------------------------------------------------------- */
+    bool     initialized;               /* 서비스 init 완료 여부                  */
+    bool     zero_valid;                /* reset 기준 basis가 유효한가            */
+    bool     imu_valid;                 /* gravity observer가 유효한가            */
+    bool     gnss_aid_valid;            /* GNSS speed 또는 heading aid 유효한가   */
+    bool     gnss_heading_valid;        /* GNSS heading aid가 현재 유효한가       */
+    bool     obd_speed_valid;           /* future OBD speed가 현재 유효한가       */
+    uint8_t  speed_source;              /* app_bike_speed_source_t raw            */
+    uint8_t  estimator_mode;            /* app_bike_estimator_mode_t raw          */
+    uint16_t confidence_permille;       /* 0..1000                                */
+
+    /* ---------------------------------------------------------------------- */
+    /*  최근 update timestamp / 사용자 명령 누적 횟수                           */
+    /* ---------------------------------------------------------------------- */
+    uint32_t last_update_ms;
+    uint32_t last_imu_update_ms;
+    uint32_t last_zero_capture_ms;
+    uint32_t last_gnss_aid_ms;
+    uint32_t zero_request_count;        /* ResetBankingAngleSensor 호출 누적       */
+    uint32_t hard_rezero_count;         /* hard rezero 요청 누적                  */
+
+    /* ---------------------------------------------------------------------- */
+    /*  최종 표시 후보                                                          */
+    /* ---------------------------------------------------------------------- */
+    int16_t  banking_angle_deg_x10;     /* 0.1 deg                                */
+    int16_t  banking_angle_display_deg; /* 1 deg 표시값                           */
+    int16_t  grade_deg_x10;             /* 0.1 deg                                */
+    int16_t  grade_display_deg;         /* 1 deg 표시값                           */
+    int16_t  bank_rate_dps_x10;         /* 0.1 dps                                */
+    int16_t  grade_rate_dps_x10;        /* 0.1 dps                                */
+
+    int32_t  lat_accel_mg;              /* 최종 lateral accel, mg                 */
+    int32_t  lon_accel_mg;              /* 최종 accel/decel, mg                   */
+    int32_t  lat_accel_cms2;            /* cm/s^2                                 */
+    int32_t  lon_accel_cms2;            /* cm/s^2                                 */
+
+    /* ---------------------------------------------------------------------- */
+    /*  비교/튜닝용 intermediate                                                */
+    /* ---------------------------------------------------------------------- */
+    int32_t  lat_accel_imu_mg;          /* IMU-only level lateral                 */
+    int32_t  lon_accel_imu_mg;          /* IMU-only level longitudinal            */
+    int32_t  lat_accel_ref_mg;          /* GNSS heading 기반 lateral reference    */
+    int32_t  lon_accel_ref_mg;          /* GNSS/OBD speed derivative reference    */
+    int32_t  lat_bias_mg;               /* external ref로 적응된 lateral bias     */
+    int32_t  lon_bias_mg;               /* external ref로 적응된 longitudinal bias */
+
+    /* ---------------------------------------------------------------------- */
+    /*  IMU / attitude diagnostic                                               */
+    /* ---------------------------------------------------------------------- */
+    int32_t  imu_accel_norm_mg;         /* raw accel norm                         */
+    int32_t  imu_jerk_mg_per_s;         /* rough-road / 충격 진단용 jerk          */
+    uint16_t imu_attitude_trust_permille; /* gravity observer trust 0..1000      */
+    int32_t  up_bx_milli;               /* current up dot bike_fwd, x1000         */
+    int32_t  up_by_milli;               /* current up dot bike_left, x1000        */
+    int32_t  up_bz_milli;               /* current up dot bike_up, x1000          */
+
+    /* ---------------------------------------------------------------------- */
+    /*  speed / GNSS quality                                                    */
+    /* ---------------------------------------------------------------------- */
+    int32_t  speed_mmps;                /* 현재 선택된 speed source 값            */
+    uint16_t speed_kmh_x10;             /* 0.1 km/h                               */
+    uint16_t gnss_speed_acc_kmh_x10;    /* GNSS speed accuracy diagnostic         */
+    uint16_t gnss_head_acc_deg_x10;     /* GNSS heading accuracy diagnostic       */
+    int16_t  mount_yaw_trim_deg_x10;    /* 현재 적용 중 yaw trim                  */
+
+    uint8_t  gnss_fix_ok;
+    uint8_t  gnss_numsv_used;
+    uint16_t gnss_pdop_x100;
+
+    /* ---------------------------------------------------------------------- */
+    /*  future OBD service input                                                */
+    /*                                                                        */
+    /*  추후 OBD service가 아래 세 필드만 갱신하면                              */
+    /*  BIKE_DYNAMICS가 자동으로 OBD speed source를 사용할 수 있다.             */
+    /* ---------------------------------------------------------------------- */
+    bool     obd_input_speed_valid;
+    uint32_t obd_input_speed_mmps;
+    uint32_t obd_input_last_update_ms;
+} app_bike_state_t;
+
+
+
+
 
 
 /* -------------------------------------------------------------------------- */
@@ -1523,8 +1730,9 @@ typedef struct
     app_bluetooth_state_t  bluetooth;   /* Bluetooth bring-up / 무선 시리얼 저장소   */
     app_debug_uart_state_t debug_uart;  /* 유선 DEBUG UART 상태 저장소               */
     app_sd_state_t         sd;          /* SD / FATFS / hotplug 공개 상태 저장소     */
-    app_clock_state_t      clock;     /* RTC / timezone / GPS sync 상태 저장소     */
-    app_altitude_state_t   altitude;  /* 고도 / 바리오 / 경사도 공개 상태 저장소   */
+    app_clock_state_t      clock;       /* RTC / timezone / GPS sync 상태 저장소     */
+    app_altitude_state_t   altitude;    /* 고도 / 바리오 / 경사도 공개 상태 저장소   */
+    app_bike_state_t       bike;        /* 모터사이클 frame dynamics 공개 상태 저장소*/
 
     /* 다른 센서/서브시스템도 계속 여기에 추가하면 된다. */
     /* 예: battery, storage, ui, logger ... */
@@ -1617,6 +1825,7 @@ void APP_STATE_CopyDebugUartSnapshot(app_debug_uart_state_t *dst);
 void APP_STATE_CopySdSnapshot(app_sd_state_t *dst);
 void APP_STATE_CopyClockSnapshot(app_clock_state_t *dst);
 void APP_STATE_CopyAltitudeSnapshot(app_altitude_state_t *dst);
+void APP_STATE_CopyBikeSnapshot(app_bike_state_t *dst);
 
 void APP_STATE_CopySettingsSnapshot(app_settings_t *dst);
 void APP_STATE_StoreSettingsSnapshot(const app_settings_t *src);
