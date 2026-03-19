@@ -8,7 +8,7 @@
 #include "Audio_App.h"
 #include "SPI_Flash.h"
 #include "main.h"
-
+#include "BIKE_DYNAMICS.h"
 #include "ff.h"
 
 
@@ -378,8 +378,10 @@
       APP_UI_PAGE_SPI_FLASH   = 6u,
       APP_UI_PAGE_CLOCK       = 7u,
       APP_UI_PAGE_ALTITUDE    = 8u,
-      APP_UI_PAGE_COUNT       = 9u
+      APP_UI_PAGE_BIKE        = 9u,
+      APP_UI_PAGE_COUNT       = 10u
   } app_ui_page_t;
+
 
   /* -------------------------------------------------------------------------- */
   /*  작은 문자열 포맷 유틸                                                      */
@@ -2953,6 +2955,660 @@
   }
 
   /* -------------------------------------------------------------------------- */
+  /*  BIKE DYNAMICS debug page 편집 파라미터                                      */
+  /*                                                                            */
+  /*  이 페이지는                                                               */
+  /*  - 현재 lean / grade / lat-G / accel-decel 상태를 보고                      */
+  /*  - mounting axis / yaw trim / filter tau / GNSS gate 를 현장에서            */
+  /*    바로 튜닝하는 용도다.                                                    */
+  /*                                                                            */
+  /*  버튼 규칙                                                                  */
+  /*  - B2 / B3 : 파라미터 선택                                                 */
+  /*  - B4 / B5 : 선택 파라미터 감소 / 증가                                     */
+  /*  - B6 short: 현재 자세를 새로운 zero 기준으로 캡처                         */
+  /*  - B6 long : hard rezero (gravity/bias/runtime clean reset)                */
+  /* -------------------------------------------------------------------------- */
+  typedef enum
+  {
+      APP_BIKE_PARAM_ENABLE = 0u,
+      APP_BIKE_PARAM_AUTO_ZERO,
+      APP_BIKE_PARAM_GNSS_AID,
+      APP_BIKE_PARAM_OBD_AID,
+      APP_BIKE_PARAM_MOUNT_FWD,
+      APP_BIKE_PARAM_MOUNT_LEFT,
+      APP_BIKE_PARAM_YAW_TRIM,
+      APP_BIKE_PARAM_ACCEL_LSB,
+      APP_BIKE_PARAM_GYRO_LSB_X10,
+      APP_BIKE_PARAM_GRAVITY_TAU,
+      APP_BIKE_PARAM_LINEAR_TAU,
+      APP_BIKE_PARAM_ATT_GATE,
+      APP_BIKE_PARAM_JERK_GATE,
+      APP_BIKE_PARAM_MIN_TRUST,
+      APP_BIKE_PARAM_DEADBAND,
+      APP_BIKE_PARAM_CLIP,
+      APP_BIKE_PARAM_LEAN_TAU,
+      APP_BIKE_PARAM_GRADE_TAU,
+      APP_BIKE_PARAM_ACCEL_TAU,
+      APP_BIKE_PARAM_GNSS_MIN_SPD,
+      APP_BIKE_PARAM_GNSS_SACC,
+      APP_BIKE_PARAM_GNSS_HACC,
+      APP_BIKE_PARAM_GNSS_BIAS_TAU,
+      APP_BIKE_PARAM_GNSS_OUTLIER,
+      APP_BIKE_PARAM_OBD_STALE,
+      APP_BIKE_PARAM_COUNT
+  } app_bike_param_t;
+
+  static app_bike_state_t g_bike_snapshot;
+  static uint8_t          g_bike_selected_param = 0u;
+
+  #ifndef APP_UI_BIKE_MIN_REFRESH_MS
+  #define APP_UI_BIKE_MIN_REFRESH_MS 100u
+  #endif
+
+  static const char *APP_BikeAxisName(uint8_t axis_raw)
+  {
+      switch ((app_bike_axis_t)axis_raw)
+      {
+      case APP_BIKE_AXIS_POS_X: return "+X";
+      case APP_BIKE_AXIS_NEG_X: return "-X";
+      case APP_BIKE_AXIS_POS_Y: return "+Y";
+      case APP_BIKE_AXIS_NEG_Y: return "-Y";
+      case APP_BIKE_AXIS_POS_Z: return "+Z";
+      case APP_BIKE_AXIS_NEG_Z: return "-Z";
+      default:                  return "?";
+      }
+  }
+
+  static const char *APP_BikeSpeedSourceName(uint8_t source_raw)
+  {
+      switch ((app_bike_speed_source_t)source_raw)
+      {
+      case APP_BIKE_SPEED_SOURCE_IMU_FALLBACK: return "IMU";
+      case APP_BIKE_SPEED_SOURCE_GNSS:         return "GNSS";
+      case APP_BIKE_SPEED_SOURCE_OBD:          return "OBD";
+      case APP_BIKE_SPEED_SOURCE_NONE:
+      default:                                 return "NONE";
+      }
+  }
+
+  static const char *APP_BikeEstimatorModeName(uint8_t mode_raw)
+  {
+      switch ((app_bike_estimator_mode_t)mode_raw)
+      {
+      case APP_BIKE_ESTIMATOR_MODE_GNSS_AIDED: return "GNSS";
+      case APP_BIKE_ESTIMATOR_MODE_OBD_AIDED:  return "OBD";
+      case APP_BIKE_ESTIMATOR_MODE_IMU_ONLY:
+      default:                                 return "IMU";
+      }
+  }
+
+  static void APP_BikeFormatSignedMgAsGText(char *out, size_t out_size, int32_t value_mg)
+  {
+      int32_t value_x100;
+
+      if ((out == 0) || (out_size == 0u))
+      {
+          return;
+      }
+
+      if (value_mg >= 0)
+      {
+          value_x100 = (value_mg + 5) / 10;
+      }
+      else
+      {
+          value_x100 = (value_mg - 5) / 10;
+      }
+
+      APP_FormatSignedCentiText(out, out_size, value_x100);
+  }
+
+  static void APP_BikeFormatUnsignedKmhX10Text(char *out, size_t out_size, uint16_t value_kmh_x10)
+  {
+      if ((out == 0) || (out_size == 0u))
+      {
+          return;
+      }
+
+      snprintf(out, out_size, "%u.%u",
+               (unsigned)(value_kmh_x10 / 10u),
+               (unsigned)(value_kmh_x10 % 10u));
+  }
+
+  static const char *APP_BikeParamName(app_bike_param_t param)
+  {
+      switch (param)
+      {
+      case APP_BIKE_PARAM_ENABLE:        return "EN";
+      case APP_BIKE_PARAM_AUTO_ZERO:     return "AUTO_ZERO";
+      case APP_BIKE_PARAM_GNSS_AID:      return "GNSS_AID";
+      case APP_BIKE_PARAM_OBD_AID:       return "OBD_AID";
+      case APP_BIKE_PARAM_MOUNT_FWD:     return "MNT_FWD";
+      case APP_BIKE_PARAM_MOUNT_LEFT:    return "MNT_LEFT";
+      case APP_BIKE_PARAM_YAW_TRIM:      return "YAW_TRIM";
+      case APP_BIKE_PARAM_ACCEL_LSB:     return "A_LSB";
+      case APP_BIKE_PARAM_GYRO_LSB_X10:  return "G_LSB10";
+      case APP_BIKE_PARAM_GRAVITY_TAU:   return "G_TAU";
+      case APP_BIKE_PARAM_LINEAR_TAU:    return "LIN_TAU";
+      case APP_BIKE_PARAM_ATT_GATE:      return "ATT_GATE";
+      case APP_BIKE_PARAM_JERK_GATE:     return "JERK_GT";
+      case APP_BIKE_PARAM_MIN_TRUST:     return "T_MIN";
+      case APP_BIKE_PARAM_DEADBAND:      return "OUT_DB";
+      case APP_BIKE_PARAM_CLIP:          return "OUT_CLP";
+      case APP_BIKE_PARAM_LEAN_TAU:      return "LEAN_T";
+      case APP_BIKE_PARAM_GRADE_TAU:     return "GRD_T";
+      case APP_BIKE_PARAM_ACCEL_TAU:     return "ACC_T";
+      case APP_BIKE_PARAM_GNSS_MIN_SPD:  return "GPS_MIN";
+      case APP_BIKE_PARAM_GNSS_SACC:     return "GPS_SACC";
+      case APP_BIKE_PARAM_GNSS_HACC:     return "GPS_HACC";
+      case APP_BIKE_PARAM_GNSS_BIAS_TAU: return "GPS_BTAU";
+      case APP_BIKE_PARAM_GNSS_OUTLIER:  return "GPS_OUT";
+      case APP_BIKE_PARAM_OBD_STALE:     return "OBD_ST";
+      case APP_BIKE_PARAM_COUNT:
+      default:                           return "UNKNOWN";
+      }
+  }
+
+  static void APP_BikeDebugFormatSelectedValue(const app_settings_t *settings,
+                                               char *out,
+                                               size_t out_size)
+  {
+      const app_bike_settings_t *bike;
+
+      if ((settings == 0) || (out == 0) || (out_size == 0u))
+      {
+          return;
+      }
+
+      bike = &settings->bike;
+      out[0] = '\0';
+
+      switch ((app_bike_param_t)g_bike_selected_param)
+      {
+      case APP_BIKE_PARAM_ENABLE:
+          snprintf(out, out_size, "%u", bike->enabled ? 1u : 0u);
+          break;
+
+      case APP_BIKE_PARAM_AUTO_ZERO:
+          snprintf(out, out_size, "%u", bike->auto_zero_on_boot ? 1u : 0u);
+          break;
+
+      case APP_BIKE_PARAM_GNSS_AID:
+          snprintf(out, out_size, "%u", bike->gnss_aid_enabled ? 1u : 0u);
+          break;
+
+      case APP_BIKE_PARAM_OBD_AID:
+          snprintf(out, out_size, "%u", bike->obd_aid_enabled ? 1u : 0u);
+          break;
+
+      case APP_BIKE_PARAM_MOUNT_FWD:
+          snprintf(out, out_size, "%s", APP_BikeAxisName(bike->mount_forward_axis));
+          break;
+
+      case APP_BIKE_PARAM_MOUNT_LEFT:
+          snprintf(out, out_size, "%s", APP_BikeAxisName(bike->mount_left_axis));
+          break;
+
+      case APP_BIKE_PARAM_YAW_TRIM:
+          snprintf(out, out_size, "%d.%01d deg",
+                   (int)(bike->mount_yaw_trim_deg_x10 / 10),
+                   (int)abs((int)(bike->mount_yaw_trim_deg_x10 % 10)));
+          break;
+
+      case APP_BIKE_PARAM_ACCEL_LSB:
+          snprintf(out, out_size, "%u LSB/g", (unsigned)bike->imu_accel_lsb_per_g);
+          break;
+
+      case APP_BIKE_PARAM_GYRO_LSB_X10:
+          snprintf(out, out_size, "%u.%u LSB/dps",
+                   (unsigned)(bike->imu_gyro_lsb_per_dps_x10 / 10u),
+                   (unsigned)(bike->imu_gyro_lsb_per_dps_x10 % 10u));
+          break;
+
+      case APP_BIKE_PARAM_GRAVITY_TAU:
+          snprintf(out, out_size, "%u ms", (unsigned)bike->imu_gravity_tau_ms);
+          break;
+
+      case APP_BIKE_PARAM_LINEAR_TAU:
+          snprintf(out, out_size, "%u ms", (unsigned)bike->imu_linear_tau_ms);
+          break;
+
+      case APP_BIKE_PARAM_ATT_GATE:
+          snprintf(out, out_size, "%u mg", (unsigned)bike->imu_attitude_accel_gate_mg);
+          break;
+
+      case APP_BIKE_PARAM_JERK_GATE:
+          snprintf(out, out_size, "%u mg/s", (unsigned)bike->imu_jerk_gate_mg_per_s);
+          break;
+
+      case APP_BIKE_PARAM_MIN_TRUST:
+          snprintf(out, out_size, "%u", (unsigned)bike->imu_predict_min_trust_permille);
+          break;
+
+      case APP_BIKE_PARAM_DEADBAND:
+          snprintf(out, out_size, "%u mg", (unsigned)bike->output_deadband_mg);
+          break;
+
+      case APP_BIKE_PARAM_CLIP:
+          snprintf(out, out_size, "%u mg", (unsigned)bike->output_clip_mg);
+          break;
+
+      case APP_BIKE_PARAM_LEAN_TAU:
+          snprintf(out, out_size, "%u ms", (unsigned)bike->lean_display_tau_ms);
+          break;
+
+      case APP_BIKE_PARAM_GRADE_TAU:
+          snprintf(out, out_size, "%u ms", (unsigned)bike->grade_display_tau_ms);
+          break;
+
+      case APP_BIKE_PARAM_ACCEL_TAU:
+          snprintf(out, out_size, "%u ms", (unsigned)bike->accel_display_tau_ms);
+          break;
+
+      case APP_BIKE_PARAM_GNSS_MIN_SPD:
+          snprintf(out, out_size, "%u.%u km/h",
+                   (unsigned)(bike->gnss_min_speed_kmh_x10 / 10u),
+                   (unsigned)(bike->gnss_min_speed_kmh_x10 % 10u));
+          break;
+
+      case APP_BIKE_PARAM_GNSS_SACC:
+          snprintf(out, out_size, "%u.%u km/h",
+                   (unsigned)(bike->gnss_max_speed_acc_kmh_x10 / 10u),
+                   (unsigned)(bike->gnss_max_speed_acc_kmh_x10 % 10u));
+          break;
+
+      case APP_BIKE_PARAM_GNSS_HACC:
+          snprintf(out, out_size, "%u.%u deg",
+                   (unsigned)(bike->gnss_max_head_acc_deg_x10 / 10u),
+                   (unsigned)(bike->gnss_max_head_acc_deg_x10 % 10u));
+          break;
+
+      case APP_BIKE_PARAM_GNSS_BIAS_TAU:
+          snprintf(out, out_size, "%u ms", (unsigned)bike->gnss_bias_tau_ms);
+          break;
+
+      case APP_BIKE_PARAM_GNSS_OUTLIER:
+          snprintf(out, out_size, "%u mg", (unsigned)bike->gnss_outlier_gate_mg);
+          break;
+
+      case APP_BIKE_PARAM_OBD_STALE:
+          snprintf(out, out_size, "%u ms", (unsigned)bike->obd_stale_timeout_ms);
+          break;
+
+      case APP_BIKE_PARAM_COUNT:
+      default:
+          snprintf(out, out_size, "-");
+          break;
+      }
+  }
+
+  static void APP_BikeDebugCommitSettings(void)
+  {
+      APP_STATE_StoreSettingsSnapshot(&g_settings_snapshot);
+  }
+
+  static void APP_BikeDebugAdjustSelected(int32_t direction)
+  {
+      app_bike_settings_t *bike;
+      bool request_zero = false;
+      bool request_hard_rezero = false;
+
+      APP_STATE_CopySettingsSnapshot(&g_settings_snapshot);
+      bike = &g_settings_snapshot.bike;
+
+      switch ((app_bike_param_t)g_bike_selected_param)
+      {
+      case APP_BIKE_PARAM_ENABLE:
+          bike->enabled = (uint8_t)(bike->enabled ? 0u : 1u);
+          break;
+
+      case APP_BIKE_PARAM_AUTO_ZERO:
+          bike->auto_zero_on_boot = (uint8_t)(bike->auto_zero_on_boot ? 0u : 1u);
+          break;
+
+      case APP_BIKE_PARAM_GNSS_AID:
+          bike->gnss_aid_enabled = (uint8_t)(bike->gnss_aid_enabled ? 0u : 1u);
+          break;
+
+      case APP_BIKE_PARAM_OBD_AID:
+          bike->obd_aid_enabled = (uint8_t)(bike->obd_aid_enabled ? 0u : 1u);
+          break;
+
+      case APP_BIKE_PARAM_MOUNT_FWD:
+          bike->mount_forward_axis =
+              (uint8_t)(((uint32_t)bike->mount_forward_axis + ((direction > 0) ? 1u : 5u)) % 6u);
+          request_zero = true;
+          break;
+
+      case APP_BIKE_PARAM_MOUNT_LEFT:
+          bike->mount_left_axis =
+              (uint8_t)(((uint32_t)bike->mount_left_axis + ((direction > 0) ? 1u : 5u)) % 6u);
+          request_zero = true;
+          break;
+
+      case APP_BIKE_PARAM_YAW_TRIM:
+          bike->mount_yaw_trim_deg_x10 =
+              (int16_t)APP_ClampS32((int32_t)bike->mount_yaw_trim_deg_x10 + ((direction > 0) ? 1 : -1),
+                                    -300, 300);
+          request_zero = true;
+          break;
+
+      case APP_BIKE_PARAM_ACCEL_LSB:
+          bike->imu_accel_lsb_per_g =
+              APP_ClampToU16((int32_t)bike->imu_accel_lsb_per_g + ((direction > 0) ? 64 : -64), 512, 32768);
+          request_hard_rezero = true;
+          break;
+
+      case APP_BIKE_PARAM_GYRO_LSB_X10:
+          bike->imu_gyro_lsb_per_dps_x10 =
+              APP_ClampToU16((int32_t)bike->imu_gyro_lsb_per_dps_x10 + ((direction > 0) ? 5 : -5), 10, 5000);
+          request_hard_rezero = true;
+          break;
+
+      case APP_BIKE_PARAM_GRAVITY_TAU:
+          bike->imu_gravity_tau_ms =
+              APP_ClampToU16((int32_t)bike->imu_gravity_tau_ms + ((direction > 0) ? 25 : -25), 0, 5000);
+          break;
+
+      case APP_BIKE_PARAM_LINEAR_TAU:
+          bike->imu_linear_tau_ms =
+              APP_ClampToU16((int32_t)bike->imu_linear_tau_ms + ((direction > 0) ? 10 : -10), 0, 3000);
+          break;
+
+      case APP_BIKE_PARAM_ATT_GATE:
+          bike->imu_attitude_accel_gate_mg =
+              APP_ClampToU16((int32_t)bike->imu_attitude_accel_gate_mg + ((direction > 0) ? 5 : -5), 10, 1000);
+          break;
+
+      case APP_BIKE_PARAM_JERK_GATE:
+          bike->imu_jerk_gate_mg_per_s =
+              APP_ClampToU16((int32_t)bike->imu_jerk_gate_mg_per_s + ((direction > 0) ? 100 : -100), 100, 50000);
+          break;
+
+      case APP_BIKE_PARAM_MIN_TRUST:
+          bike->imu_predict_min_trust_permille =
+              APP_ClampToU16((int32_t)bike->imu_predict_min_trust_permille + ((direction > 0) ? 25 : -25), 0, 1000);
+          break;
+
+      case APP_BIKE_PARAM_DEADBAND:
+          bike->output_deadband_mg =
+              APP_ClampToU16((int32_t)bike->output_deadband_mg + ((direction > 0) ? 1 : -1), 0, 300);
+          break;
+
+      case APP_BIKE_PARAM_CLIP:
+          bike->output_clip_mg =
+              APP_ClampToU16((int32_t)bike->output_clip_mg + ((direction > 0) ? 25 : -25), 100, 4000);
+          break;
+
+      case APP_BIKE_PARAM_LEAN_TAU:
+          bike->lean_display_tau_ms =
+              APP_ClampToU16((int32_t)bike->lean_display_tau_ms + ((direction > 0) ? 10 : -10), 0, 3000);
+          break;
+
+      case APP_BIKE_PARAM_GRADE_TAU:
+          bike->grade_display_tau_ms =
+              APP_ClampToU16((int32_t)bike->grade_display_tau_ms + ((direction > 0) ? 10 : -10), 0, 3000);
+          break;
+
+      case APP_BIKE_PARAM_ACCEL_TAU:
+          bike->accel_display_tau_ms =
+              APP_ClampToU16((int32_t)bike->accel_display_tau_ms + ((direction > 0) ? 10 : -10), 0, 3000);
+          break;
+
+      case APP_BIKE_PARAM_GNSS_MIN_SPD:
+          bike->gnss_min_speed_kmh_x10 =
+              APP_ClampToU16((int32_t)bike->gnss_min_speed_kmh_x10 + ((direction > 0) ? 5 : -5), 0, 400);
+          break;
+
+      case APP_BIKE_PARAM_GNSS_SACC:
+          bike->gnss_max_speed_acc_kmh_x10 =
+              APP_ClampToU16((int32_t)bike->gnss_max_speed_acc_kmh_x10 + ((direction > 0) ? 1 : -1), 1, 200);
+          break;
+
+      case APP_BIKE_PARAM_GNSS_HACC:
+          bike->gnss_max_head_acc_deg_x10 =
+              APP_ClampToU16((int32_t)bike->gnss_max_head_acc_deg_x10 + ((direction > 0) ? 1 : -1), 1, 300);
+          break;
+
+      case APP_BIKE_PARAM_GNSS_BIAS_TAU:
+          bike->gnss_bias_tau_ms =
+              APP_ClampToU16((int32_t)bike->gnss_bias_tau_ms + ((direction > 0) ? 100 : -100), 100, 30000);
+          break;
+
+      case APP_BIKE_PARAM_GNSS_OUTLIER:
+          bike->gnss_outlier_gate_mg =
+              APP_ClampToU16((int32_t)bike->gnss_outlier_gate_mg + ((direction > 0) ? 10 : -10), 50, 4000);
+          break;
+
+      case APP_BIKE_PARAM_OBD_STALE:
+          bike->obd_stale_timeout_ms =
+              APP_ClampToU16((int32_t)bike->obd_stale_timeout_ms + ((direction > 0) ? 25 : -25), 50, 5000);
+          break;
+
+      case APP_BIKE_PARAM_COUNT:
+      default:
+          break;
+      }
+
+      APP_BikeDebugCommitSettings();
+
+      if (request_hard_rezero != false)
+      {
+          BIKE_DYNAMICS_RequestHardRezero();
+      }
+      else if (request_zero != false)
+      {
+          ResetBankingAngleSensor();
+      }
+  }
+
+  static bool APP_HandleBikePageButtonEvent(const button_event_t *event, uint32_t now_ms)
+  {
+      (void)now_ms;
+
+      if (event == 0)
+      {
+          return false;
+      }
+
+      if (g_ui_page != APP_UI_PAGE_BIKE)
+      {
+          return false;
+      }
+
+      if (event->type == BUTTON_EVENT_SHORT_PRESS)
+      {
+          if (event->id == BUTTON_ID_2)
+          {
+              if (g_bike_selected_param == 0u)
+              {
+                  g_bike_selected_param = (uint8_t)(APP_BIKE_PARAM_COUNT - 1u);
+              }
+              else
+              {
+                  g_bike_selected_param--;
+              }
+              return true;
+          }
+          else if (event->id == BUTTON_ID_3)
+          {
+              g_bike_selected_param = (uint8_t)((g_bike_selected_param + 1u) % (uint8_t)APP_BIKE_PARAM_COUNT);
+              return true;
+          }
+          else if (event->id == BUTTON_ID_4)
+          {
+              APP_BikeDebugAdjustSelected(-1);
+              return true;
+          }
+          else if (event->id == BUTTON_ID_5)
+          {
+              APP_BikeDebugAdjustSelected(+1);
+              return true;
+          }
+          else if (event->id == BUTTON_ID_6)
+          {
+              ResetBankingAngleSensor();
+              return true;
+          }
+      }
+      else if ((event->type == BUTTON_EVENT_LONG_PRESS) && (event->id == BUTTON_ID_6))
+      {
+          BIKE_DYNAMICS_RequestHardRezero();
+          return true;
+      }
+
+      return false;
+  }
+
+  static void APP_DrawBikeDebugPage(u8g2_t *u8g2,
+                                    const app_bike_state_t *bike,
+                                    const app_settings_t *settings,
+                                    uint32_t now_ms)
+  {
+      uint8_t y_left;
+      uint8_t y_right;
+      char line[64];
+      char text_a[24];
+      char text_b[24];
+
+      (void)now_ms;
+
+      if ((u8g2 == 0) || (bike == 0) || (settings == 0))
+      {
+          return;
+      }
+
+      u8g2_ClearBuffer(u8g2);
+
+      y_left  = 8u;
+      y_right = 8u;
+
+      /* ---------------------------------------------------------------------- */
+      /*  좌측 컬럼 상단                                                          */
+      /*                                                                        */
+      /*  이 영역은 실제 추정 결과를 보는 메인 숫자 영역이다.                     */
+      /*  화면 왼쪽 위에서 아래로                                                */
+      /*  lean -> grade -> lat/lon -> speed/mode 순으로 배치한다.                */
+      /* ---------------------------------------------------------------------- */
+      APP_FormatSignedX10Text(text_a, sizeof(text_a), bike->banking_angle_deg_x10);
+      snprintf(line, sizeof(line), "LEAN %s d", text_a);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      APP_FormatSignedX10Text(text_a, sizeof(text_a), bike->grade_deg_x10);
+      snprintf(line, sizeof(line), "GRADE %s d", text_a);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      APP_BikeFormatSignedMgAsGText(text_a, sizeof(text_a), bike->lat_accel_mg);
+      snprintf(line, sizeof(line), "LAT %s g", text_a);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      APP_BikeFormatSignedMgAsGText(text_a, sizeof(text_a), bike->lon_accel_mg);
+      snprintf(line, sizeof(line), "LON %s g", text_a);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      APP_BikeFormatUnsignedKmhX10Text(text_a, sizeof(text_a), bike->speed_kmh_x10);
+      snprintf(line, sizeof(line), "SPD %s k", text_a);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      snprintf(line, sizeof(line), "SRC %s MODE %s",
+               APP_BikeSpeedSourceName(bike->speed_source),
+               APP_BikeEstimatorModeName(bike->estimator_mode));
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      snprintf(line, sizeof(line), "CONF %u", (unsigned)bike->confidence_permille);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      /* ---------------------------------------------------------------------- */
+      /*  좌측 컬럼 중단                                                          */
+      /*                                                                        */
+      /*  이 영역은 IMU 값과 external reference의 차이를 보는 튜닝 구역이다.      */
+      /*  GNSS/OBD bias tuning이 제대로 먹는지 바로 확인할 수 있게                */
+      /*  IMU-only / REF / BIAS 를 한 묶음으로 표시한다.                          */
+      /* ---------------------------------------------------------------------- */
+      APP_BikeFormatSignedMgAsGText(text_a, sizeof(text_a), bike->lat_accel_imu_mg);
+      APP_BikeFormatSignedMgAsGText(text_b, sizeof(text_b), bike->lat_accel_ref_mg);
+      snprintf(line, sizeof(line), "LATI %s R %s", text_a, text_b);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      APP_BikeFormatSignedMgAsGText(text_a, sizeof(text_a), bike->lon_accel_imu_mg);
+      APP_BikeFormatSignedMgAsGText(text_b, sizeof(text_b), bike->lon_accel_ref_mg);
+      snprintf(line, sizeof(line), "LONI %s R %s", text_a, text_b);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      APP_BikeFormatSignedMgAsGText(text_a, sizeof(text_a), bike->lat_bias_mg);
+      APP_BikeFormatSignedMgAsGText(text_b, sizeof(text_b), bike->lon_bias_mg);
+      snprintf(line, sizeof(line), "BIAS L%s X%s", text_a, text_b);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      snprintf(line, sizeof(line), "TRUST %u J %ld",
+               (unsigned)bike->imu_attitude_trust_permille,
+               (long)bike->imu_jerk_mg_per_s);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      snprintf(line, sizeof(line), "UP %ld %ld %ld",
+               (long)bike->up_bx_milli,
+               (long)bike->up_by_milli,
+               (long)bike->up_bz_milli);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      snprintf(line, sizeof(line), "GPS Q S%u P%u H%u",
+               (unsigned)bike->gnss_numsv_used,
+               (unsigned)bike->gnss_speed_acc_kmh_x10,
+               (unsigned)bike->gnss_head_acc_deg_x10);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      /* ---------------------------------------------------------------------- */
+      /*  우측 컬럼 상단                                                          */
+      /*                                                                        */
+      /*  이 영역은 실시간 튜닝 패널이다.                                         */
+      /*  우측 상단에 현재 선택된 파라미터 이름과 값을 크게 보여 주고,            */
+      /*  그 아래에 mount / OBD 입력 상태 / 버튼 힌트를 붙인다.                  */
+      /* ---------------------------------------------------------------------- */
+      snprintf(line, sizeof(line), "SEL %s",
+               APP_BikeParamName((app_bike_param_t)g_bike_selected_param));
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+
+      APP_BikeDebugFormatSelectedValue(settings, text_a, sizeof(text_a));
+      snprintf(line, sizeof(line), "VAL %s", text_a);
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+
+      snprintf(line, sizeof(line), "AX F:%s L:%s",
+               APP_BikeAxisName(settings->bike.mount_forward_axis),
+               APP_BikeAxisName(settings->bike.mount_left_axis));
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+
+      snprintf(line, sizeof(line), "YAW %d.%01d",
+               (int)(settings->bike.mount_yaw_trim_deg_x10 / 10),
+               (int)abs((int)(settings->bike.mount_yaw_trim_deg_x10 % 10)));
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+
+      snprintf(line, sizeof(line), "ZERO %u HARD %lu",
+               bike->zero_valid ? 1u : 0u,
+               (unsigned long)bike->hard_rezero_count);
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+
+      snprintf(line, sizeof(line), "OBDIN %u %lu",
+               bike->obd_input_speed_valid ? 1u : 0u,
+               (unsigned long)bike->obd_input_speed_mmps);
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+
+      snprintf(line, sizeof(line), "B2/B3 SEL");
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+
+      snprintf(line, sizeof(line), "B4/B5 -/+");
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+
+      snprintf(line, sizeof(line), "B6 ZERO");
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+
+      snprintf(line, sizeof(line), "B6L HARD");
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+
+      snprintf(line, sizeof(line), "LEAN/LAT/LON");
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+  }
+
+  /* -------------------------------------------------------------------------- */
   /*  UI가 쓰는 snapshot                                                          */
   /*                                                                            */
   /*  g_gps_snapshot 은 이제 app_gps_state_t 전체가 아니라                        */
@@ -3041,6 +3697,9 @@
 
       case APP_UI_PAGE_ALTITUDE:
           return APP_UI_ALTITUDE_MIN_REFRESH_MS;
+
+      case APP_UI_PAGE_BIKE:
+          return APP_UI_BIKE_MIN_REFRESH_MS;
 
       case APP_UI_PAGE_GPS:
       default:
@@ -3134,6 +3793,14 @@
           /*  ALTITUDE 페이지 전용 버튼 매핑                                      */
           /* ------------------------------------------------------------------ */
           if (APP_HandleAltitudePageButtonEvent(&event, now_ms) != false)
+          {
+              continue;
+          }
+
+          /* ------------------------------------------------------------------ */
+          /*  BIKE 페이지 전용 버튼 매핑                                          */
+          /* ------------------------------------------------------------------ */
+          if (APP_HandleBikePageButtonEvent(&event, now_ms) != false)
           {
               continue;
           }
@@ -3312,6 +3979,7 @@ void UI_DebugLegacy_Init(void)
     memset(&g_spi_flash_snapshot, 0, sizeof(g_spi_flash_snapshot));
     memset(&g_settings_snapshot, 0, sizeof(g_settings_snapshot));
     memset(&g_altitude_snapshot, 0, sizeof(g_altitude_snapshot));
+    memset(&g_bike_snapshot, 0, sizeof(g_bike_snapshot));
     memset(&g_last_button_event, 0, sizeof(g_last_button_event));
 
     g_ui_page = APP_UI_PAGE_GPS;
@@ -3320,6 +3988,7 @@ void UI_DebugLegacy_Init(void)
     g_last_button_pressed_mask = Button_GetPressedMask();
     g_ui_force_redraw = 1u;
     g_altitude_selected_param = 0u;
+    g_bike_selected_param = 0u;
     APP_ALTITUDE_DebugSetUiActive(false, HAL_GetTick());
 }
 
@@ -3384,6 +4053,12 @@ void UI_DebugLegacy_Draw(u8g2_t *u8g2, uint32_t now_ms)
             APP_STATE_CopyAltitudeSnapshot(&g_altitude_snapshot);
             APP_STATE_CopySettingsSnapshot(&g_settings_snapshot);
         }
+
+        else if (g_ui_page == APP_UI_PAGE_BIKE)
+        {
+            APP_STATE_CopyBikeSnapshot(&g_bike_snapshot);
+            APP_STATE_CopySettingsSnapshot(&g_settings_snapshot);
+        }
         else
         {
             APP_STATE_CopyGpsUiSnapshot(&g_gps_snapshot);
@@ -3422,6 +4097,11 @@ void UI_DebugLegacy_Draw(u8g2_t *u8g2, uint32_t now_ms)
     else if (g_ui_page == APP_UI_PAGE_ALTITUDE)
     {
         APP_DrawAltitudeDebugPage(u8g2, &g_altitude_snapshot, &g_settings_snapshot, now_ms);
+    }
+
+    else if (g_ui_page == APP_UI_PAGE_BIKE)
+    {
+        APP_DrawBikeDebugPage(u8g2, &g_bike_snapshot, &g_settings_snapshot, now_ms);
     }
     else
     {
