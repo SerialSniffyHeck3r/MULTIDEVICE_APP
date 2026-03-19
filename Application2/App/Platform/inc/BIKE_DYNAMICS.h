@@ -1,4 +1,3 @@
-
 #ifndef BIKE_DYNAMICS_H
 #define BIKE_DYNAMICS_H
 
@@ -15,25 +14,21 @@ extern "C" {
 /*  BIKE_DYNAMICS                                                              */
 /*                                                                            */
 /*  역할                                                                       */
-/*  - MPU6050 / 추후 MPU9250 같은 6축 IMU의 raw 값을 사용해                    */
-/*    모터사이클 프레임 기준의 banking angle(뱅킹각) / grade(오르막, 내리막) /  */
-/*    lateral G / accel-decel 을 추정한다.                                     */
+/*  - MPU6050 같은 6축 IMU raw를 사용해                                        */
+/*    모터사이클 프레임 기준의 banking angle / grade / lateral G /             */
+/*    accel-decel 을 추정한다.                                                 */
 /*  - magnetometer는 사용하지 않는다.                                          */
-/*  - GNSS speed / course, 그리고 추후 OBD speed는                            */
-/*    "저주파 보정(anchor)" 으로만 사용한다.                                   */
-/*  - ResetBankingAngleSensor()가 호출되면                                     */
-/*    그 순간의 프레임 자세를 0도 / 0도 기준으로 다시 잡는다.                  */
+/*  - GNSS speed / GNSS heading / future OBD speed는                           */
+/*    "저주파 anchor" 또는 "속도 anchor" 로만 사용한다.                        */
+/*  - roll/pitch 추정 핵심은 IMU-only Mahony quaternion AHRS 이다.             */
+/*    즉, gyro는 빠른 자세 변화에 반응하고 accel은 중력 방향으로만             */
+/*    천천히 자세를 교정한다.                                                  */
 /*                                                                            */
 /*  출력 sign 규칙                                                             */
-/*  - banking angle : + = 좌측으로 기울어짐(left lean), - = 우측 lean          */
-/*  - grade         : + = 노즈 업 / 오르막,            - = 노즈 다운 / 내리막   */
-/*  - lateral G     : + = 좌회전 방향 가속(left),      - = 우회전 방향 가속     */
-/*  - accel-decel   : + = 가속,                        - = 제동                  */
-/*                                                                            */
-/*  사용 규칙                                                                  */
-/*  - boot 시 BIKE_DYNAMICS_Init(now_ms) 한 번 호출                            */
-/*  - main while(1) 에서 BIKE_DYNAMICS_Task(now_ms) 반복 호출                  */
-/*  - UI / logger / dashboard는 APP_STATE_CopyBikeSnapshot() 만 사용           */
+/*  - banking angle : + = left lean,  - = right lean                          */
+/*  - grade         : + = nose up,    - = nose down                           */
+/*  - lateral G     : + = left,       - = right                               */
+/*  - accel-decel   : + = accel,      - = braking                             */
 /* -------------------------------------------------------------------------- */
 void BIKE_DYNAMICS_Init(uint32_t now_ms);
 void BIKE_DYNAMICS_Task(uint32_t now_ms);
@@ -42,28 +37,36 @@ void BIKE_DYNAMICS_Task(uint32_t now_ms);
 /*  수동 zero capture 요청                                                     */
 /*                                                                            */
 /*  이 함수는 "지금 자세를 bank=0 / grade=0 기준으로 새로 삼아라" 라는 요청만   */
-/*  세팅한다. 실제 zero basis 캡처는 다음 유효 IMU 샘플에서 안전하게 수행된다.  */
+/*  세팅한다. 실제 zero basis 캡처는 다음 유효 IMU 샘플에서                     */
+/*  정지/안정 조건을 만족할 때 안전하게 수행된다.                              */
 /* -------------------------------------------------------------------------- */
 void BIKE_DYNAMICS_RequestZeroCapture(void);
 
 /* -------------------------------------------------------------------------- */
 /*  강한 재정렬 요청                                                           */
 /*                                                                            */
-/*  - gravity estimator를 초기화하고                                           */
-/*  - GNSS/OBD bias anchor도 다시 0부터 잡고                                   */
-/*  - 다음 유효 IMU 샘플에서 zero capture를 다시 수행한다.                     */
-/*                                                                            */
-/*  필터 상수가 크게 바뀌었거나, 디버그 중 상태를 깨끗하게 다시 보고 싶을 때    */
-/*  legacy bike debug page의 long press에서 사용하는 API다.                    */
+/*  - attitude quaternion / gravity observer / bias anchor runtime 을          */
+/*    다시 초기화한다.                                                         */
+/*  - 단, 이미 측정한 gyro bias 자체는 유지한다.                              */
+/*  - 다음 유효 IMU 샘플에서 자세를 다시 세우고, zero capture는                 */
+/*    별도 요청 또는 auto-zero 정책으로 다시 수행한다.                         */
 /* -------------------------------------------------------------------------- */
 void BIKE_DYNAMICS_RequestHardRezero(void);
 
 /* -------------------------------------------------------------------------- */
-/*  사용자 요구 함수명 wrapper                                                 */
+/*  자이로 바이어스 보정 요청                                                  */
 /*                                                                            */
-/*  질문에서 직접 지정한 이름을 그대로 제공한다.                               */
+/*  이 함수는 "지금부터 일정 시간 동안 바이크를 최대한 정지 상태로 유지하고     */
+/*  gyro raw 평균값을 bias로 저장하라" 는 요청을 세팅한다.                     */
+/*  실제 보정 절차는 BIKE_DYNAMICS_Task() 안에서 상태기계로 진행된다.          */
+/* -------------------------------------------------------------------------- */
+void BIKE_DYNAMICS_RequestGyroBiasCalibration(void);
+
+/* -------------------------------------------------------------------------- */
+/*  사용자 요구 함수명 wrapper                                                 */
 /* -------------------------------------------------------------------------- */
 void ResetBankingAngleSensor(void);
+void GyroBiasCorrection(void);
 
 #ifdef __cplusplus
 }

@@ -105,15 +105,15 @@ static void APP_STATE_ApplyDefaultSettingsUnlocked(void)
                /*  imu_poll_enabled = 1                                               */
                /*  - MPU6050 polling은 평상시 기본 ON                                 */
                /*                                                                    */
-               /*  mag_poll_enabled = 1                                               */
-               /*  - HMC5883L polling도 기존 동작과 동일하게 기본 ON                  */
+               /*  mag_poll_enabled = 0                                               */
+               /*             */
                /*                                                                    */
                /*  ms5611_only = 0                                                    */
                /*  - 평상시에는 강제 barometer-only 진단 모드를 끈 상태로 시작한다.   */
                /* ------------------------------------------------------------------ */
                g_app_state.settings.altitude.imu_vertical_sign              = 1;
                g_app_state.settings.altitude.imu_poll_enabled               = 1u;
-               g_app_state.settings.altitude.mag_poll_enabled               = 1u;
+               g_app_state.settings.altitude.mag_poll_enabled               = 0u;
                g_app_state.settings.altitude.ms5611_only                    = 0u;
 
                /* ------------------------------------------------------------------ */
@@ -275,7 +275,7 @@ static void APP_STATE_ApplyDefaultSettingsUnlocked(void)
         /*  - GNSS bias tau 4.0s  : GNSS는 저주파 anchor로만 천천히 먹인다.        */
         /* ---------------------------------------------------------------------- */
         g_app_state.settings.bike.enabled                        = 1u;
-        g_app_state.settings.bike.auto_zero_on_boot              = 1u;
+        g_app_state.settings.bike.auto_zero_on_boot              = 0u;
         g_app_state.settings.bike.gnss_aid_enabled               = 1u;
         g_app_state.settings.bike.obd_aid_enabled                = 1u;
 
@@ -706,6 +706,18 @@ static void APP_STATE_ResetBikeUnlocked(void)
     g_app_state.bike.gnss_fix_ok                 = 0u;
     g_app_state.bike.gnss_numsv_used             = 0u;
     g_app_state.bike.gnss_pdop_x100              = 0u;
+
+    g_app_state.bike.gyro_bias_cal_active        = false;
+    g_app_state.bike.gyro_bias_valid             = false;
+    g_app_state.bike.gyro_bias_cal_last_success  = false;
+    g_app_state.bike.reserved_gyro_bias0         = 0u;
+    g_app_state.bike.gyro_bias_cal_progress_permille = 0u;
+    g_app_state.bike.last_gyro_bias_cal_ms       = 0u;
+    g_app_state.bike.gyro_bias_cal_count         = 0u;
+    g_app_state.bike.gyro_bias_x_dps_x100        = 0;
+    g_app_state.bike.gyro_bias_y_dps_x100        = 0;
+    g_app_state.bike.gyro_bias_z_dps_x100        = 0;
+    g_app_state.bike.yaw_rate_dps_x10            = 0;
 
     /* ---------------------------------------------------------------------- */
     /*  future OBD 입력 필드는 reset 시에만 0으로 둔다.                         */

@@ -1696,18 +1696,54 @@ typedef struct
     int16_t  mount_yaw_trim_deg_x10;    /* 현재 적용 중 yaw trim                  */
 
     uint8_t  gnss_fix_ok;
-    uint8_t  gnss_numsv_used;
-    uint16_t gnss_pdop_x100;
+        uint8_t  gnss_numsv_used;
+        uint16_t gnss_pdop_x100;
 
-    /* ---------------------------------------------------------------------- */
-    /*  future OBD service input                                                */
-    /*                                                                        */
-    /*  추후 OBD service가 아래 세 필드만 갱신하면                              */
-    /*  BIKE_DYNAMICS가 자동으로 OBD speed source를 사용할 수 있다.             */
-    /* ---------------------------------------------------------------------- */
-    bool     obd_input_speed_valid;
-    uint32_t obd_input_speed_mmps;
-    uint32_t obd_input_last_update_ms;
+        /* ---------------------------------------------------------------------- */
+        /*  Gyro bias calibration 공개 상태                                         */
+        /*                                                                        */
+        /*  gyro_bias_cal_active                                                   */
+        /*  - 현재 gyro bias calibration이 진행 중인가                             */
+        /*                                                                        */
+        /*  gyro_bias_valid                                                        */
+        /*  - bias 값이 한 번이라도 성공적으로 측정되었는가                         */
+        /*                                                                        */
+        /*  gyro_bias_cal_last_success                                             */
+        /*  - 가장 최근 calibration 요청이 성공했는가                              */
+        /*                                                                        */
+        /*  gyro_bias_cal_progress_permille                                        */
+        /*  - calibration good-sample 누적 진행률, 0..1000                         */
+        /*                                                                        */
+        /*  last_gyro_bias_cal_ms / gyro_bias_cal_count                            */
+        /*  - 마지막 종료 시각 / 성공 누적 횟수                                    */
+        /*                                                                        */
+        /*  gyro_bias_*_dps_x100                                                   */
+        /*  - 사용자에게 보여 주기 위한 bias 값, 0.01 dps 고정소수점               */
+        /*                                                                        */
+        /*  yaw_rate_dps_x10                                                       */
+        /*  - 현재 world-up 축 기준 yaw rate, 0.1 dps                              */
+        /* ---------------------------------------------------------------------- */
+        bool     gyro_bias_cal_active;
+        bool     gyro_bias_valid;
+        bool     gyro_bias_cal_last_success;
+        uint8_t  reserved_gyro_bias0;
+        uint16_t gyro_bias_cal_progress_permille;
+        uint32_t last_gyro_bias_cal_ms;
+        uint32_t gyro_bias_cal_count;
+        int16_t  gyro_bias_x_dps_x100;
+        int16_t  gyro_bias_y_dps_x100;
+        int16_t  gyro_bias_z_dps_x100;
+        int16_t  yaw_rate_dps_x10;
+
+        /* ---------------------------------------------------------------------- */
+        /*  future OBD service input                                                */
+        /*                                                                        */
+        /*  추후 OBD service가 아래 세 필드만 갱신하면                              */
+        /*  BIKE_DYNAMICS가 자동으로 OBD speed source를 사용할 수 있다.             */
+        /* ---------------------------------------------------------------------- */
+        bool     obd_input_speed_valid;
+        uint32_t obd_input_speed_mmps;
+        uint32_t obd_input_last_update_ms;
 } app_bike_state_t;
 
 

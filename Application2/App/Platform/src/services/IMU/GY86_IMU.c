@@ -23,6 +23,22 @@ extern I2C_HandleTypeDef GY86_IMU_I2C_HANDLE;
 #define GY86_MS5611_ADDR             (0x77u << 1)
 
 /* -------------------------------------------------------------------------- */
+/*  Magnetometer compile-time kill switch                                      */
+/*                                                                            */
+/*  이 제품에서는 magnetometer를 아예 사용하지 않으므로                         */
+/*  low-level driver 레벨에서 probe / init / poll 자체를 막는다.               */
+/*                                                                            */
+/*  값이 0이면                                                                */
+/*  - HMC5883L probe 안 함                                                     */
+/*  - HMC5883L init 안 함                                                      */
+/*  - HMC5883L poll 안 함                                                      */
+/*  - APP_STATE debug에도 mag backend / poll period를 0으로 표시               */
+/* -------------------------------------------------------------------------- */
+#ifndef GY86_IMU_ENABLE_MAGNETOMETER
+#define GY86_IMU_ENABLE_MAGNETOMETER 0u
+#endif
+
+/* -------------------------------------------------------------------------- */
 /*  MPU6050 register map                                                       */
 /* -------------------------------------------------------------------------- */
 
@@ -1101,7 +1117,13 @@ static void GY86_ResetAppStateSlice(app_gy86_state_t *imu)
     imu->debug.baro_backend_id      = APP_IMU_BACKEND_NONE;
 
     imu->debug.mpu_poll_period_ms  = s_gy86_rt.mpu_period_ms;
+
+#if GY86_IMU_ENABLE_MAGNETOMETER
     imu->debug.mag_poll_period_ms  = GY86_IMU_MAG_PERIOD_MS;
+#else
+    imu->debug.mag_poll_period_ms  = 0u;
+#endif
+
     imu->debug.baro_poll_period_ms = GY86_IMU_BARO_PERIOD_MS;
 }
 
@@ -1240,25 +1262,30 @@ static void GY86_ProbeMissingBackends(uint32_t now_ms, app_gy86_state_t *imu)
         }
     }
 
-    /* ------------------------------ */
-    /*  MAG probe/init                 */
-    /* ------------------------------ */
-    if (s_gy86_rt.mag_online == 0u)
-    {
-        st = s_mag_backend.init(imu);
-
-        if (st == HAL_OK)
+        /* ------------------------------ */
+        /*  MAG probe/init                 */
+        /* ------------------------------ */
+    #if GY86_IMU_ENABLE_MAGNETOMETER
+        if (s_gy86_rt.mag_online == 0u)
         {
-            s_gy86_rt.mag_online = 1u;
-            s_gy86_rt.next_mag_ms = now_ms;
+            st = s_mag_backend.init(imu);
 
-            s_gy86_rt.mag_error_streak = 0u;
+            if (st == HAL_OK)
+            {
+                s_gy86_rt.mag_online = 1u;
+                s_gy86_rt.next_mag_ms = now_ms;
+
+                s_gy86_rt.mag_error_streak = 0u;
+            }
+            else
+            {
+                imu->debug.mag_error_count++;
+            }
         }
-        else
-        {
-            imu->debug.mag_error_count++;
-        }
-    }
+    #else
+        s_gy86_rt.mag_online = 0u;
+        s_gy86_rt.next_mag_ms = 0u;
+    #endif
 
     /* ------------------------------ */
     /*  BARO probe/init                */
@@ -1345,10 +1372,16 @@ void GY86_IMU_Task(uint32_t now_ms)
     /* ---------------------------------------------------------------------- */
     /*  미탐지/미초기화 칩이 있으면 1초마다 다시 probe                          */
     /* ---------------------------------------------------------------------- */
+#if GY86_IMU_ENABLE_MAGNETOMETER
     if (((s_gy86_rt.mpu_online == 0u) ||
          (s_gy86_rt.mag_online == 0u) ||
          (s_gy86_rt.baro_online == 0u)) &&
         (GY86_TimeDue(now_ms, s_gy86_rt.next_probe_ms) != 0u))
+#else
+    if (((s_gy86_rt.mpu_online == 0u) ||
+         (s_gy86_rt.baro_online == 0u)) &&
+        (GY86_TimeDue(now_ms, s_gy86_rt.next_probe_ms) != 0u))
+#endif
     {
         GY86_ProbeMissingBackends(now_ms, imu);
     }
@@ -1369,6 +1402,13 @@ void GY86_IMU_Task(uint32_t now_ms)
     /* ---------------------------------------------------------------------- */
     /*  magnetometer polling                                                   */
     /* ---------------------------------------------------------------------- */
+    /* ---------------------------------------------------------------------- */
+    /*  magnetometer polling                                                   */
+    /*                                                                        */
+    /*  이번 제품에서는 magnetometer를 완전히 비활성화했으므로                 */
+    /*  이 블록은 compile-time switch가 1일 때만 살아 있다.                    */
+    /* ---------------------------------------------------------------------- */
+#if GY86_IMU_ENABLE_MAGNETOMETER
     if ((s_gy86_rt.mag_online != 0u) &&
         (GY86_TimeDue(now_ms, s_gy86_rt.next_mag_ms) != 0u))
     {
@@ -1378,6 +1418,7 @@ void GY86_IMU_Task(uint32_t now_ms)
                                                      GY86_IMU_MAG_PERIOD_MS,
                                                      now_ms);
     }
+#endif
 
     /* ---------------------------------------------------------------------- */
     /*  barometer state machine                                                */

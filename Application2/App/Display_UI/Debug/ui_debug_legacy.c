@@ -3403,210 +3403,239 @@
   }
 
   static bool APP_HandleBikePageButtonEvent(const button_event_t *event, uint32_t now_ms)
-  {
-      (void)now_ms;
+    {
+        (void)now_ms;
 
-      if (event == 0)
-      {
-          return false;
-      }
+        if (event == 0)
+        {
+            return false;
+        }
 
-      if (g_ui_page != APP_UI_PAGE_BIKE)
-      {
-          return false;
-      }
+        if (g_ui_page != APP_UI_PAGE_BIKE)
+        {
+            return false;
+        }
 
-      if (event->type == BUTTON_EVENT_SHORT_PRESS)
-      {
-          if (event->id == BUTTON_ID_2)
-          {
-              if (g_bike_selected_param == 0u)
-              {
-                  g_bike_selected_param = (uint8_t)(APP_BIKE_PARAM_COUNT - 1u);
-              }
-              else
-              {
-                  g_bike_selected_param--;
-              }
-              return true;
-          }
-          else if (event->id == BUTTON_ID_3)
-          {
-              g_bike_selected_param = (uint8_t)((g_bike_selected_param + 1u) % (uint8_t)APP_BIKE_PARAM_COUNT);
-              return true;
-          }
-          else if (event->id == BUTTON_ID_4)
-          {
-              APP_BikeDebugAdjustSelected(-1);
-              return true;
-          }
-          else if (event->id == BUTTON_ID_5)
-          {
-              APP_BikeDebugAdjustSelected(+1);
-              return true;
-          }
-          else if (event->id == BUTTON_ID_6)
-          {
-              ResetBankingAngleSensor();
-              return true;
-          }
-      }
-      else if ((event->type == BUTTON_EVENT_LONG_PRESS) && (event->id == BUTTON_ID_6))
-      {
-          BIKE_DYNAMICS_RequestHardRezero();
-          return true;
-      }
+        if (event->type == BUTTON_EVENT_SHORT_PRESS)
+        {
+            if (event->id == BUTTON_ID_2)
+            {
+                if (g_bike_selected_param == 0u)
+                {
+                    g_bike_selected_param = (uint8_t)(APP_BIKE_PARAM_COUNT - 1u);
+                }
+                else
+                {
+                    g_bike_selected_param--;
+                }
+                return true;
+            }
+            else if (event->id == BUTTON_ID_3)
+            {
+                g_bike_selected_param = (uint8_t)((g_bike_selected_param + 1u) % (uint8_t)APP_BIKE_PARAM_COUNT);
+                return true;
+            }
+            else if (event->id == BUTTON_ID_4)
+            {
+                APP_BikeDebugAdjustSelected(-1);
+                return true;
+            }
+            else if (event->id == BUTTON_ID_5)
+            {
+                APP_BikeDebugAdjustSelected(+1);
+                return true;
+            }
+            else if (event->id == BUTTON_ID_6)
+            {
+                ResetBankingAngleSensor();
+                return true;
+            }
+        }
+        else if (event->type == BUTTON_EVENT_LONG_PRESS)
+        {
+            if (event->id == BUTTON_ID_1)
+            {
+                GyroBiasCorrection();
+                return true;
+            }
+            else if (event->id == BUTTON_ID_6)
+            {
+                BIKE_DYNAMICS_RequestHardRezero();
+                return true;
+            }
+        }
 
-      return false;
-  }
+        return false;
+    }
 
   static void APP_DrawBikeDebugPage(u8g2_t *u8g2,
-                                    const app_bike_state_t *bike,
-                                    const app_settings_t *settings,
-                                    uint32_t now_ms)
-  {
-      uint8_t y_left;
-      uint8_t y_right;
-      char line[64];
-      char text_a[24];
-      char text_b[24];
+                                      const app_bike_state_t *bike,
+                                      const app_settings_t *settings,
+                                      uint32_t now_ms)
+    {
+        uint8_t y_left;
+        uint8_t y_right;
+        char line[64];
+        char text_a[24];
+        char text_b[24];
 
-      (void)now_ms;
+        (void)now_ms;
 
-      if ((u8g2 == 0) || (bike == 0) || (settings == 0))
-      {
-          return;
-      }
+        if ((u8g2 == 0) || (bike == 0) || (settings == 0))
+        {
+            return;
+        }
 
-      u8g2_ClearBuffer(u8g2);
+        u8g2_ClearBuffer(u8g2);
 
-      y_left  = 8u;
-      y_right = 8u;
+        y_left  = 8u;
+        y_right = 8u;
 
-      /* ---------------------------------------------------------------------- */
-      /*  좌측 컬럼 상단                                                          */
-      /*                                                                        */
-      /*  이 영역은 실제 추정 결과를 보는 메인 숫자 영역이다.                     */
-      /*  화면 왼쪽 위에서 아래로                                                */
-      /*  lean -> grade -> lat/lon -> speed/mode 순으로 배치한다.                */
-      /* ---------------------------------------------------------------------- */
-      APP_FormatSignedX10Text(text_a, sizeof(text_a), bike->banking_angle_deg_x10);
-      snprintf(line, sizeof(line), "LEAN %s d", text_a);
-      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+        /* ---------------------------------------------------------------------- */
+        /*  좌측 컬럼 상단                                                          */
+        /*                                                                        */
+        /*  이 영역은 실제 추정 결과를 보는 메인 숫자 영역이다.                     */
+        /*  화면 왼쪽 위에서 아래로                                                */
+        /*  lean -> grade -> lat/lon -> speed/mode 순으로 배치한다.                */
+        /* ---------------------------------------------------------------------- */
+        APP_FormatSignedX10Text(text_a, sizeof(text_a), bike->banking_angle_deg_x10);
+        snprintf(line, sizeof(line), "LEAN %s d", text_a);
+        APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
 
-      APP_FormatSignedX10Text(text_a, sizeof(text_a), bike->grade_deg_x10);
-      snprintf(line, sizeof(line), "GRADE %s d", text_a);
-      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+        APP_FormatSignedX10Text(text_a, sizeof(text_a), bike->grade_deg_x10);
+        snprintf(line, sizeof(line), "GRADE %s d", text_a);
+        APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
 
-      APP_BikeFormatSignedMgAsGText(text_a, sizeof(text_a), bike->lat_accel_mg);
-      snprintf(line, sizeof(line), "LAT %s g", text_a);
-      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+        APP_BikeFormatSignedMgAsGText(text_a, sizeof(text_a), bike->lat_accel_mg);
+        snprintf(line, sizeof(line), "LAT %s g", text_a);
+        APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
 
-      APP_BikeFormatSignedMgAsGText(text_a, sizeof(text_a), bike->lon_accel_mg);
-      snprintf(line, sizeof(line), "LON %s g", text_a);
-      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+        APP_BikeFormatSignedMgAsGText(text_a, sizeof(text_a), bike->lon_accel_mg);
+        snprintf(line, sizeof(line), "LON %s g", text_a);
+        APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
 
-      APP_BikeFormatUnsignedKmhX10Text(text_a, sizeof(text_a), bike->speed_kmh_x10);
-      snprintf(line, sizeof(line), "SPD %s k", text_a);
-      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+        APP_BikeFormatUnsignedKmhX10Text(text_a, sizeof(text_a), bike->speed_kmh_x10);
+        snprintf(line, sizeof(line), "SPD %s k", text_a);
+        APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
 
-      snprintf(line, sizeof(line), "SRC %s MODE %s",
-               APP_BikeSpeedSourceName(bike->speed_source),
-               APP_BikeEstimatorModeName(bike->estimator_mode));
-      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+        snprintf(line, sizeof(line), "SRC %s MODE %s",
+                 APP_BikeSpeedSourceName(bike->speed_source),
+                 APP_BikeEstimatorModeName(bike->estimator_mode));
+        APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
 
-      snprintf(line, sizeof(line), "CONF %u", (unsigned)bike->confidence_permille);
-      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+        snprintf(line, sizeof(line), "CONF %u", (unsigned)bike->confidence_permille);
+        APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
 
-      /* ---------------------------------------------------------------------- */
-      /*  좌측 컬럼 중단                                                          */
-      /*                                                                        */
-      /*  이 영역은 IMU 값과 external reference의 차이를 보는 튜닝 구역이다.      */
-      /*  GNSS/OBD bias tuning이 제대로 먹는지 바로 확인할 수 있게                */
-      /*  IMU-only / REF / BIAS 를 한 묶음으로 표시한다.                          */
-      /* ---------------------------------------------------------------------- */
-      APP_BikeFormatSignedMgAsGText(text_a, sizeof(text_a), bike->lat_accel_imu_mg);
-      APP_BikeFormatSignedMgAsGText(text_b, sizeof(text_b), bike->lat_accel_ref_mg);
-      snprintf(line, sizeof(line), "LATI %s R %s", text_a, text_b);
-      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+        /* ---------------------------------------------------------------------- */
+        /*  좌측 컬럼 중단                                                          */
+        /*                                                                        */
+        /*  이 영역은 IMU 값과 external reference의 차이를 보는 튜닝 구역이다.      */
+        /*  GNSS/OBD bias tuning이 제대로 먹는지 바로 확인할 수 있게                */
+        /*  IMU-only / REF / BIAS 를 한 묶음으로 표시한다.                          */
+        /* ---------------------------------------------------------------------- */
+        APP_BikeFormatSignedMgAsGText(text_a, sizeof(text_a), bike->lat_accel_imu_mg);
+        APP_BikeFormatSignedMgAsGText(text_b, sizeof(text_b), bike->lat_accel_ref_mg);
+        snprintf(line, sizeof(line), "LATI %s R %s", text_a, text_b);
+        APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
 
-      APP_BikeFormatSignedMgAsGText(text_a, sizeof(text_a), bike->lon_accel_imu_mg);
-      APP_BikeFormatSignedMgAsGText(text_b, sizeof(text_b), bike->lon_accel_ref_mg);
-      snprintf(line, sizeof(line), "LONI %s R %s", text_a, text_b);
-      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+        APP_BikeFormatSignedMgAsGText(text_a, sizeof(text_a), bike->lon_accel_imu_mg);
+        APP_BikeFormatSignedMgAsGText(text_b, sizeof(text_b), bike->lon_accel_ref_mg);
+        snprintf(line, sizeof(line), "LONI %s R %s", text_a, text_b);
+        APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
 
-      APP_BikeFormatSignedMgAsGText(text_a, sizeof(text_a), bike->lat_bias_mg);
-      APP_BikeFormatSignedMgAsGText(text_b, sizeof(text_b), bike->lon_bias_mg);
-      snprintf(line, sizeof(line), "BIAS L%s X%s", text_a, text_b);
-      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+        APP_BikeFormatSignedMgAsGText(text_a, sizeof(text_a), bike->lat_bias_mg);
+        APP_BikeFormatSignedMgAsGText(text_b, sizeof(text_b), bike->lon_bias_mg);
+        snprintf(line, sizeof(line), "BIAS L%s X%s", text_a, text_b);
+        APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
 
-      snprintf(line, sizeof(line), "TRUST %u J %ld",
-               (unsigned)bike->imu_attitude_trust_permille,
-               (long)bike->imu_jerk_mg_per_s);
-      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+        snprintf(line, sizeof(line), "TRUST %u J %ld",
+                 (unsigned)bike->imu_attitude_trust_permille,
+                 (long)bike->imu_jerk_mg_per_s);
+        APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
 
-      snprintf(line, sizeof(line), "UP %ld %ld %ld",
-               (long)bike->up_bx_milli,
-               (long)bike->up_by_milli,
-               (long)bike->up_bz_milli);
-      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+        snprintf(line, sizeof(line), "YAWRT %d.%01d",
+                 (int)(bike->yaw_rate_dps_x10 / 10),
+                 (int)abs((int)(bike->yaw_rate_dps_x10 % 10)));
+        APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
 
-      snprintf(line, sizeof(line), "GPS Q S%u P%u H%u",
-               (unsigned)bike->gnss_numsv_used,
-               (unsigned)bike->gnss_speed_acc_kmh_x10,
-               (unsigned)bike->gnss_head_acc_deg_x10);
-      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+        snprintf(line, sizeof(line), "UP %ld %ld %ld",
+                 (long)bike->up_bx_milli,
+                 (long)bike->up_by_milli,
+                 (long)bike->up_bz_milli);
+        APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
 
-      /* ---------------------------------------------------------------------- */
-      /*  우측 컬럼 상단                                                          */
-      /*                                                                        */
-      /*  이 영역은 실시간 튜닝 패널이다.                                         */
-      /*  우측 상단에 현재 선택된 파라미터 이름과 값을 크게 보여 주고,            */
-      /*  그 아래에 mount / OBD 입력 상태 / 버튼 힌트를 붙인다.                  */
-      /* ---------------------------------------------------------------------- */
-      snprintf(line, sizeof(line), "SEL %s",
-               APP_BikeParamName((app_bike_param_t)g_bike_selected_param));
-      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+        snprintf(line, sizeof(line), "GPS Q S%u P%u H%u",
+                 (unsigned)bike->gnss_numsv_used,
+                 (unsigned)bike->gnss_speed_acc_kmh_x10,
+                 (unsigned)bike->gnss_head_acc_deg_x10);
+        APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
 
-      APP_BikeDebugFormatSelectedValue(settings, text_a, sizeof(text_a));
-      snprintf(line, sizeof(line), "VAL %s", text_a);
-      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+        snprintf(line, sizeof(line), "GBCAL %u %u%%",
+                 bike->gyro_bias_cal_active ? 1u : 0u,
+                 (unsigned)((bike->gyro_bias_cal_progress_permille + 5u) / 10u));
+        APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
 
-      snprintf(line, sizeof(line), "AX F:%s L:%s",
-               APP_BikeAxisName(settings->bike.mount_forward_axis),
-               APP_BikeAxisName(settings->bike.mount_left_axis));
-      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+        snprintf(line, sizeof(line), "GBIAS %d %d %d",
+                 (int)bike->gyro_bias_x_dps_x100,
+                 (int)bike->gyro_bias_y_dps_x100,
+                 (int)bike->gyro_bias_z_dps_x100);
+        APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
 
-      snprintf(line, sizeof(line), "YAW %d.%01d",
-               (int)(settings->bike.mount_yaw_trim_deg_x10 / 10),
-               (int)abs((int)(settings->bike.mount_yaw_trim_deg_x10 % 10)));
-      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+        /* ---------------------------------------------------------------------- */
+        /*  우측 컬럼 상단                                                          */
+        /*                                                                        */
+        /*  이 영역은 실시간 튜닝 패널이다.                                         */
+        /*  우측 상단에 현재 선택된 파라미터 이름과 값을 크게 보여 주고,            */
+        /*  그 아래에 mount / OBD 입력 상태 / 버튼 힌트를 붙인다.                  */
+        /* ---------------------------------------------------------------------- */
+        snprintf(line, sizeof(line), "SEL %s",
+                 APP_BikeParamName((app_bike_param_t)g_bike_selected_param));
+        APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
 
-      snprintf(line, sizeof(line), "ZERO %u HARD %lu",
-               bike->zero_valid ? 1u : 0u,
-               (unsigned long)bike->hard_rezero_count);
-      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+        APP_BikeDebugFormatSelectedValue(settings, text_a, sizeof(text_a));
+        snprintf(line, sizeof(line), "VAL %s", text_a);
+        APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
 
-      snprintf(line, sizeof(line), "OBDIN %u %lu",
-               bike->obd_input_speed_valid ? 1u : 0u,
-               (unsigned long)bike->obd_input_speed_mmps);
-      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+        snprintf(line, sizeof(line), "AX F:%s L:%s",
+                 APP_BikeAxisName(settings->bike.mount_forward_axis),
+                 APP_BikeAxisName(settings->bike.mount_left_axis));
+        APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
 
-      snprintf(line, sizeof(line), "B2/B3 SEL");
-      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+        snprintf(line, sizeof(line), "YAW %d.%01d",
+                 (int)(settings->bike.mount_yaw_trim_deg_x10 / 10),
+                 (int)abs((int)(settings->bike.mount_yaw_trim_deg_x10 % 10)));
+        APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
 
-      snprintf(line, sizeof(line), "B4/B5 -/+");
-      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+        snprintf(line, sizeof(line), "ZERO %u HARD %lu",
+                 bike->zero_valid ? 1u : 0u,
+                 (unsigned long)bike->hard_rezero_count);
+        APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
 
-      snprintf(line, sizeof(line), "B6 ZERO");
-      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+        snprintf(line, sizeof(line), "GVAL %u CNT %lu",
+                 bike->gyro_bias_valid ? 1u : 0u,
+                 (unsigned long)bike->gyro_bias_cal_count);
+        APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
 
-      snprintf(line, sizeof(line), "B6L HARD");
-      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+        snprintf(line, sizeof(line), "OBDIN %u %lu",
+                 bike->obd_input_speed_valid ? 1u : 0u,
+                 (unsigned long)bike->obd_input_speed_mmps);
+        APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
 
-      snprintf(line, sizeof(line), "LEAN/LAT/LON");
-      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
-  }
+        snprintf(line, sizeof(line), "B1L GBIAS");
+        APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+
+        snprintf(line, sizeof(line), "B2/B3 SEL");
+        APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+
+        snprintf(line, sizeof(line), "B4/B5 -/+");
+        APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+
+        snprintf(line, sizeof(line), "B6 ZERO");
+        APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+
+        snprintf(line, sizeof(line), "B6L HARD");
+        APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+    }
 
   /* -------------------------------------------------------------------------- */
   /*  UI가 쓰는 snapshot                                                          */

@@ -13,6 +13,8 @@
 
 #include <stdio.h>
 
+#include "BIKE_DYNAMICS.h"
+
 /* -------------------------------------------------------------------------- */
 /*  Screen-local runtime state                                                */
 /*                                                                            */
@@ -36,11 +38,177 @@ static uint32_t         s_test_last_processed_tick_20hz = 0u;
 static uint32_t         s_test_bottom_overlay_until_ms = 0u;
 
 /* -------------------------------------------------------------------------- */
+/*  Bike service popup follow state                                            */
+/*                                                                            */
+/*  TEST PAGE는 원래 toast / popup 데모용 화면이지만,                          */
+/*  이번 패치부터는 라이딩 센서 서비스용 maintenance 단축키도 같이 가진다.     */
+/*                                                                            */
+/*  - F4 long : bank / grade zero capture 요청                                 */
+/*  - F5 long : gyro bias calibration 요청                                     */
+/* -------------------------------------------------------------------------- */
+typedef enum
+{
+  UI_TEST_BIKE_POPUP_NONE = 0u,
+  UI_TEST_BIKE_POPUP_ZERO_CAPTURE,
+  UI_TEST_BIKE_POPUP_GYRO_BIAS
+} ui_test_bike_popup_mode_t;
+
+static uint8_t          s_test_bike_popup_mode = (uint8_t)UI_TEST_BIKE_POPUP_NONE;
+static uint8_t          s_test_last_gyro_bias_active = 0u;
+static uint8_t          s_test_last_gyro_bias_success = 0u;
+static uint32_t         s_test_last_bike_popup_refresh_ms = 0u;
+
+/* -------------------------------------------------------------------------- */
 /*  Local helpers for TEST home logic                                         */
 /* -------------------------------------------------------------------------- */
 static void ui_screen_test_request_overlay(uint32_t now_ms);
 static void ui_screen_test_configure_bottom_bar(void);
 static const uint8_t *ui_screen_test_get_cute_icon(uint8_t index);
+
+static void ui_screen_test_start_bike_zero_capture(uint32_t now_ms);
+static void ui_screen_test_start_gyro_bias_calibration(uint32_t now_ms);
+static void ui_screen_test_task_bike_service_popup(uint32_t now_ms);
+
+/* -------------------------------------------------------------------------- */
+/*  Bike service popup helper: zero capture                                   */
+/*                                                                            */
+/*  이 helper는                                                               */
+/*  - BIKE_DYNAMICS 쪽에 zero capture 요청을 넣고                             */
+/*  - 화면 중앙 popup에는                                                     */
+/*      제목 : BIKE ZERO                                                       */
+/*      1행  : KEEP BIKE UPRIGHT                                               */
+/*      2행  : REQUEST STORED                                                  */
+/*    를 띄운다.                                                               */
+/*                                                                            */
+/*  실제 zero capture는 IMU가 새 샘플을 받고                                  */
+/*  정지/안정 조건을 만족하는 순간 BIKE_DYNAMICS_Task()에서 수행된다.          */
+/* -------------------------------------------------------------------------- */
+static void ui_screen_test_start_bike_zero_capture(uint32_t now_ms)
+{
+  ResetBankingAngleSensor();
+
+  s_test_bike_popup_mode = (uint8_t)UI_TEST_BIKE_POPUP_ZERO_CAPTURE;
+  s_test_last_bike_popup_refresh_ms = now_ms;
+
+  UI_Popup_Show("BIKE ZERO",
+                "KEEP BIKE UPRIGHT",
+                "REQUEST STORED",
+                icon_ui_info_8x8,
+                ICON8_W,
+                ICON8_H,
+                now_ms,
+                1200u);
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Bike service popup helper: gyro bias calibration                          */
+/*                                                                            */
+/*  이 helper는                                                               */
+/*  - BIKE_DYNAMICS 쪽에 gyro bias calibration 요청을 넣고                    */
+/*  - popup follow mode를 켠다.                                               */
+/*                                                                            */
+/*  이후 실제 진행 상황 / 성공 / 실패 popup 갱신은                            */
+/*  ui_screen_test_task_bike_service_popup() 에서 주기적으로 수행한다.        */
+/* -------------------------------------------------------------------------- */
+static void ui_screen_test_start_gyro_bias_calibration(uint32_t now_ms)
+{
+  GyroBiasCorrection();
+
+  s_test_bike_popup_mode = (uint8_t)UI_TEST_BIKE_POPUP_GYRO_BIAS;
+  s_test_last_gyro_bias_active = 0u;
+  s_test_last_gyro_bias_success = 0u;
+  s_test_last_bike_popup_refresh_ms = 0u;
+
+  UI_Popup_Show("GYRO BIAS",
+                "KEEP BIKE STILL",
+                "WAITING FOR GOOD SAMPLES",
+                icon_ui_warn_8x8,
+                ICON8_W,
+                ICON8_H,
+                now_ms,
+                900u);
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Bike service popup follow task                                            */
+/*                                                                            */
+/*  ZERO popup                                                                */
+/*  - F4 long으로 요청했을 때는 "요청이 저장되었다" 는 1회성 안내만 하므로      */
+/*    별도 follow는 하지 않는다.                                               */
+/*                                                                            */
+/*  GYRO BIAS popup                                                           */
+/*  - calibration active 중에는 진행률 popup을 주기적으로 갱신한다.            */
+/*  - calibration이 끝나면 성공/실패 결과 popup을 한 번 띄우고                 */
+/*    follow 모드를 종료한다.                                                  */
+/* -------------------------------------------------------------------------- */
+static void ui_screen_test_task_bike_service_popup(uint32_t now_ms)
+{
+  const app_bike_state_t *bike;
+  char line2[32];
+
+  bike = (const app_bike_state_t *)&g_app_state.bike;
+
+  if (s_test_bike_popup_mode != (uint8_t)UI_TEST_BIKE_POPUP_GYRO_BIAS)
+  {
+    return;
+  }
+
+  if (bike->gyro_bias_cal_active != false)
+  {
+    if ((uint32_t)(now_ms - s_test_last_bike_popup_refresh_ms) >= 150u)
+    {
+      snprintf(line2, sizeof(line2), "PROGRESS %u%%",
+               (unsigned)((bike->gyro_bias_cal_progress_permille + 5u) / 10u));
+
+      UI_Popup_Show("GYRO BIAS",
+                    "KEEP BIKE STILL",
+                    line2,
+                    icon_ui_warn_8x8,
+                    ICON8_W,
+                    ICON8_H,
+                    now_ms,
+                    900u);
+
+      s_test_last_bike_popup_refresh_ms = now_ms;
+    }
+
+    s_test_last_gyro_bias_active = 1u;
+    s_test_last_gyro_bias_success = (uint8_t)(bike->gyro_bias_cal_last_success ? 1u : 0u);
+    return;
+  }
+
+  if (s_test_last_gyro_bias_active != 0u)
+  {
+    if (bike->gyro_bias_cal_last_success != false)
+    {
+      UI_Popup_Show("GYRO BIAS",
+                    "CALIBRATION OK",
+                    "BIAS SAVED",
+                    icon_ui_ok_8x8,
+                    ICON8_W,
+                    ICON8_H,
+                    now_ms,
+                    1400u);
+    }
+    else
+    {
+      UI_Popup_Show("GYRO BIAS",
+                    "CALIBRATION FAIL",
+                    "TRY AGAIN WITHOUT MOVING",
+                    icon_ui_warn_8x8,
+                    ICON8_W,
+                    ICON8_H,
+                    now_ms,
+                    1600u);
+    }
+
+    s_test_bike_popup_mode = (uint8_t)UI_TEST_BIKE_POPUP_NONE;
+    s_test_last_gyro_bias_active = 0u;
+    s_test_last_gyro_bias_success = (uint8_t)(bike->gyro_bias_cal_last_success ? 1u : 0u);
+  }
+}
+
+
 
 /* -------------------------------------------------------------------------- */
 /*  TEST setting sub-mode state                                               */
@@ -200,6 +368,12 @@ void UI_ScreenTest_Init(uint32_t ui_tick_20hz)
   s_test_live_counter_20hz = 0u;
   s_test_last_processed_tick_20hz = ui_tick_20hz;
   s_test_bottom_overlay_until_ms = 0u;
+
+  s_test_bike_popup_mode = (uint8_t)UI_TEST_BIKE_POPUP_NONE;
+  s_test_last_gyro_bias_active = 0u;
+  s_test_last_gyro_bias_success = 0u;
+  s_test_last_bike_popup_refresh_ms = 0u;
+
   s_test_settings_active = 0u;
   s_test_settings_item_index = 0u;
   memset(&s_test_settings_original, 0, sizeof(s_test_settings_original));
@@ -234,6 +408,7 @@ void UI_ScreenTest_Task(uint32_t ui_tick_20hz)
   delta = (ui_tick_20hz - s_test_last_processed_tick_20hz);
   if (delta == 0u)
   {
+    ui_screen_test_task_bike_service_popup(HAL_GetTick());
     return;
   }
 
@@ -244,6 +419,12 @@ void UI_ScreenTest_Task(uint32_t ui_tick_20hz)
     s_test_live_counter_20hz += delta;
     s_test_blink_phase_on = (SlowToggle2Hz != false);
   }
+
+  /* ---------------------------------------------------------------------- */
+  /*  TEST PAGE는 20Hz task에서 gyro bias calibration popup 진행 상황도       */
+  /*  같이 추적한다.                                                           */
+  /* ---------------------------------------------------------------------- */
+  ui_screen_test_task_bike_service_popup(HAL_GetTick());
 }
 
 /* -------------------------------------------------------------------------- */
@@ -336,6 +517,32 @@ ui_screen_test_action_t UI_ScreenTest_HandleButtonEvent(const button_event_t *ev
      ui_screen_test_settings_enter(now_ms);
      return UI_SCREEN_TEST_ACTION_NONE;
    }
+
+   /* ---------------------------------------------------------------------- */
+     /* TEST 홈 F4 long press -> BIKE zero capture 요청                         */
+     /*                                                                        */
+     /* F4 short press의 toast demo는 그대로 유지하고,                          */
+     /* long press에서는 bank / grade zero capture maintenance를 수행한다.      */
+     /* ---------------------------------------------------------------------- */
+     if ((event->id == BUTTON_ID_4) &&
+         (event->type == BUTTON_EVENT_LONG_PRESS))
+     {
+       ui_screen_test_start_bike_zero_capture(now_ms);
+       return UI_SCREEN_TEST_ACTION_NONE;
+     }
+
+     /* ---------------------------------------------------------------------- */
+     /* TEST 홈 F5 long press -> gyro bias calibration 요청                     */
+     /*                                                                        */
+     /* F5 short press의 popup demo는 그대로 유지하고,                          */
+     /* long press에서는 gyro bias calibration을 시작한다.                      */
+     /* ---------------------------------------------------------------------- */
+     if ((event->id == BUTTON_ID_5) &&
+         (event->type == BUTTON_EVENT_LONG_PRESS))
+     {
+       ui_screen_test_start_gyro_bias_calibration(now_ms);
+       return UI_SCREEN_TEST_ACTION_NONE;
+     }
 
    /* ---------------------------------------------------------------------- */
    /* TEST 홈 F6 long press -> GPS 화면 진입                                  */
