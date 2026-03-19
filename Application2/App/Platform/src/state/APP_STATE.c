@@ -116,42 +116,49 @@ static void APP_STATE_ApplyDefaultSettingsUnlocked(void)
                g_app_state.settings.altitude.mag_poll_enabled               = 1u;
                g_app_state.settings.altitude.ms5611_only                    = 0u;
 
-        /* ------------------------------------------------------------------ */
-        /*  pressure / vario / display 반응 속도                               */
-        /*                                                                    */
-        /*  pressure_lpf_tau_ms = 110ms                                        */
-        /*  - raw pressure 잔떨림을 줄이되, baro 고유 응답성은 유지한다.       */
-        /*                                                                    */
-        /*  vario_fast_tau_ms = 160ms                                          */
-        /*  - 오디오/즉응용 fast vario                                         */
-        /*                                                                    */
-        /*  vario_slow_tau_ms = 900ms                                          */
-        /*  - 숫자 표시/경사도용 slow vario                                    */
-        /*                                                                    */
-        /*  display_lpf_tau_ms = 450ms                                         */
-        /*  - 최종 display altitude 기본 LPF                                   */
-        /* ------------------------------------------------------------------ */
-        g_app_state.settings.altitude.pressure_lpf_tau_ms            = 110u;
-        g_app_state.settings.altitude.vario_fast_tau_ms              = 160u;
-        g_app_state.settings.altitude.vario_slow_tau_ms              = 900u;
-        g_app_state.settings.altitude.display_lpf_tau_ms             = 450u;
+               /* ------------------------------------------------------------------ */
+               /*  pressure / vario / display 반응 속도                               */
+               /*                                                                    */
+               /*  pressure_lpf_tau_ms = 110ms                                        */
+               /*  - raw pressure 잔떨림을 줄이되, baro 고유 응답성은 유지한다.       */
+               /*                                                                    */
+               /*  vario_fast_tau_ms = 160ms                                          */
+               /*  - 오디오/즉응용 fast vario                                         */
+               /*                                                                    */
+               /*  vario_slow_tau_ms = 900ms                                          */
+               /*  - 숫자 표시/경사도용 slow vario                                    */
+               /*                                                                    */
+               /*  display_lpf_tau_ms = 650ms                                         */
+               /*  - stage-1 display altitude 기본 LPF                                */
+               /*  - 이번 패치에서는 최종 UI presentation 계층이 한 번 더 있으므로     */
+               /*    기존 450ms보다 약간만 더 눌러서 제품 느낌을 만든다.              */
+               /* ------------------------------------------------------------------ */
+               g_app_state.settings.altitude.pressure_lpf_tau_ms            = 110u;
+               g_app_state.settings.altitude.vario_fast_tau_ms              = 160u;
+               g_app_state.settings.altitude.vario_slow_tau_ms              = 900u;
+               g_app_state.settings.altitude.display_lpf_tau_ms             = 650u;
 
-        /* ------------------------------------------------------------------ */
-        /*  정지 상태 display 안정화 + ZUPT 기본값                             */
-        /*                                                                    */
-        /*  rest_detect_vario_cms  = 0.08m/s                                   */
-        /*  rest_detect_accel_mg   = 15mg                                       */
-        /*  rest_display_tau_ms    = 1.8s                                       */
-        /*  rest_display_hold_cm   = ±10cm                                      */
-        /*  zupt_enabled           = 1                                          */
-        /* ------------------------------------------------------------------ */
-        g_app_state.settings.altitude.rest_display_enabled           = 1u;
-        g_app_state.settings.altitude.zupt_enabled                   = 1u;
-        g_app_state.settings.altitude.reserved_rest0                 = 0u;
-        g_app_state.settings.altitude.rest_detect_vario_cms          = 8u;
-        g_app_state.settings.altitude.rest_detect_accel_mg           = 15u;
-        g_app_state.settings.altitude.rest_display_tau_ms            = 1800u;
-        g_app_state.settings.altitude.rest_display_hold_cm           = 10u;
+               /* ------------------------------------------------------------------ */
+               /*  정지 상태 display 안정화 + ZUPT 기본값                             */
+               /*                                                                    */
+               /*  rest_detect_vario_cms  = 0.08m/s                                   */
+               /*  rest_detect_accel_mg   = 15mg                                       */
+               /*  rest_display_tau_ms    = 2.6s                                       */
+               /*  rest_display_hold_cm   = ±20cm                                      */
+               /*  zupt_enabled           = 1                                          */
+               /*                                                                    */
+               /*  주의                                                               */
+               /*  - rest_detect_* 는 ZUPT 판정과도 공유되므로 그대로 둔다.           */
+               /*  - 이번 변경은 "정지로 판정된 뒤 숫자를 얼마나 오래 붙잡을지"만     */
+               /*    더 제품화하는 조정이다.                                          */
+               /* ------------------------------------------------------------------ */
+               g_app_state.settings.altitude.rest_display_enabled           = 1u;
+               g_app_state.settings.altitude.zupt_enabled                   = 1u;
+               g_app_state.settings.altitude.reserved_rest0                 = 0u;
+               g_app_state.settings.altitude.rest_detect_vario_cms          = 8u;
+               g_app_state.settings.altitude.rest_detect_accel_mg           = 15u;
+               g_app_state.settings.altitude.rest_display_tau_ms            = 2600u;
+               g_app_state.settings.altitude.rest_display_hold_cm           = 20u;
 
         /* ------------------------------------------------------------------ */
         /*  baro / GPS gate 및 measurement noise                               */

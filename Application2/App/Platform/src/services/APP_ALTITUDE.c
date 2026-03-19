@@ -269,6 +269,54 @@
 #define APP_ALTITUDE_BARO_VARIO_NOISE_MAX_SCALE 5.0f
 #endif
 
+#ifndef APP_ALTITUDE_DISPLAY_PRODUCT_REST_TAU_MIN_MS
+#define APP_ALTITUDE_DISPLAY_PRODUCT_REST_TAU_MIN_MS 2600u
+#endif
+
+#ifndef APP_ALTITUDE_DISPLAY_PRODUCT_SLOW_TAU_MIN_MS
+#define APP_ALTITUDE_DISPLAY_PRODUCT_SLOW_TAU_MIN_MS 1100u
+#endif
+
+#ifndef APP_ALTITUDE_DISPLAY_PRODUCT_FAST_TAU_MS
+#define APP_ALTITUDE_DISPLAY_PRODUCT_FAST_TAU_MS 360u
+#endif
+
+#ifndef APP_ALTITUDE_DISPLAY_PRODUCT_IDLE_VARIO_CMS
+#define APP_ALTITUDE_DISPLAY_PRODUCT_IDLE_VARIO_CMS 25.0f
+#endif
+
+#ifndef APP_ALTITUDE_DISPLAY_PRODUCT_FAST_VARIO_CMS
+#define APP_ALTITUDE_DISPLAY_PRODUCT_FAST_VARIO_CMS 150.0f
+#endif
+
+#ifndef APP_ALTITUDE_DISPLAY_PRODUCT_REST_HOLD_MIN_CM
+#define APP_ALTITUDE_DISPLAY_PRODUCT_REST_HOLD_MIN_CM 25.0f
+#endif
+
+#ifndef APP_ALTITUDE_DISPLAY_PRODUCT_REST_STEP_CM
+#define APP_ALTITUDE_DISPLAY_PRODUCT_REST_STEP_CM 50.0f
+#endif
+
+#ifndef APP_ALTITUDE_DISPLAY_PRODUCT_IDLE_STEP_CM
+#define APP_ALTITUDE_DISPLAY_PRODUCT_IDLE_STEP_CM 25.0f
+#endif
+
+#ifndef APP_ALTITUDE_DISPLAY_PRODUCT_MOVE_STEP_CM
+#define APP_ALTITUDE_DISPLAY_PRODUCT_MOVE_STEP_CM 10.0f
+#endif
+
+#ifndef APP_ALTITUDE_DISPLAY_PRODUCT_REST_HYST_CM
+#define APP_ALTITUDE_DISPLAY_PRODUCT_REST_HYST_CM 10.0f
+#endif
+
+#ifndef APP_ALTITUDE_DISPLAY_PRODUCT_MOVE_HYST_CM
+#define APP_ALTITUDE_DISPLAY_PRODUCT_MOVE_HYST_CM 6.0f
+#endif
+
+#ifndef APP_ALTITUDE_DISPLAY_PRODUCT_REACQUIRE_CM
+#define APP_ALTITUDE_DISPLAY_PRODUCT_REACQUIRE_CM 300.0f
+#endif
+
 /* -------------------------------------------------------------------------- */
 /*  내부 런타임 저장소                                                         */
 /* -------------------------------------------------------------------------- */
@@ -322,7 +370,24 @@ typedef struct
     float baro_residual_lp_cm;         /* adaptive R envelope용 residual LPF      */
     float adaptive_baro_noise_cm;      /* 현재 실제 사용된 adaptive baro noise    */
     float qnh_equiv_filt_hpa;          /* GPS anchor 기반 equivalent QNH LPF      */
-    float display_alt_filt_cm;         /* 최종 표시 altitude LPF                  */
+
+    /* ---------------------------------------------------------------------- */
+    /*  최종 altitude 표시 계층                                                */
+    /*                                                                        */
+    /*  display_alt_filt_cm    : stage-1 fused altitude LPF                    */
+    /*  display_alt_follow_cm  : stage-2 제품화용 presentation LPF             */
+    /*  display_alt_present_cm : UI 숫자로 실제 내보낼 최종 altitude            */
+    /*  display_output_valid   : 위 3개 표시 상태의 초기화 여부                 */
+    /*                                                                        */
+    /*  철학                                                                    */
+    /*  - core filter / fused altitude는 가능한 honest 하게 유지한다.          */
+    /*  - 하지만 alt_display_cm 은 파일럿이 보는 숫자이므로                    */
+    /*    상용기처럼 한 단계 더 damp / hold / hysteresis 를 준다.              */
+    /* ---------------------------------------------------------------------- */
+    float display_alt_filt_cm;         /* stage-1 fused altitude LPF              */
+    float display_alt_follow_cm;       /* stage-2 presentation LPF                */
+    float display_alt_present_cm;      /* 최종 UI altitude                        */
+    bool  display_output_valid;        /* 표시 상태 초기화 완료 여부              */
 
     float baro_alt_prev_cm;            /* baro altitude derivative 이전 샘플      */
     bool  baro_alt_prev_valid;         /* derivative 이전 샘플 유효 여부          */
@@ -955,6 +1020,160 @@ static bool APP_ALTITUDE_IsDisplayRestActive(const app_altitude_settings_t *sett
     }
 
     return true;
+}
+
+static uint32_t APP_ALTITUDE_ComputeProductDisplayTauMs(const app_altitude_settings_t *settings,
+                                                     float display_source_vario_cms,
+                                                     bool display_rest_active)
+{
+    uint32_t configured_display_tau_ms;
+    uint32_t configured_rest_tau_ms;
+    float    abs_vario_cms;
+    float    slow_tau_ms;
+    float    fast_tau_ms;
+    float    interp_t;
+    float    tau_ms;
+
+    configured_display_tau_ms = (settings != 0) ? settings->display_lpf_tau_ms : 450u;
+    configured_rest_tau_ms    = (settings != 0) ? settings->rest_display_tau_ms : 1800u;
+
+    slow_tau_ms = (float)APP_ALTITUDE_ClampU32(configured_display_tau_ms * 2u,
+                                               APP_ALTITUDE_DISPLAY_PRODUCT_SLOW_TAU_MIN_MS,
+                                               4000u);
+
+    if (display_rest_active != false)
+    {
+        return APP_ALTITUDE_ClampU32(configured_rest_tau_ms + 800u,
+                                     APP_ALTITUDE_DISPLAY_PRODUCT_REST_TAU_MIN_MS,
+                                     6000u);
+    }
+
+    fast_tau_ms = (float)APP_ALTITUDE_DISPLAY_PRODUCT_FAST_TAU_MS;
+    abs_vario_cms = fabsf(display_source_vario_cms);
+
+    if (abs_vario_cms <= APP_ALTITUDE_DISPLAY_PRODUCT_IDLE_VARIO_CMS)
+    {
+        return (uint32_t)(slow_tau_ms + 0.5f);
+    }
+
+    interp_t = (abs_vario_cms - APP_ALTITUDE_DISPLAY_PRODUCT_IDLE_VARIO_CMS) /
+               APP_ALTITUDE_ClampF(APP_ALTITUDE_DISPLAY_PRODUCT_FAST_VARIO_CMS - APP_ALTITUDE_DISPLAY_PRODUCT_IDLE_VARIO_CMS,
+                                   1.0f,
+                                   100000.0f);
+
+    interp_t = APP_ALTITUDE_Clamp01F(interp_t);
+    tau_ms   = APP_ALTITUDE_LerpF(slow_tau_ms, fast_tau_ms, interp_t);
+
+    return APP_ALTITUDE_ClampU32((uint32_t)(tau_ms + 0.5f),
+                                 APP_ALTITUDE_DISPLAY_PRODUCT_FAST_TAU_MS,
+                                 (uint32_t)(slow_tau_ms + 0.5f));
+}
+
+static float APP_ALTITUDE_ComputeProductDisplayStepCm(float display_source_vario_cms,
+                                                      bool display_rest_active)
+{
+    float abs_vario_cms;
+
+    if (display_rest_active != false)
+    {
+        return APP_ALTITUDE_DISPLAY_PRODUCT_REST_STEP_CM;
+    }
+
+    abs_vario_cms = fabsf(display_source_vario_cms);
+
+    if (abs_vario_cms <= APP_ALTITUDE_DISPLAY_PRODUCT_IDLE_VARIO_CMS)
+    {
+        return APP_ALTITUDE_DISPLAY_PRODUCT_IDLE_STEP_CM;
+    }
+
+    return APP_ALTITUDE_DISPLAY_PRODUCT_MOVE_STEP_CM;
+}
+
+static float APP_ALTITUDE_ComputeProductDisplayHoldCm(const app_altitude_settings_t *settings,
+                                                      bool display_rest_active)
+{
+    float hold_cm;
+
+    if (display_rest_active == false)
+    {
+        return 0.0f;
+    }
+
+    hold_cm = (settings != 0) ? ((float)settings->rest_display_hold_cm * 2.5f) : 0.0f;
+
+    return APP_ALTITUDE_ClampF(hold_cm,
+                               APP_ALTITUDE_DISPLAY_PRODUCT_REST_HOLD_MIN_CM,
+                               300.0f);
+}
+
+static float APP_ALTITUDE_UpdateProductDisplayAltitudeCm(const app_altitude_settings_t *settings,
+                                                         float display_target_cm,
+                                                         float display_source_vario_cms,
+                                                         bool display_rest_active,
+                                                         float dt_s)
+{
+    uint32_t presentation_tau_ms;
+    float    hold_cm;
+    float    step_cm;
+    float    hyst_cm;
+    float    upper_cm;
+    float    lower_cm;
+
+    if (s_altitude_runtime.display_output_valid == false)
+    {
+        s_altitude_runtime.display_alt_follow_cm  = display_target_cm;
+        s_altitude_runtime.display_alt_present_cm = display_target_cm;
+        s_altitude_runtime.display_output_valid   = true;
+        return display_target_cm;
+    }
+
+    presentation_tau_ms = APP_ALTITUDE_ComputeProductDisplayTauMs(settings,
+                                                                  display_source_vario_cms,
+                                                                  display_rest_active);
+
+    s_altitude_runtime.display_alt_follow_cm = APP_ALTITUDE_LpfUpdate(s_altitude_runtime.display_alt_follow_cm,
+                                                                      display_target_cm,
+                                                                      presentation_tau_ms,
+                                                                      dt_s);
+
+    hold_cm = APP_ALTITUDE_ComputeProductDisplayHoldCm(settings, display_rest_active);
+
+    if ((display_rest_active != false) &&
+        (fabsf(s_altitude_runtime.display_alt_follow_cm - s_altitude_runtime.display_alt_present_cm) <= hold_cm))
+    {
+        return s_altitude_runtime.display_alt_present_cm;
+    }
+
+    step_cm = APP_ALTITUDE_ComputeProductDisplayStepCm(display_source_vario_cms,
+                                                       display_rest_active);
+
+    hyst_cm = (display_rest_active != false) ? APP_ALTITUDE_DISPLAY_PRODUCT_REST_HYST_CM :
+                                               APP_ALTITUDE_DISPLAY_PRODUCT_MOVE_HYST_CM;
+
+    upper_cm = s_altitude_runtime.display_alt_present_cm + (step_cm * 0.5f) + hyst_cm;
+    lower_cm = s_altitude_runtime.display_alt_present_cm - (step_cm * 0.5f) - hyst_cm;
+
+    while (s_altitude_runtime.display_alt_follow_cm >= upper_cm)
+    {
+        s_altitude_runtime.display_alt_present_cm += step_cm;
+        upper_cm += step_cm;
+        lower_cm += step_cm;
+    }
+
+    while (s_altitude_runtime.display_alt_follow_cm <= lower_cm)
+    {
+        s_altitude_runtime.display_alt_present_cm -= step_cm;
+        upper_cm -= step_cm;
+        lower_cm -= step_cm;
+    }
+
+    if (fabsf(s_altitude_runtime.display_alt_follow_cm - s_altitude_runtime.display_alt_present_cm) >
+        APP_ALTITUDE_DISPLAY_PRODUCT_REACQUIRE_CM)
+    {
+        s_altitude_runtime.display_alt_present_cm = s_altitude_runtime.display_alt_follow_cm;
+    }
+
+    return s_altitude_runtime.display_alt_present_cm;
 }
 
 static bool APP_ALTITUDE_IsCoreRestActive(const app_altitude_settings_t *settings,
@@ -1667,9 +1886,12 @@ static void APP_ALTITUDE_EnsureFiltersInitialized(float baro_alt_qnh_cm,
         s_altitude_runtime.kf_imu.valid = true;
     }
 
-    if (s_altitude_runtime.display_alt_filt_cm == 0.0f)
+    if (s_altitude_runtime.display_output_valid == false)
     {
-        s_altitude_runtime.display_alt_filt_cm = initial_alt_cm;
+        s_altitude_runtime.display_alt_filt_cm    = initial_alt_cm;
+        s_altitude_runtime.display_alt_follow_cm  = initial_alt_cm;
+        s_altitude_runtime.display_alt_present_cm = initial_alt_cm;
+        s_altitude_runtime.display_output_valid   = true;
     }
 }
 
@@ -2916,10 +3138,36 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
         }
     }
 
+    /* ------------------------------------------------------------------ */
+    /*  stage-1 display LPF                                                 */
+    /*                                                                      */
+    /*  fused altitude를 바로 UI에 던지지 않고                               */
+    /*  먼저 기존 display_lpf / rest_display_lpf 한 번을 통과시킨다.        */
+    /* ------------------------------------------------------------------ */
     s_altitude_runtime.display_alt_filt_cm = APP_ALTITUDE_LpfUpdate(s_altitude_runtime.display_alt_filt_cm,
                                                                     display_target_cm,
                                                                     display_tau_ms,
                                                                     dt_s);
+
+    /* ------------------------------------------------------------------ */
+    /*  stage-2 product display presentation                               */
+    /*                                                                      */
+    /*  상용기 느낌의 핵심은 여기다.                                        */
+    /*                                                                      */
+    /*  - 정지/미세 vario 구간에서는 숫자를 더 끈끈하게 붙잡고               */
+    /*  - 이동이 분명해지면 다시 빠르게 따라가며                            */
+    /*  - 최종 숫자는 작은 hysteresis step을 통해                           */
+    /*    덜 "솔직하게" 보이도록 만든다.                                   */
+    /*                                                                      */
+    /*  중요                                                                */
+    /*  - alt_fused_noimu_cm / alt_fused_imu_cm 는 계속 honest 하다.        */
+    /*  - UI가 실제로 읽어야 할 값은 alt_display_cm 이다.                    */
+    /* ------------------------------------------------------------------ */
+    s_altitude_runtime.display_alt_present_cm = APP_ALTITUDE_UpdateProductDisplayAltitudeCm(settings,
+                                                                                             s_altitude_runtime.display_alt_filt_cm,
+                                                                                             display_source_vario_cms,
+                                                                                             display_rest_active,
+                                                                                             dt_s);
 
     if (alt_prev->home_valid != false)
     {
@@ -2958,7 +3206,14 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
     g_app_state.altitude.alt_gps_hmsl_cm            = APP_ALTITUDE_RoundFloatToS32(alt_gps_cm);
     g_app_state.altitude.alt_fused_noimu_cm         = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.kf_noimu.valid ? s_altitude_runtime.kf_noimu.x[0] : alt_qnh_cm);
     g_app_state.altitude.alt_fused_imu_cm           = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.kf_imu.valid ? s_altitude_runtime.kf_imu.x[0] : alt_qnh_cm);
-    g_app_state.altitude.alt_display_cm             = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.display_alt_filt_cm);
+    /* ------------------------------------------------------------------ */
+    /*  alt_display_cm                                                       */
+    /*                                                                      */
+    /*  UI 숫자 표시용 altitude다.                                            */
+    /*  메인 비행 화면 / 디버그 altitude 화면의 숫자 영역은                   */
+    /*  이 값을 사용해야 상용기처럼 조금 더 차분한 표시를 얻는다.             */
+    /* ------------------------------------------------------------------ */
+    g_app_state.altitude.alt_display_cm             = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.display_alt_present_cm);
 
     g_app_state.altitude.home_alt_noimu_cm          = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.home_noimu_cm);
     g_app_state.altitude.home_alt_imu_cm            = APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.home_imu_cm);

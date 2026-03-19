@@ -14,6 +14,10 @@
 #define UBLOX_GPS_TX_TIMEOUT_MS 50u
 #endif
 
+#ifndef UBLOX_GPS_SIGNAL_CONFIG_SETTLE_MS
+#define UBLOX_GPS_SIGNAL_CONFIG_SETTLE_MS 600u
+#endif
+
 
 /* -------------------------------------------------------------------------- */
 /*  UART handle                                                                */
@@ -1783,9 +1787,18 @@ void Init_Ublox_M10(void)
     /* 4) 사용자 설정(APP_STATE.settings.gps)을 읽어서
      *    GNSS / rate / power / output message 를 한 번에 적용한다.
      *
-     *    주의: NAV-SAT 스트림은 사용자 요청대로 유지한다. */
+     *    주의: NAV-SAT 스트림은 사용자 요청대로 유지한다.
+     *
+     *    매우 중요
+     *    - u-blox M10 문서에 따르면 CFG-SIGNAL 계열 변경은 GNSS subsystem
+     *      restart를 유발할 수 있다.
+     *    - 따라서 ACK/재시작 마진 없이 바로 다음 poll을 날리면,
+     *      설정이 아직 안정화되지 않은 짧은 구간과 겹칠 수 있다.
+     *
+     *    이 지점에서는 signal/power/rate를 한 번에 바꾸므로,
+     *    후속 MON-VER / VALGET poll 전에 충분한 settle time을 둔다. */
     ublox_send_runtime_profile(gps_settings);
-    HAL_Delay(20u);
+    HAL_Delay(UBLOX_GPS_SIGNAL_CONFIG_SETTLE_MS);
 
     /* 5) 모듈 정보와 "현재 실제 설정" 을 읽어온다. */
     ubx_send_mon_ver_poll();

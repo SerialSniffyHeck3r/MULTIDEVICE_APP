@@ -102,6 +102,49 @@ extern UART_HandleTypeDef UBLOX_GPS_UART_HANDLE;
 #define UI_GPS_PM_OPERATEMODE_PSMCT             2u
 
 /* -------------------------------------------------------------------------- */
+/*  Fix display hysteresis                                                    */
+/*                                                                            */
+/*  GPS 상세 화면의 FIX 아이콘과 "NO FIX / 2D FIX / 3D FIX" 텍스트는           */
+/*  사용자가 상태를 읽기 위한 표시물이다.                                      */
+/*                                                                            */
+/*  그런데 NAV-PVT가 10 Hz로 들어오는 동안                                   */
+/*  - fixOk 비트가 재획득 경계에서 한두 샘플 흔들리거나                        */
+/*  - fixType은 유지되는데 fixOk만 순간적으로 0으로 내려가는 경우가 있으면     */
+/*  화면이 "3D FIX <-> NO FIX" 를 매우 빠르게 번갈아 그리게 된다.             */
+/*                                                                            */
+/*  그래서 이 화면에서는                                                       */
+/*  - 좋아지는 변화는 즉시 반영                                                */
+/*  - 나빠지는 변화는 짧은 hold 이후에만 반영                                  */
+/*  - fixOk 한 비트만 보지 않고 fixType / 정확도 / 위성수 같은                */
+/*    "항법 해가 실제로 존재한다" 는 보조 증거도 함께 본다                     */
+/*  는 표시 전용 hysteresis를 둔다.                                           */
+/*                                                                            */
+/*  주의                                                                      */
+/*  - 이는 화면 표현 안정화용이다.                                            */
+/*  - GPS 드라이버의 raw fix 값이나 APP_STATE의 저장 구조는 바꾸지 않는다.     */
+/* -------------------------------------------------------------------------- */
+#define UI_SCREEN_GPS_FIX_HOLD_3D_MS          1200u
+#define UI_SCREEN_GPS_FIX_HOLD_2D_MS           700u
+
+typedef enum
+{
+    UI_SCREEN_GPS_FIX_STATE_NOFIX = 0u,
+    UI_SCREEN_GPS_FIX_STATE_2D    = 2u,
+    UI_SCREEN_GPS_FIX_STATE_3D    = 3u
+} ui_screen_gps_fix_state_t;
+
+typedef struct
+{
+    bool     initialized;
+    uint8_t  display_fix_state;
+    uint32_t last_seen_any_fix_ms;
+    uint32_t last_seen_3d_fix_ms;
+} ui_screen_gps_fix_display_state_t;
+
+static ui_screen_gps_fix_display_state_t s_ui_screen_gps_fix_display = {0};
+
+
+/* -------------------------------------------------------------------------- */
 /*  Fixed-point trig helper table                                              */
 /*                                                                            */
 /*  sky plot marker 배치는 sin/cos가 필요하지만,                                */
@@ -157,11 +200,15 @@ static void ui_screen_gps_send_cold_start(void);
 static app_gps_boot_profile_t ui_screen_gps_get_toggle_target_mode(app_gps_boot_profile_t current);
 static const char *ui_screen_gps_get_mode_text_short(app_gps_boot_profile_t mode);
 static const char *ui_screen_gps_get_mode_text_long(app_gps_boot_profile_t mode);
-static const uint8_t *ui_screen_gps_get_fix_icon(uint8_t fix_type,
-                                                 bool fix_ok,
+static void ui_screen_gps_reset_fix_display_state(void);
+static ui_screen_gps_fix_state_t ui_screen_gps_candidate_fix_state_from_fix(const gps_fix_basic_t *fix,
+                                                                            uint32_t now_ms);
+static ui_screen_gps_fix_state_t ui_screen_gps_get_display_fix_state(const gps_fix_basic_t *fix,
+                                                                     uint32_t now_ms);
+static const uint8_t *ui_screen_gps_get_fix_icon(uint8_t display_fix_state,
                                                  uint8_t *out_w,
                                                  uint8_t *out_h);
-static const char *ui_screen_gps_get_fix_text(uint8_t fix_type, bool fix_ok);
+static const char *ui_screen_gps_get_fix_text(uint8_t display_fix_state);
 static void ui_screen_gps_format_distance(uint32_t mm,
                                           uint8_t imperial_units,
                                           char *out_value,
@@ -230,6 +277,7 @@ static void ui_screen_gps_configure_bottom_bar(void)
 /* -------------------------------------------------------------------------- */
 void UI_ScreenGps_Init(void)
 {
+    ui_screen_gps_reset_fix_display_state();
     ui_screen_gps_configure_bottom_bar();
 }
 
@@ -238,6 +286,7 @@ void UI_ScreenGps_Init(void)
 /* -------------------------------------------------------------------------- */
 void UI_ScreenGps_OnEnter(void)
 {
+    ui_screen_gps_reset_fix_display_state();
     ui_screen_gps_configure_bottom_bar();
 }
 
@@ -583,7 +632,23 @@ static void ui_screen_gps_send_requested_profile(app_gps_boot_profile_t boot_pro
     ui_screen_gps_cfg_builder_push_u1(&b, UI_GPS_CFG_KEY_SIGNAL_GAL_E1_ENA,    (uint8_t)(gps_only ? 0u : 1u));
 
     ui_screen_gps_cfg_builder_push_u1(&b, UI_GPS_CFG_KEY_SIGNAL_BDS_ENA,       (uint8_t)(gps_only ? 0u : 1u));
-    ui_screen_gps_cfg_builder_push_u1(&b, UI_GPS_CFG_KEY_SIGNAL_BDS_B1I_ENA,   (uint8_t)(gps_only ? 0u : 1u));
+
+    /* ---------------------------------------------------------------------- */
+    /*  BeiDou signal 선택                                                     */
+    /*                                                                        */
+    /*  u-blox M10 계열은 B1I와 B1C를 동시에 사용할 수 없다.                  */
+    /*  특히 GLONASS를 함께 쓰는 일반 multi-constellation 조합에서는          */
+    /*  B1C 쪽으로 맞추고 B1I는 끄는 편이 안전하다.                            */
+    /*                                                                        */
+    /*  기존 코드처럼 둘 다 1로 보내면                                         */
+    /*  - UBX-CFG-VALSET가 NAK 되거나                                          */
+    /*  - 일부 항목만 적용되고 일부는 무시되면서                               */
+    /*    실제 사용 constellation 구성이 의도와 달라질 수 있다.               */
+    /*                                                                        */
+    /*  따라서 GPS ONLY에서는 둘 다 끄고,                                      */
+    /*  FULL CONST에서는 B1C만 켜고 B1I는 명시적으로 끈다.                     */
+    /* ---------------------------------------------------------------------- */
+    ui_screen_gps_cfg_builder_push_u1(&b, UI_GPS_CFG_KEY_SIGNAL_BDS_B1I_ENA,   0u);
     ui_screen_gps_cfg_builder_push_u1(&b, UI_GPS_CFG_KEY_SIGNAL_BDS_B1C_ENA,   (uint8_t)(gps_only ? 0u : 1u));
 
     ui_screen_gps_cfg_builder_push_u1(&b, UI_GPS_CFG_KEY_SIGNAL_QZSS_ENA,      (uint8_t)(gps_only ? 0u : 1u));
@@ -659,10 +724,156 @@ static const char *ui_screen_gps_get_mode_text_long(app_gps_boot_profile_t mode)
 }
 
 /* -------------------------------------------------------------------------- */
+/*  Fix display state reset                                                   */
+/*                                                                            */
+/*  화면 진입 시 이전 화면에서 남아 있던 latched FIX 표시가                    */
+/*  새 세션에 섞여 보이지 않도록 상태를 초기화한다.                           */
+/* -------------------------------------------------------------------------- */
+static void ui_screen_gps_reset_fix_display_state(void)
+{
+    memset(&s_ui_screen_gps_fix_display, 0, sizeof(s_ui_screen_gps_fix_display));
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Raw fix -> candidate display state                                        */
+/*                                                                            */
+/*  여기서는 raw fix를 그대로 믿지 않고                                       */
+/*  - 메시지가 최근에 갱신되었는지                                             */
+/*  - fixType이 2D/3D인지                                                      */
+/*  - fixOk가 순간적으로 0이어도 정확도/위성수 같은 보조 증거가 있는지         */
+/*  를 함께 본다.                                                              */
+/* -------------------------------------------------------------------------- */
+static ui_screen_gps_fix_state_t ui_screen_gps_candidate_fix_state_from_fix(const gps_fix_basic_t *fix,
+                                                                            uint32_t now_ms)
+{
+    bool fresh;
+    bool has_quality_evidence;
+
+    if (fix == 0)
+    {
+        return UI_SCREEN_GPS_FIX_STATE_NOFIX;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /*  stale sample 방어                                                      */
+    /*                                                                        */
+    /*  last_update_ms가 오래된 샘플은                                         */
+    /*  현재 화면에 "아직 fix가 살아 있다" 고 표시하면 안 되므로               */
+    /*  candidate를 즉시 NO FIX로 본다.                                        */
+    /* ---------------------------------------------------------------------- */
+    fresh = ((fix->last_update_ms != 0u) &&
+             ((now_ms - fix->last_update_ms) <= UI_SCREEN_GPS_FIX_HOLD_3D_MS));
+
+    if (fresh == false)
+    {
+        return UI_SCREEN_GPS_FIX_STATE_NOFIX;
+    }
+
+    has_quality_evidence =
+        (fix->pDOP != 0u) ||
+        (fix->hAcc != 0u) ||
+        (fix->vAcc != 0u) ||
+        (fix->numSV_used != 0u) ||
+        (fix->numSV_visible != 0u);
+
+    if ((fix->fixType >= 3u) && ((fix->fixOk != false) || (has_quality_evidence != false)))
+    {
+        return UI_SCREEN_GPS_FIX_STATE_3D;
+    }
+
+    if ((fix->fixType == 2u) && ((fix->fixOk != false) || (has_quality_evidence != false)))
+    {
+        return UI_SCREEN_GPS_FIX_STATE_2D;
+    }
+
+    return UI_SCREEN_GPS_FIX_STATE_NOFIX;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Display hysteresis update                                                 */
+/*                                                                            */
+/*  raw fix를 받아 GPS 화면용 latched FIX 상태를 갱신한다.                     */
+/*                                                                            */
+/*  규칙                                                                      */
+/*  - NO FIX -> 2D/3D : 즉시 승급                                             */
+/*  - 2D -> 3D       : 즉시 승급                                               */
+/*  - 3D -> 2D/NOFIX : 3D hold 시간 이후에만 강등                              */
+/*  - 2D -> NOFIX    : 2D hold 시간 이후에만 강등                              */
+/* -------------------------------------------------------------------------- */
+static ui_screen_gps_fix_state_t ui_screen_gps_get_display_fix_state(const gps_fix_basic_t *fix,
+                                                                     uint32_t now_ms)
+{
+    ui_screen_gps_fix_state_t candidate_fix_state;
+
+    candidate_fix_state = ui_screen_gps_candidate_fix_state_from_fix(fix, now_ms);
+
+    if (s_ui_screen_gps_fix_display.initialized == false)
+    {
+        s_ui_screen_gps_fix_display.initialized = true;
+        s_ui_screen_gps_fix_display.display_fix_state = (uint8_t)candidate_fix_state;
+        s_ui_screen_gps_fix_display.last_seen_any_fix_ms = now_ms;
+        s_ui_screen_gps_fix_display.last_seen_3d_fix_ms = now_ms;
+    }
+
+    if (candidate_fix_state >= UI_SCREEN_GPS_FIX_STATE_2D)
+    {
+        s_ui_screen_gps_fix_display.last_seen_any_fix_ms = now_ms;
+    }
+
+    if (candidate_fix_state >= UI_SCREEN_GPS_FIX_STATE_3D)
+    {
+        s_ui_screen_gps_fix_display.last_seen_3d_fix_ms = now_ms;
+    }
+
+    if (candidate_fix_state >= (ui_screen_gps_fix_state_t)s_ui_screen_gps_fix_display.display_fix_state)
+    {
+        s_ui_screen_gps_fix_display.display_fix_state = (uint8_t)candidate_fix_state;
+    }
+    else
+    {
+        switch ((ui_screen_gps_fix_state_t)s_ui_screen_gps_fix_display.display_fix_state)
+        {
+            case UI_SCREEN_GPS_FIX_STATE_3D:
+                if ((now_ms - s_ui_screen_gps_fix_display.last_seen_3d_fix_ms) < UI_SCREEN_GPS_FIX_HOLD_3D_MS)
+                {
+                    s_ui_screen_gps_fix_display.display_fix_state = (uint8_t)UI_SCREEN_GPS_FIX_STATE_3D;
+                }
+                else if ((candidate_fix_state >= UI_SCREEN_GPS_FIX_STATE_2D) ||
+                         ((now_ms - s_ui_screen_gps_fix_display.last_seen_any_fix_ms) < UI_SCREEN_GPS_FIX_HOLD_2D_MS))
+                {
+                    s_ui_screen_gps_fix_display.display_fix_state = (uint8_t)UI_SCREEN_GPS_FIX_STATE_2D;
+                }
+                else
+                {
+                    s_ui_screen_gps_fix_display.display_fix_state = (uint8_t)UI_SCREEN_GPS_FIX_STATE_NOFIX;
+                }
+                break;
+
+            case UI_SCREEN_GPS_FIX_STATE_2D:
+                if ((now_ms - s_ui_screen_gps_fix_display.last_seen_any_fix_ms) < UI_SCREEN_GPS_FIX_HOLD_2D_MS)
+                {
+                    s_ui_screen_gps_fix_display.display_fix_state = (uint8_t)UI_SCREEN_GPS_FIX_STATE_2D;
+                }
+                else
+                {
+                    s_ui_screen_gps_fix_display.display_fix_state = (uint8_t)candidate_fix_state;
+                }
+                break;
+
+            case UI_SCREEN_GPS_FIX_STATE_NOFIX:
+            default:
+                s_ui_screen_gps_fix_display.display_fix_state = (uint8_t)candidate_fix_state;
+                break;
+        }
+    }
+
+    return (ui_screen_gps_fix_state_t)s_ui_screen_gps_fix_display.display_fix_state;
+}
+
+/* -------------------------------------------------------------------------- */
 /*  Fix icon / text helpers                                                   */
 /* -------------------------------------------------------------------------- */
-static const uint8_t *ui_screen_gps_get_fix_icon(uint8_t fix_type,
-                                                 bool fix_ok,
+static const uint8_t *ui_screen_gps_get_fix_icon(uint8_t display_fix_state,
                                                  uint8_t *out_w,
                                                  uint8_t *out_h)
 {
@@ -676,17 +887,12 @@ static const uint8_t *ui_screen_gps_get_fix_icon(uint8_t fix_type,
         *out_h = ICON11_H;
     }
 
-    if (fix_ok == false)
-    {
-        return icon_gps_nofix_bits;
-    }
-
-    if (fix_type >= 3u)
+    if (display_fix_state >= UI_SCREEN_GPS_FIX_STATE_3D)
     {
         return icon_gps_3d_bits;
     }
 
-    if (fix_type == 2u)
+    if (display_fix_state == UI_SCREEN_GPS_FIX_STATE_2D)
     {
         return icon_gps_2d_bits;
     }
@@ -694,19 +900,14 @@ static const uint8_t *ui_screen_gps_get_fix_icon(uint8_t fix_type,
     return icon_gps_nofix_bits;
 }
 
-static const char *ui_screen_gps_get_fix_text(uint8_t fix_type, bool fix_ok)
+static const char *ui_screen_gps_get_fix_text(uint8_t display_fix_state)
 {
-    if (fix_ok == false)
-    {
-        return "NO FIX";
-    }
-
-    if (fix_type >= 3u)
+    if (display_fix_state >= UI_SCREEN_GPS_FIX_STATE_3D)
     {
         return "3D FIX";
     }
 
-    if (fix_type == 2u)
+    if (display_fix_state == UI_SCREEN_GPS_FIX_STATE_2D)
     {
         return "2D FIX";
     }
@@ -1033,6 +1234,7 @@ static void ui_screen_gps_draw_info_pane(u8g2_t *u8g2,
     char coord_text[20];
     uint8_t fix_icon_w;
     uint8_t fix_icon_h;
+    uint8_t display_fix_state;
     const uint8_t *fix_icon;
     int16_t mode_x;
 
@@ -1105,8 +1307,19 @@ static void ui_screen_gps_draw_info_pane(u8g2_t *u8g2,
     /*  - 오른쪽 둘째 줄: SV used/visible                                      */
     /*  로 간결하게 표시한다.                                                  */
     /* ---------------------------------------------------------------------- */
-    fix_icon = ui_screen_gps_get_fix_icon(snapshot->fix.fixType,
-                                          snapshot->fix.fixOk,
+    /* ---------------------------------------------------------------------- */
+    /*  FIX 아이콘/텍스트는 raw fixOk를 그대로 쓰지 않고                        */
+    /*  화면 전용 hysteresis를 통과한 display_fix_state를 사용한다.             */
+    /*                                                                        */
+    /*  이 줄이 실제로                                                         */
+    /*  - 좌측 정보 pane의 가운데 영역                                         */
+    /*  - y = pane->y + 53 부근에 그려지는 11x7 GPS 상태 아이콘                */
+    /*  - 그 오른쪽의 "NO FIX / 2D FIX / 3D FIX" 텍스트                        */
+    /*  의 기준 상태를 결정한다.                                               */
+    /* ---------------------------------------------------------------------- */
+    display_fix_state = (uint8_t)ui_screen_gps_get_display_fix_state(&snapshot->fix, HAL_GetTick());
+
+    fix_icon = ui_screen_gps_get_fix_icon(display_fix_state,
                                           &fix_icon_w,
                                           &fix_icon_h);
 
@@ -1121,8 +1334,7 @@ static void ui_screen_gps_draw_info_pane(u8g2_t *u8g2,
     u8g2_DrawStr(u8g2,
                  (u8g2_uint_t)(pane->x + 16),
                  (u8g2_uint_t)(pane->y + 59),
-                 ui_screen_gps_get_fix_text(snapshot->fix.fixType,
-                                            snapshot->fix.fixOk));
+                 ui_screen_gps_get_fix_text(display_fix_state));
 
     snprintf(sv_text,
              sizeof(sv_text),

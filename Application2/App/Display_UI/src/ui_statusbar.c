@@ -55,6 +55,55 @@ static int16_t           s_temp_box_w = 0;
 static uint8_t           s_reserved_height_cache = 0u;
 
 /* -------------------------------------------------------------------------- */
+/*  GPS display hysteresis state                                               */
+/*                                                                            */
+/*  상단바의 GPS 아이콘/수신칸/위성수는 "원본 raw 샘플" 을 그대로 1:1로           */
+/*  따라가지 않는다.                                                           */
+/*                                                                            */
+/*  이유                                                                       */
+/*  - NAV-PVT/NAV-SAT가 10 Hz로 들어오면 fixOk, fixType, pDOP, numSV_used 가    */
+/*    재획득/가중치 재평가/메시지 경계에서 한두 샘플 흔들릴 수 있다.              */
+/*  - 그런데 상태바는 사용자에게 "지금 실제 체감 상태가 어떤가" 를               */
+/*    한눈에 보여주는 곳이라, 1샘플 튐을 그대로 깜빡임으로 번역하면               */
+/*    오히려 정보 가치가 떨어진다.                                             */
+/*                                                                            */
+/*  따라서 여기서는                                                            */
+/*  - 좋아지는 변화는 즉시 반영                                                 */
+/*  - 나빠지는 변화는 짧은 유지 시간 이후에만 반영                             */
+/*  - 수신 bar는 pDOP뿐 아니라 hAcc/vAcc도 함께 참조                           */
+/*  - fix 아이콘은 time/date valid 같은 "항법 외 부가 조건" 에 덜 민감하게       */
+/*    geometry 상태를 latched 하여 표현                                        */
+/*  하는 표시 전용 hysteresis를 둔다.                                          */
+/* -------------------------------------------------------------------------- */
+#define UI_STATUSBAR_GPS_HOLD_3D_MS         1200u
+#define UI_STATUSBAR_GPS_HOLD_2D_MS          700u
+#define UI_STATUSBAR_GPS_RX_FALL_HOLD_MS     900u
+#define UI_STATUSBAR_GPS_SV_HOLD_MS         1200u
+
+typedef enum
+{
+    UI_STATUSBAR_GPS_FIX_STATE_NOFIX = 0u,
+    UI_STATUSBAR_GPS_FIX_STATE_2D    = 2u,
+    UI_STATUSBAR_GPS_FIX_STATE_3D    = 3u
+} ui_statusbar_gps_fix_state_t;
+
+typedef struct
+{
+    bool     initialized;
+    uint8_t  display_fix_state;
+    uint8_t  display_num_sv_visible;
+    uint8_t  display_num_sv_used;
+    int      display_rx_level;
+    uint32_t last_seen_any_fix_ms;
+    uint32_t last_seen_3d_fix_ms;
+    uint32_t last_rx_reinforce_ms;
+    uint32_t last_visible_sv_ms;
+    uint32_t last_used_sv_ms;
+} ui_statusbar_gps_display_state_t;
+
+static ui_statusbar_gps_display_state_t s_gps_display = {0};
+
+/* -------------------------------------------------------------------------- */
 /*  Height helper                                                              */
 /*                                                                            */
 /*  상단바 명목 높이는 7px 그대로 유지한다.                                    */
@@ -107,33 +156,299 @@ uint8_t UI_StatusBar_GetReservedHeight(u8g2_t *u8g2)
 }
 
 /* -------------------------------------------------------------------------- */
-/*  HDOP quality helper                                                        */
+/*  GPS display helpers                                                        */
 /* -------------------------------------------------------------------------- */
-static int ui_statusbar_gps_quality_from_hdop(uint16_t pdop_x100, uint8_t gps_fix_type)
+static ui_statusbar_gps_fix_state_t ui_statusbar_gps_candidate_fix_state_from_fix(const gps_fix_basic_t *fix,
+                                                                                   uint32_t now_ms)
 {
-    float hdop;
+    bool fresh;
+    bool has_quality_evidence;
 
-    if ((gps_fix_type == 0u) || (pdop_x100 == 0u))
+    if (fix == 0)
+    {
+        return UI_STATUSBAR_GPS_FIX_STATE_NOFIX;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /*  stale data 방어                                                         */
+    /*                                                                        */
+    /*  fixType만 남아 있고 실제 새 메시지가 끊긴 상태에서는                    */
+    /*  "과거 3D" 가 상단바에 얼어붙으면 안 되므로,                            */
+    /*  last_update_ms가 오래된 경우는 즉시 candidate를 NO FIX로 본다.          */
+    /* ---------------------------------------------------------------------- */
+    fresh = ((fix->last_update_ms != 0u) &&
+             ((now_ms - fix->last_update_ms) <= UI_STATUSBAR_GPS_HOLD_3D_MS));
+
+    if (fresh == false)
+    {
+        return UI_STATUSBAR_GPS_FIX_STATE_NOFIX;
+    }
+
+    has_quality_evidence =
+        (fix->pDOP != 0u) ||
+        (fix->hAcc != 0u) ||
+        (fix->vAcc != 0u) ||
+        (fix->numSV_used != 0u) ||
+        (fix->numSV_visible != 0u);
+
+    if ((fix->fixType >= 3u) && ((fix->fixOk != false) || (has_quality_evidence != false)))
+    {
+        return UI_STATUSBAR_GPS_FIX_STATE_3D;
+    }
+
+    if ((fix->fixType == 2u) && ((fix->fixOk != false) || (has_quality_evidence != false)))
+    {
+        return UI_STATUSBAR_GPS_FIX_STATE_2D;
+    }
+
+    return UI_STATUSBAR_GPS_FIX_STATE_NOFIX;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Accuracy -> RX level                                                       */
+/*                                                                            */
+/*  상태바의 안테나 수신칸은 "전파 세기" 전용 계측이 아니라                    */
+/*  사용자 체감 품질용 추정치다.                                               */
+/*                                                                            */
+/*  그래서 여기서는                                                            */
+/*  - pDOP 기반 geometry 추정                                                  */
+/*  - hAcc/vAcc 기반 실제 위치/고도 정확도 추정                                */
+/*  두 축을 함께 보고 더 설득력 있는 쪽을 택한다.                              */
+/* -------------------------------------------------------------------------- */
+static int ui_statusbar_gps_rx_level_from_accuracy_mm(uint32_t acc_mm)
+{
+    if (acc_mm == 0u)
+    {
+        return 0;
+    }
+
+    if (acc_mm <= 500u)  { return 7; }
+    if (acc_mm <= 800u)  { return 6; }
+    if (acc_mm <= 1200u) { return 5; }
+    if (acc_mm <= 2000u) { return 4; }
+    if (acc_mm <= 3000u) { return 3; }
+    if (acc_mm <= 6000u) { return 2; }
+    return 1;
+}
+
+static int ui_statusbar_gps_rx_level_from_pdop(uint16_t pdop_x100, uint8_t fix_type)
+{
+    if ((fix_type < 2u) || (pdop_x100 == 0u))
+    {
+        return 0;
+    }
+
+    if (pdop_x100 <= 60u)  { return 7; }
+    if (pdop_x100 <= 90u)  { return 6; }
+    if (pdop_x100 <= 130u) { return 5; }
+    if (pdop_x100 <= 220u) { return 4; }
+    if (pdop_x100 <= 320u) { return 3; }
+    if (pdop_x100 <= 650u) { return 2; }
+    return 1;
+}
+
+static int ui_statusbar_gps_rx_level_from_fix(const gps_fix_basic_t *fix)
+{
+    uint32_t worst_acc_mm;
+    int acc_level;
+    int dop_level;
+
+    if (fix == 0)
     {
         return 1;
     }
 
-    hdop = ((float)pdop_x100) * 0.01f;
+    if (fix->fixType < 2u)
+    {
+        return 1;
+    }
 
-    if (hdop < 0.8f)
+    worst_acc_mm = fix->hAcc;
+    if ((fix->vAcc != 0u) && ((worst_acc_mm == 0u) || (fix->vAcc > worst_acc_mm)))
+    {
+        worst_acc_mm = fix->vAcc;
+    }
+
+    acc_level = ui_statusbar_gps_rx_level_from_accuracy_mm(worst_acc_mm);
+    dop_level = ui_statusbar_gps_rx_level_from_pdop(fix->pDOP, fix->fixType);
+
+    if (acc_level > dop_level)
+    {
+        return acc_level;
+    }
+
+    if (dop_level > 0)
+    {
+        return dop_level;
+    }
+
+    return 1;
+}
+
+static int ui_statusbar_gps_quality_from_rx_level(int rx_level)
+{
+    if (rx_level >= 6)
     {
         return 4;
     }
-    else if (hdop < 1.5f)
+
+    if (rx_level >= 5)
     {
         return 3;
     }
-    else if (hdop < 3.0f)
+
+    if (rx_level >= 3)
     {
         return 2;
     }
 
     return 1;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  GPS hysteresis update                                                      */
+/*                                                                            */
+/*  입력 raw fix를 받아 상태바 전용 latched 표시 상태를 갱신한다.               */
+/*  반환값은 draw 단계가 그대로 쓰는 "이미 안정화된 상태" 다.                  */
+/* -------------------------------------------------------------------------- */
+static void ui_statusbar_update_gps_display(const gps_fix_basic_t *fix,
+                                            uint32_t now_ms,
+                                            uint8_t *out_fix_state,
+                                            uint8_t *out_num_sv_visible,
+                                            uint8_t *out_num_sv_used,
+                                            int *out_quality,
+                                            int *out_rx_level)
+{
+    ui_statusbar_gps_fix_state_t candidate_fix_state;
+    int candidate_rx_level;
+
+    if ((fix == 0) ||
+        (out_fix_state == 0) ||
+        (out_num_sv_visible == 0) ||
+        (out_num_sv_used == 0) ||
+        (out_quality == 0) ||
+        (out_rx_level == 0))
+    {
+        return;
+    }
+
+    candidate_fix_state = ui_statusbar_gps_candidate_fix_state_from_fix(fix, now_ms);
+    candidate_rx_level = ui_statusbar_gps_rx_level_from_fix(fix);
+    if (candidate_rx_level < 1)
+    {
+        candidate_rx_level = 1;
+    }
+
+    if (s_gps_display.initialized == false)
+    {
+        s_gps_display.initialized = true;
+        s_gps_display.display_fix_state = (uint8_t)candidate_fix_state;
+        s_gps_display.display_num_sv_visible = fix->numSV_visible;
+        s_gps_display.display_num_sv_used = fix->numSV_used;
+        s_gps_display.display_rx_level = candidate_rx_level;
+        s_gps_display.last_seen_any_fix_ms = now_ms;
+        s_gps_display.last_seen_3d_fix_ms = now_ms;
+        s_gps_display.last_rx_reinforce_ms = now_ms;
+        s_gps_display.last_visible_sv_ms = now_ms;
+        s_gps_display.last_used_sv_ms = now_ms;
+    }
+
+    if (candidate_fix_state >= UI_STATUSBAR_GPS_FIX_STATE_2D)
+    {
+        s_gps_display.last_seen_any_fix_ms = now_ms;
+    }
+
+    if (candidate_fix_state >= UI_STATUSBAR_GPS_FIX_STATE_3D)
+    {
+        s_gps_display.last_seen_3d_fix_ms = now_ms;
+    }
+
+    if (candidate_fix_state >= (ui_statusbar_gps_fix_state_t)s_gps_display.display_fix_state)
+    {
+        s_gps_display.display_fix_state = (uint8_t)candidate_fix_state;
+    }
+    else
+    {
+        switch ((ui_statusbar_gps_fix_state_t)s_gps_display.display_fix_state)
+        {
+        case UI_STATUSBAR_GPS_FIX_STATE_3D:
+            if ((now_ms - s_gps_display.last_seen_3d_fix_ms) < UI_STATUSBAR_GPS_HOLD_3D_MS)
+            {
+                s_gps_display.display_fix_state = (uint8_t)UI_STATUSBAR_GPS_FIX_STATE_3D;
+            }
+            else if ((candidate_fix_state >= UI_STATUSBAR_GPS_FIX_STATE_2D) ||
+                     ((now_ms - s_gps_display.last_seen_any_fix_ms) < UI_STATUSBAR_GPS_HOLD_2D_MS))
+            {
+                s_gps_display.display_fix_state = (uint8_t)UI_STATUSBAR_GPS_FIX_STATE_2D;
+            }
+            else
+            {
+                s_gps_display.display_fix_state = (uint8_t)UI_STATUSBAR_GPS_FIX_STATE_NOFIX;
+            }
+            break;
+
+        case UI_STATUSBAR_GPS_FIX_STATE_2D:
+            if ((now_ms - s_gps_display.last_seen_any_fix_ms) < UI_STATUSBAR_GPS_HOLD_2D_MS)
+            {
+                s_gps_display.display_fix_state = (uint8_t)UI_STATUSBAR_GPS_FIX_STATE_2D;
+            }
+            else
+            {
+                s_gps_display.display_fix_state = (uint8_t)candidate_fix_state;
+            }
+            break;
+
+        case UI_STATUSBAR_GPS_FIX_STATE_NOFIX:
+        default:
+            s_gps_display.display_fix_state = (uint8_t)candidate_fix_state;
+            break;
+        }
+    }
+
+    if (candidate_fix_state >= UI_STATUSBAR_GPS_FIX_STATE_2D)
+    {
+        if (candidate_rx_level >= s_gps_display.display_rx_level)
+        {
+            s_gps_display.display_rx_level = candidate_rx_level;
+            s_gps_display.last_rx_reinforce_ms = now_ms;
+        }
+        else if ((now_ms - s_gps_display.last_rx_reinforce_ms) >= UI_STATUSBAR_GPS_RX_FALL_HOLD_MS)
+        {
+            s_gps_display.display_rx_level = candidate_rx_level;
+            s_gps_display.last_rx_reinforce_ms = now_ms;
+        }
+    }
+    else if ((now_ms - s_gps_display.last_seen_any_fix_ms) >= UI_STATUSBAR_GPS_RX_FALL_HOLD_MS)
+    {
+        s_gps_display.display_rx_level = 1;
+        s_gps_display.last_rx_reinforce_ms = now_ms;
+    }
+
+    if (fix->numSV_visible != 0u)
+    {
+        s_gps_display.display_num_sv_visible = fix->numSV_visible;
+        s_gps_display.last_visible_sv_ms = now_ms;
+    }
+    else if ((now_ms - s_gps_display.last_visible_sv_ms) >= UI_STATUSBAR_GPS_SV_HOLD_MS)
+    {
+        s_gps_display.display_num_sv_visible = 0u;
+    }
+
+    if (fix->numSV_used != 0u)
+    {
+        s_gps_display.display_num_sv_used = fix->numSV_used;
+        s_gps_display.last_used_sv_ms = now_ms;
+    }
+    else if ((now_ms - s_gps_display.last_used_sv_ms) >= UI_STATUSBAR_GPS_SV_HOLD_MS)
+    {
+        s_gps_display.display_num_sv_used = 0u;
+    }
+
+    *out_fix_state = s_gps_display.display_fix_state;
+    *out_num_sv_visible = s_gps_display.display_num_sv_visible;
+    *out_num_sv_used = s_gps_display.display_num_sv_used;
+    *out_rx_level = s_gps_display.display_rx_level;
+    *out_quality = ui_statusbar_gps_quality_from_rx_level(s_gps_display.display_rx_level);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -419,11 +734,25 @@ void UI_StatusBar_Draw(u8g2_t *u8g2,
     /* ---------------------------------------------------------------------- */
     /*  4) GPS block                                                            */
     /* ---------------------------------------------------------------------- */
-    gps_fix_type = model->gps_fix.fixType;
-    gps_fix_ok = ((model->gps_fix.fixOk != false) && (model->gps_fix.valid != false));
-    num_sv_visible = model->gps_fix.numSV_visible;
-    num_sv_used = model->gps_fix.numSV_used;
-    quality = ui_statusbar_gps_quality_from_hdop(model->gps_fix.pDOP, gps_fix_type);
+    ui_statusbar_update_gps_display(&model->gps_fix,
+                                    now_ms,
+                                    &gps_fix_type,
+                                    &num_sv_visible,
+                                    &num_sv_used,
+                                    &quality,
+                                    &rx_level);
+
+    /* ---------------------------------------------------------------------- */
+    /*  상태바의 fix 아이콘 판단 기준                                            */
+    /*                                                                        */
+    /*  - raw valid는 이 프로젝트에서 valid_date/time까지 포함하는 더 엄격한    */
+    /*    조건이고, 상단바의 "잡힘/안 잡힘" 체감과는 결이 다르다.               */
+    /*  - raw fixOk 역시 1샘플 튐에 매우 민감하므로, 상단바는 위 helper가        */
+    /*    만든 latched fix state를 그대로 사용한다.                             */
+    /*  - 기존 지역 변수 gps_fix_ok 는 컴파일 경고 없이 유지되도록               */
+    /*    아래의 표시 판단에서도 계속 사용한다.                                  */
+    /* ---------------------------------------------------------------------- */
+    gps_fix_ok = (gps_fix_type != UI_STATUSBAR_GPS_FIX_STATE_NOFIX);
 
     x = UI_STATUSBAR_X_GPS_GROUP;
 
@@ -435,7 +764,7 @@ void UI_StatusBar_Draw(u8g2_t *u8g2,
                  icon_gps_main_bits);
     x += ICON7_W + 2;
 
-    if ((gps_fix_ok == false) || (gps_fix_type == 0u))
+    if (gps_fix_ok == false)
     {
         if (SlowToggle2Hz != false)
         {
@@ -446,7 +775,7 @@ void UI_StatusBar_Draw(u8g2_t *u8g2,
             u8g2_DrawXBM(u8g2, (u8g2_uint_t)x, UI_STATUSBAR_Y_ICON, ICON11_W, ICON11_H, blank_11x7);
         }
     }
-    else if (gps_fix_type >= 3u)
+    else if (gps_fix_type >= UI_STATUSBAR_GPS_FIX_STATE_3D)
     {
         if (quality >= 3)
         {
@@ -461,7 +790,7 @@ void UI_StatusBar_Draw(u8g2_t *u8g2,
             u8g2_DrawXBM(u8g2, (u8g2_uint_t)x, UI_STATUSBAR_Y_ICON, ICON11_W, ICON11_H, blank_11x7);
         }
     }
-    else if (gps_fix_type == 2u)
+    else if (gps_fix_type == UI_STATUSBAR_GPS_FIX_STATE_2D)
     {
         if (SlowToggle2Hz != false)
         {
@@ -485,11 +814,13 @@ void UI_StatusBar_Draw(u8g2_t *u8g2,
     }
     x += ICON11_W + 2;
 
-    if ((model->gps_fix.valid == false) &&
-        (gps_fix_type == 0u) &&
+    if ((gps_fix_ok == false) &&
         (num_sv_visible == 0u) &&
         (num_sv_used == 0u) &&
-        (model->gps_fix.pDOP == 0u))
+        (model->gps_fix.fixType == 0u) &&
+        (model->gps_fix.pDOP == 0u) &&
+        (model->gps_fix.hAcc == 0u) &&
+        (model->gps_fix.vAcc == 0u))
     {
         snprintf(sat_buf, sizeof(sat_buf), "--");
     }
@@ -515,44 +846,6 @@ void UI_StatusBar_Draw(u8g2_t *u8g2,
     x += 2;
     u8g2_DrawXBM(u8g2, (u8g2_uint_t)x, UI_STATUSBAR_Y_ICON, ICON5_W, ICON5_H, icon_antenna_shape);
     x += ICON5_W + 1;
-
-    if ((gps_fix_ok != false) && (gps_fix_type >= 2u) && (model->gps_fix.pDOP != 0u))
-    {
-        float hdop = ((float)model->gps_fix.pDOP) * 0.01f;
-
-        if (hdop <= 0.5f)
-        {
-            rx_level = 7;
-        }
-        else if (hdop <= 0.8f)
-        {
-            rx_level = 6;
-        }
-        else if (hdop <= 1.2f)
-        {
-            rx_level = 5;
-        }
-        else if (hdop <= 2.0f)
-        {
-            rx_level = 4;
-        }
-        else if (hdop <= 3.0f)
-        {
-            rx_level = 3;
-        }
-        else if (hdop <= 6.0f)
-        {
-            rx_level = 2;
-        }
-        else
-        {
-            rx_level = 1;
-        }
-    }
-    else
-    {
-        rx_level = 1;
-    }
 
     switch (rx_level)
     {
