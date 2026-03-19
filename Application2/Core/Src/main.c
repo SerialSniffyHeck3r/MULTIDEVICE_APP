@@ -89,6 +89,9 @@
 #include "POWER_STATE.h"
 
 #include "BOOT_SELFTEST_SCREEN.h"
+#include "BIKE_DYNAMICS.h"
+
+
 
 
 #ifndef M_PI
@@ -2726,6 +2729,7 @@ int main(void)
 
   APP_STATE_Init();
   APP_ALTITUDE_Init(HAL_GetTick());
+  BIKE_DYNAMICS_Init(HAL_GetTick());
 
   /* ------------------------------------------------------------------------ */
   /*  RTC / timezone / GPS sync service bring-up                               */
@@ -3065,6 +3069,7 @@ int main(void)
 	        /* 새 센서 드라이버들 */
 	        GY86_IMU_Task(now_ms);
 	        APP_ALTITUDE_Task(now_ms);
+	        BIKE_DYNAMICS_Task(now_ms);
 	        DS18B20_DRIVER_Task(now_ms);
 	        Brightness_Sensor_Task(now_ms);
 
