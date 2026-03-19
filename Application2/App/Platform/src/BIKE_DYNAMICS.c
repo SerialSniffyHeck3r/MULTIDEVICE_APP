@@ -1714,24 +1714,48 @@ void BIKE_DYNAMICS_Task(uint32_t now_ms)
 
     /* ---------------------------------------------------------------------- */
     /*  zero basis가 있으면 현재 출력 갱신                                      */
+    /*                                                                        */
+    /*  중요 수정                                                               */
+    /*  - 이전 버전은 imu_new_sample == false 인 루프마다                        */
+    /*    lean/grade/lat/lon 출력값을 0으로 덮어써서                             */
+    /*    UI가 대부분의 프레임에서 0을 보게 되는 문제가 있었다.                  */
+    /*  - 수정 후에는                                                           */
+    /*    1) gravity/zero가 유효한 동안 기존 출력값을 유지하고                   */
+    /*    2) 새 IMU 샘플이 들어온 순간에만 출력값을 새로 계산한다.               */
     /* ---------------------------------------------------------------------- */
     if ((s_bike_runtime.gravity_valid != false) &&
-        (s_bike_runtime.zero_valid != false) &&
-        (imu_new_sample != false))
+        (s_bike_runtime.zero_valid != false))
     {
-        BIKE_DYN_UpdateOutputsFromCurrentImu(settings);
+        /* ------------------------------------------------------------------ */
+        /*  GNSS / OBD reference는 새 GNSS/OBD timestamp가 들어온 경우에만     */
+        /*  내부에서 자동으로 갱신되므로 매 loop 호출해도 안전하다.             */
+        /* ------------------------------------------------------------------ */
         BIKE_DYN_UpdateExternalReferences(settings,
                                           speed_source,
                                           gnss_speed_valid,
                                           gnss_heading_valid,
                                           obd_speed_valid);
-        BIKE_DYN_UpdateBiasAndFusedOutputs(settings,
-                                           gnss_speed_valid,
-                                           gnss_heading_valid,
-                                           obd_speed_valid);
+
+        /* ------------------------------------------------------------------ */
+        /*  IMU 기반 lean/grade/lat/lon 계산은                                  */
+        /*  반드시 "새 IMU sample이 들어온 순간" 에만 수행한다.                 */
+        /*  sample이 없는 loop에서는 직전 결과를 유지한다.                      */
+        /* ------------------------------------------------------------------ */
+        if (imu_new_sample != false)
+        {
+            BIKE_DYN_UpdateOutputsFromCurrentImu(settings);
+            BIKE_DYN_UpdateBiasAndFusedOutputs(settings,
+                                               gnss_speed_valid,
+                                               gnss_heading_valid,
+                                               obd_speed_valid);
+        }
     }
     else
     {
+        /* ------------------------------------------------------------------ */
+        /*  gravity observer 또는 zero basis가 아직 유효하지 않은 초기 상태에서만*/
+        /*  출력값을 0으로 유지한다.                                            */
+        /* ------------------------------------------------------------------ */
         s_bike_runtime.bank_raw_deg      = 0.0f;
         s_bike_runtime.grade_raw_deg     = 0.0f;
         s_bike_runtime.bank_display_deg  = 0.0f;
@@ -1741,7 +1765,6 @@ void BIKE_DYNAMICS_Task(uint32_t now_ms)
         s_bike_runtime.lon_fused_g       = 0.0f;
         s_bike_runtime.lat_fused_g       = 0.0f;
     }
-
     BIKE_DYN_PublishState(now_ms,
                           settings,
                           speed_source,
