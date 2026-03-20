@@ -1,59 +1,65 @@
 #ifndef UI_TYPES_H
 #define UI_TYPES_H
 
-#include <stdbool.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /* -------------------------------------------------------------------------- */
-/*  Display-wide fixed geometry                                                */
+/* Display-wide fixed geometry                                                 */
 /*                                                                            */
-/*  이 UI 엔진은 "현재 코드상" LCD 해상도(240x128)를 절대 픽셀 기준으로 쓴다.   */
-/*  즉, 실제 장착 유리가 256x128이라 해도 이 코드 파일 기준 활성 좌표계는      */
-/*  아직 240x128로 고정되어 있다.                                              */
-/*  상단바/하단바 규격도 이 값을 기준으로 고정한다.                             */
+/* 이 프로젝트의 UI 엔진이 현재 사용하는 논리 좌표계는 240 x 128 이다.            */
+/* 실제 LCD glass 의 물리 해상도나 controller native memory map 과 별개로,       */
+/* UI 엔진 / status bar / bottom bar / Vario screen bridge 는 이 좌표계를        */
+/* 기준으로 화면을 배치한다.                                                   */
 /* -------------------------------------------------------------------------- */
-#define UI_LCD_W                 240
-#define UI_LCD_H                 128
+#define UI_LCD_W 240
+#define UI_LCD_H 128
 
 /* -------------------------------------------------------------------------- */
-/*  Bar geometry                                                               */
+/* Bar geometry                                                                */
 /*                                                                            */
-/*  업로드된 프로토타입 규격을 그대로 가져온다.                                */
-/*  - status bar  : 7 px                                                       */
-/*  - bottom bar  : 8 px                                                       */
-/*  - 각 바와 본문 사이에는 1 px gap을 둔다.                                   */
+/* status bar / bottom bar / gap 규격은 기존 엔진 규약을 그대로 유지한다.        */
+/*                                                                            */
+/* - status bar nominal height : 7 px                                          */
+/* - status bar 아래 gap       : 0 px                                          */
+/* - bottom bar 위 gap         : 1 px                                          */
+/* - bottom bar nominal height : 8 px                                          */
+/*                                                                            */
+/* 주의                                                                         */
+/* - status bar의 "실제 본문 침범 금지 높이" 는                                */
+/*   UI_StatusBar_GetReservedHeight() 가 폰트 metric 기준으로 계산한다.         */
+/* - 따라서 status bar nominal 7 px와 실제 viewport top Y는 완전히 같지 않을 수  */
+/*   있다.                                                                      */
 /* -------------------------------------------------------------------------- */
-#define UI_STATUSBAR_H           7
-#define UI_STATUSBAR_GAP_H       0
-#define UI_BOTTOMBAR_H           8
-#define UI_BOTTOMBAR_GAP_H       1
+#define UI_STATUSBAR_H     7
+#define UI_STATUSBAR_GAP_H 0
+#define UI_BOTTOMBAR_H     8
+#define UI_BOTTOMBAR_GAP_H 1
 
 /* -------------------------------------------------------------------------- */
-/*  Overlay policy / timing                                                    */
-/*                                                                            */
-/*  overlay형 하단바는 본문을 덮어쓰며 잠깐 올라오는 형태다.                    */
-/*  이 타임아웃은 이후 프로젝트 성격에 맞게 조절하기 쉽도록 define으로 둔다.   */
+/* Overlay policy / timing                                                     */
 /* -------------------------------------------------------------------------- */
 #ifndef UI_BOTTOMBAR_OVERLAY_TIMEOUT_MS
-#define UI_BOTTOMBAR_OVERLAY_TIMEOUT_MS   2200u
+#define UI_BOTTOMBAR_OVERLAY_TIMEOUT_MS 2200u
 #endif
 
 #ifndef UI_TOAST_DEFAULT_TIMEOUT_MS
-#define UI_TOAST_DEFAULT_TIMEOUT_MS       1500u
+#define UI_TOAST_DEFAULT_TIMEOUT_MS 1500u
 #endif
 
 #ifndef UI_POPUP_DEFAULT_TIMEOUT_MS
-#define UI_POPUP_DEFAULT_TIMEOUT_MS       2500u
+#define UI_POPUP_DEFAULT_TIMEOUT_MS 2500u
 #endif
 
 /* -------------------------------------------------------------------------- */
-/*  Common rectangle                                                           */
+/* Common rectangle                                                            */
 /*                                                                            */
-/*  모든 화면/뷰포트는 이 구조체 한 개로 전달한다.                              */
+/* 모든 root screen / sub-screen renderer 는 이 구조체 한 개만 받아서            */
+/* "내가 그릴 수 있는 영역" 을 해석한다.                                       */
 /* -------------------------------------------------------------------------- */
 typedef struct
 {
@@ -64,29 +70,36 @@ typedef struct
 } ui_rect_t;
 
 /* -------------------------------------------------------------------------- */
-/*  Layout modes                                                               */
+/* Layout modes                                                                */
 /*                                                                            */
-/*  요구사항에서 정리한 4가지 표시 모드를 그대로 enum으로 정의한다.             */
+/* UI 엔진은 root screen 이 아래 4가지 중 어떤 layout policy 를 쓰는지만 알면    */
+/* status bar / bottom bar / main viewport 을 자동으로 합성할 수 있다.          */
 /* -------------------------------------------------------------------------- */
 typedef enum
 {
-    UI_LAYOUT_MODE_TOP_EXTENDED_NO_BOTTOM = 0,      /* 상단바만 있고, 본문이 하단까지 확장 */
-    UI_LAYOUT_MODE_TOP_EXTENDED_OVERLAY   = 1,      /* 상단바 + overlay형 하단바          */
-    UI_LAYOUT_MODE_TOP_BOTTOM_FIXED       = 2,      /* 상단바 + 영구 하단바               */
-    UI_LAYOUT_MODE_FULLSCREEN             = 3,      /* 상하단바 없는 전체 화면            */
+    /* status bar 는 있고, 본문은 LCD 맨 아래까지 확장된다.                    */
+    UI_LAYOUT_MODE_TOP_EXTENDED_NO_BOTTOM = 0,
+
+    /* status bar 는 있고, bottom bar 는 overlay 로 잠깐 올라온다.             */
+    UI_LAYOUT_MODE_TOP_EXTENDED_OVERLAY = 1,
+
+    /* status bar 와 bottom bar 가 둘 다 고정 표시된다.                        */
+    UI_LAYOUT_MODE_TOP_BOTTOM_FIXED = 2,
+
+    /* status bar / bottom bar 없이 LCD 240x128 전체를 본문이 사용한다.        */
+    UI_LAYOUT_MODE_FULLSCREEN = 3,
 
     UI_LAYOUT_MODE_COUNT
 } ui_layout_mode_t;
 
 /* -------------------------------------------------------------------------- */
-/*  Root screens                                                               */
+/* Root screens                                                                */
 /*                                                                            */
-/*  현재 엔진에는                                                              */
-/*  - TEST 홈 화면                                                             */
-/*  - 레거시 디버그 화면                                                       */
-/*  - 엔진 오일 교체 주기 설정 스텁 화면                                       */
-/*  - GPS 화면                                                                 */
-/*  을 함께 올린다.                                                            */
+/* 기존 TEST / DEBUG / ENGINE OIL / GPS root 들은 F3 부트 분기용 legacy profile  */
+/* 에서만 살아 있고, 정상 부팅 profile 에서는 UI_SCREEN_VARIO 만 메인 root 로     */
+/* 사용한다.                                                                    */
+/*                                                                            */
+/* enum 값 호환성을 위해 기존 TEST=0 은 그대로 유지하고, VARIO 는 뒤에 추가한다. */
 /* -------------------------------------------------------------------------- */
 typedef enum
 {
@@ -94,27 +107,22 @@ typedef enum
     UI_SCREEN_DEBUG_LEGACY,
     UI_SCREEN_ENGINE_OIL_INTERVAL,
     UI_SCREEN_GPS,
-
+    UI_SCREEN_VARIO,
     UI_SCREEN_COUNT
 } ui_screen_id_t;
 
 /* -------------------------------------------------------------------------- */
-/*  Recording icon state                                                       */
-/*                                                                            */
-/*  상단바 왼쪽 첫 아이콘의 의미를 외부에서 바꾸기 쉽게 별도 enum으로 둔다.     */
+/* Recording icon state                                                        */
 /* -------------------------------------------------------------------------- */
 typedef enum
 {
-    UI_RECORD_STATE_STOP  = 0,
-    UI_RECORD_STATE_REC   = 1,
+    UI_RECORD_STATE_STOP = 0,
+    UI_RECORD_STATE_REC  = 1,
     UI_RECORD_STATE_PAUSE = 2
 } ui_record_state_t;
 
 /* -------------------------------------------------------------------------- */
-/*  Bluetooth stub state                                                       */
-/*                                                                            */
-/*  사용자가 요구한 "블루투스 상태 스텁" 표현용 enum이다.                       */
-/*  아직 실제 연결 상태를 강하게 묶지 않고, 아이콘 정책만 정리한다.            */
+/* Bluetooth stub state                                                        */
 /* -------------------------------------------------------------------------- */
 typedef enum
 {
