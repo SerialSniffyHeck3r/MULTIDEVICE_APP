@@ -17,7 +17,11 @@ extern "C" {
 /*  - MPU6050 같은 6축 IMU raw를 사용해                                        */
 /*    모터사이클 프레임 기준의 banking angle / grade / lateral G /             */
 /*    accel-decel 을 추정한다.                                                 */
-/*  - magnetometer는 사용하지 않는다.                                          */
+/*  - magnetometer는 lean / grade / lateral G / accel-decel 추정식에는        */
+/*    피드백하지 않는다.                                                        */
+/*  - 단, raw magnetometer가 유효하면                                           */
+/*    "tilt-compensated auxiliary magnetic heading" 을 별도 진단 출력으로만     */
+/*    계산할 수 있다.                                                           */
 /*  - GNSS speed / GNSS heading / future OBD speed는                           */
 /*    "저주파 anchor" 또는 "속도 anchor" 로만 사용한다.                        */
 /*  - roll/pitch 추정 핵심은 IMU-only Mahony quaternion AHRS 이다.             */

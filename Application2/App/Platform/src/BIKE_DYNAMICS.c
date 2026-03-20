@@ -38,11 +38,12 @@
 /*  - 사용자가 바이크를 계속 흔들거나, 샘플 품질이 나쁘면                      */
 /*    영원히 기다리지 않고 실패로 종료하는 상한 시간                           */
 /* -------------------------------------------------------------------------- */
+#define BIKE_DYN_GYRO_CAL_SETTLE_MS          (600u)
 #define BIKE_DYN_GYRO_CAL_TARGET_GOOD_MS     (1800u)
-#define BIKE_DYN_GYRO_CAL_TIMEOUT_MS         (4500u)
+#define BIKE_DYN_GYRO_CAL_TIMEOUT_MS         (7000u)
 #define BIKE_DYN_GYRO_CAL_MIN_SAMPLES        (90u)
 #define BIKE_DYN_GYRO_CAL_MAX_SPEED_MMPS     (1500)
-#define BIKE_DYN_GYRO_CAL_MAX_GYRO_DPS       (4.0f)
+#define BIKE_DYN_GYRO_CAL_MAX_GYRO_DPS       (6.0f)
 
 /* -------------------------------------------------------------------------- */
 /*  내부 런타임                                                                 */
@@ -87,6 +88,7 @@ typedef struct
     uint32_t gyro_bias_cal_sample_count;  /* 정지 조건을 만족한 누적 샘플 수          */
     uint32_t gyro_bias_cal_success_count; /* 성공적으로 끝난 calibration 누적 횟수    */
     uint32_t last_gyro_bias_cal_ms;       /* 마지막 calibration 종료 시각             */
+    uint32_t gyro_bias_cal_settle_until_ms; /* 버튼/손떨림이 가라앉을 때까지 대기 시각 */
 
     /* ---------------------------------------------------------------------- */
     /*  attitude quaternion                                                    */
@@ -152,6 +154,20 @@ typedef struct
     float last_jerk_mg_per_s;
     float last_attitude_trust_permille;
     float yaw_rate_up_dps;
+
+    /* ---------------------------------------------------------------------- */
+    /*  auxiliary heading diagnostic                                            */
+    /*                                                                        */
+    /*  주의                                                                   */
+    /*  - 이 값들은 lean / grade / lateral G 계산에 피드백하지 않는다.         */
+    /*  - GNSS heading이 있으면 그 값을 우선 공개하고,                           */
+    /*    없을 때만 tilt-compensated magnetic heading을 보조로 공개한다.        */
+    /* ---------------------------------------------------------------------- */
+    bool     mag_heading_valid;
+    float    mag_heading_deg;
+    bool     heading_valid;
+    uint8_t  heading_source;
+    float    heading_deg;
 
     /* ---------------------------------------------------------------------- */
     /*  user-calibrated gyro bias                                               */
@@ -336,6 +352,22 @@ static float BIKE_DYN_WrapDeg(float deg)
         deg -= 360.0f;
     }
     while (deg < -180.0f)
+    {
+        deg += 360.0f;
+    }
+    return deg;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  각도를 0..360 deg 범위로 정규화한다.                                       */
+/* -------------------------------------------------------------------------- */
+static float BIKE_DYN_WrapDeg360(float deg)
+{
+    while (deg >= 360.0f)
+    {
+        deg -= 360.0f;
+    }
+    while (deg < 0.0f)
     {
         deg += 360.0f;
     }
@@ -933,12 +965,12 @@ static bool BIKE_DYN_IsGyroCalibrationSampleGood(const app_bike_settings_t *sett
     }
 
     accel_err_mg = fabsf(s_bike_runtime.last_accel_norm_mg - BIKE_DYN_ONE_G_MG);
-    if (accel_err_mg > (float)BIKE_DYN_ClampS32((int32_t)settings->imu_attitude_accel_gate_mg / 2, 20, 250))
+    if (accel_err_mg > (float)BIKE_DYN_ClampS32((int32_t)settings->imu_attitude_accel_gate_mg, 40, 250))
     {
         return false;
     }
 
-    jerk_limit = (float)BIKE_DYN_ClampS32((int32_t)settings->imu_jerk_gate_mg_per_s / 3, 120, 10000);
+    jerk_limit = (float)BIKE_DYN_ClampS32((int32_t)settings->imu_jerk_gate_mg_per_s / 2, 250, 15000);
     if (fabsf(s_bike_runtime.last_jerk_mg_per_s) > jerk_limit)
     {
         return false;
@@ -1045,6 +1077,13 @@ static void BIKE_DYN_PublishState(uint32_t now_ms,
     bike->gnss_fix_ok               = (uint8_t)(g_app_state.gps.fix.fixOk ? 1u : 0u);
     bike->gnss_numsv_used           = g_app_state.gps.fix.numSV_used;
     bike->gnss_pdop_x100            = g_app_state.gps.fix.pDOP;
+
+    bike->heading_valid             = s_bike_runtime.heading_valid;
+    bike->mag_heading_valid         = s_bike_runtime.mag_heading_valid;
+    bike->heading_source            = s_bike_runtime.heading_source;
+    bike->reserved_heading0         = 0u;
+    bike->heading_deg_x10           = BIKE_DYN_RoundFloatToS16X10(s_bike_runtime.heading_deg * 10.0f);
+    bike->mag_heading_deg_x10       = BIKE_DYN_RoundFloatToS16X10(s_bike_runtime.mag_heading_deg * 10.0f);
 
     bike->gyro_bias_cal_active          = s_bike_runtime.gyro_bias_cal_active;
     bike->gyro_bias_valid               = s_bike_runtime.gyro_bias_valid;
@@ -1569,6 +1608,113 @@ static bool BIKE_DYN_UpdateGravityObserver(const app_gy86_mpu_raw_t *mpu,
 }
 
 /* -------------------------------------------------------------------------- */
+/*  auxiliary heading estimate                                                 */
+/*                                                                            */
+/*  설계 의도                                                                   */
+/*  - GNSS heading이 충분히 신뢰 가능하면 그 값을 heading 출력으로 사용한다.   */
+/*  - GNSS heading이 없을 때만, raw magnetometer를 tilt compensation 하여      */
+/*    보조 magnetic heading으로 공개한다.                                      */
+/*  - 이 값은 "진단/표시용" 이며, Mahony 6축 자세 추정이나 lean 계산에는       */
+/*    절대 피드백하지 않는다.                                                  */
+/* -------------------------------------------------------------------------- */
+static void BIKE_DYN_UpdateAuxHeadingEstimate(bool gnss_heading_valid)
+{
+    const app_gy86_state_t *imu;
+    const gps_fix_basic_t  *fix;
+    float level_fwd_x;
+    float level_fwd_y;
+    float level_fwd_z;
+    float level_left_x;
+    float level_left_y;
+    float level_left_z;
+    float up_x;
+    float up_y;
+    float up_z;
+    float mx;
+    float my;
+    float mz;
+    float m_up;
+    float mh_x;
+    float mh_y;
+    float mh_z;
+    float mag_heading_deg;
+
+    imu = (const app_gy86_state_t *)&g_app_state.gy86;
+    fix = (const gps_fix_basic_t *)&g_app_state.gps.fix;
+
+    s_bike_runtime.mag_heading_valid = false;
+    s_bike_runtime.mag_heading_deg   = 0.0f;
+    s_bike_runtime.heading_valid     = false;
+    s_bike_runtime.heading_source    = (uint8_t)APP_BIKE_HEADING_SOURCE_NONE;
+    s_bike_runtime.heading_deg       = 0.0f;
+
+    /* ---------------------------------------------------------------------- */
+    /*  1) GNSS heading이 있으면 가장 먼저 공개한다.                            */
+    /* ---------------------------------------------------------------------- */
+    if (gnss_heading_valid != false)
+    {
+        s_bike_runtime.heading_valid  = true;
+        s_bike_runtime.heading_source = (uint8_t)APP_BIKE_HEADING_SOURCE_GNSS;
+        s_bike_runtime.heading_deg    = BIKE_DYN_WrapDeg360(((float)fix->headMot) * 0.00001f);
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /*  2) tilt-compensated magnetic heading 계산                              */
+    /*                                                                        */
+    /*  필요 조건                                                               */
+    /*  - MAG raw valid                                                        */
+    /*  - 현재 gravity 추정 valid                                               */
+    /*  - zero basis valid                                                     */
+    /*  - 현재 level forward/left 축을 만들 수 있을 것                         */
+    /* ---------------------------------------------------------------------- */
+    if (((imu->status_flags & APP_GY86_STATUS_MAG_VALID) != 0u) &&
+        (s_bike_runtime.gravity_valid != false) &&
+        (s_bike_runtime.zero_valid != false) &&
+        (BIKE_DYN_BuildCurrentLevelAxes(&level_fwd_x,
+                                        &level_fwd_y,
+                                        &level_fwd_z,
+                                        &level_left_x,
+                                        &level_left_y,
+                                        &level_left_z) != false))
+    {
+        up_x = s_bike_runtime.gravity_est_x_s;
+        up_y = s_bike_runtime.gravity_est_y_s;
+        up_z = s_bike_runtime.gravity_est_z_s;
+
+        mx = (float)imu->mag.mag_x_raw;
+        my = (float)imu->mag.mag_y_raw;
+        mz = (float)imu->mag.mag_z_raw;
+
+        /* ------------------------------------------------------------------ */
+        /*  자계 벡터에서 vertical 성분을 제거해서 horizontal projection만 남긴다.*/
+        /*  이것이 tilt compensation의 핵심이다.                               */
+        /* ------------------------------------------------------------------ */
+        m_up = BIKE_DYN_Dot3(mx, my, mz, up_x, up_y, up_z);
+        mh_x = mx - (m_up * up_x);
+        mh_y = my - (m_up * up_y);
+        mh_z = mz - (m_up * up_z);
+
+        if (BIKE_DYN_Normalize3(&mh_x, &mh_y, &mh_z) != false)
+        {
+            mag_heading_deg = atan2f(BIKE_DYN_Dot3(mh_x, mh_y, mh_z,
+                                                   level_left_x, level_left_y, level_left_z),
+                                     BIKE_DYN_Dot3(mh_x, mh_y, mh_z,
+                                                   level_fwd_x, level_fwd_y, level_fwd_z)) * BIKE_DYN_RAD2DEG;
+
+            s_bike_runtime.mag_heading_valid = true;
+            s_bike_runtime.mag_heading_deg   = BIKE_DYN_WrapDeg360(mag_heading_deg);
+
+            if (s_bike_runtime.heading_valid == false)
+            {
+                s_bike_runtime.heading_valid  = true;
+                s_bike_runtime.heading_source = (uint8_t)APP_BIKE_HEADING_SOURCE_MAG;
+                s_bike_runtime.heading_deg    = s_bike_runtime.mag_heading_deg;
+            }
+        }
+    }
+}
+
+/* -------------------------------------------------------------------------- */
 /*  current gravity / zero basis / accel sample 로부터                         */
 /*  bank, grade, level-frame accel을 계산한다.                                 */
 /* -------------------------------------------------------------------------- */
@@ -1917,15 +2063,16 @@ static void BIKE_DYN_ProcessGyroBiasCalibration(const app_bike_settings_t *setti
     if ((s_bike_runtime.gyro_bias_cal_requested != false) &&
         (s_bike_runtime.gyro_bias_cal_active == false))
     {
-        s_bike_runtime.gyro_bias_cal_requested    = false;
-        s_bike_runtime.gyro_bias_cal_active       = true;
-        s_bike_runtime.gyro_bias_cal_last_success = false;
-        s_bike_runtime.gyro_bias_cal_start_ms     = now_ms;
-        s_bike_runtime.gyro_bias_cal_good_ms      = 0u;
-        s_bike_runtime.gyro_bias_cal_sample_count = 0u;
-        s_bike_runtime.gyro_bias_sum_x_dps        = 0.0f;
-        s_bike_runtime.gyro_bias_sum_y_dps        = 0.0f;
-        s_bike_runtime.gyro_bias_sum_z_dps        = 0.0f;
+        s_bike_runtime.gyro_bias_cal_requested      = false;
+        s_bike_runtime.gyro_bias_cal_active         = true;
+        s_bike_runtime.gyro_bias_cal_last_success   = false;
+        s_bike_runtime.gyro_bias_cal_start_ms       = now_ms;
+        s_bike_runtime.gyro_bias_cal_settle_until_ms = now_ms + BIKE_DYN_GYRO_CAL_SETTLE_MS;
+        s_bike_runtime.gyro_bias_cal_good_ms        = 0u;
+        s_bike_runtime.gyro_bias_cal_sample_count   = 0u;
+        s_bike_runtime.gyro_bias_sum_x_dps          = 0.0f;
+        s_bike_runtime.gyro_bias_sum_y_dps          = 0.0f;
+        s_bike_runtime.gyro_bias_sum_z_dps          = 0.0f;
     }
 
     if (s_bike_runtime.gyro_bias_cal_active == false)
@@ -1946,6 +2093,15 @@ static void BIKE_DYN_ProcessGyroBiasCalibration(const app_bike_settings_t *setti
         return;
     }
 
+    /* ---------------------------------------------------------------------- */
+    /*  버튼 long press 직후에는 손떨림 / 케이스 접촉 진동이 섞일 수 있다.      */
+    /*  그래서 짧은 settle 구간 동안은 sample 품질 평가 자체를 시작하지 않는다. */
+    /* ---------------------------------------------------------------------- */
+    if ((int32_t)(s_bike_runtime.gyro_bias_cal_settle_until_ms - now_ms) > 0)
+    {
+        return;
+    }
+
     if (BIKE_DYN_IsGyroCalibrationSampleGood(settings, selected_speed_mmps, speed_source) != false)
     {
         uint32_t dt_ms;
@@ -1961,14 +2117,15 @@ static void BIKE_DYN_ProcessGyroBiasCalibration(const app_bike_settings_t *setti
     else
     {
         /* ------------------------------------------------------------------ */
-        /*  사용자가 흔들거나, accel norm이 틀어지면                            */
-        /*  contaminated average를 막기 위해 누적을 처음부터 다시 시작한다.     */
+        /*  예전 구현은 bad sample이 한 번만 들어와도 누적 평균을 0으로 리셋했다.*/
+        /*  실제 대시보드 마운트에서는 버튼을 누른 뒤 아주 작은 떨림이 흔해서   */
+        /*  이 정책이 CALIB FAIL을 과도하게 유발했다.                           */
+        /*                                                                      */
+        /*  새 정책                                                               */
+        /*  - bad sample은 "무시" 하고, 이미 모은 stationary 평균은 유지한다.    */
+        /*  - 즉, contaminated sample을 더하지 않기만 하면 된다.                 */
+        /*  - timeout 안에 good sample을 충분히 모으면 성공한다.                 */
         /* ------------------------------------------------------------------ */
-        s_bike_runtime.gyro_bias_cal_good_ms      = 0u;
-        s_bike_runtime.gyro_bias_cal_sample_count = 0u;
-        s_bike_runtime.gyro_bias_sum_x_dps        = 0.0f;
-        s_bike_runtime.gyro_bias_sum_y_dps        = 0.0f;
-        s_bike_runtime.gyro_bias_sum_z_dps        = 0.0f;
     }
 
     if ((s_bike_runtime.gyro_bias_cal_good_ms >= BIKE_DYN_GYRO_CAL_TARGET_GOOD_MS) &&
@@ -2067,6 +2224,11 @@ void BIKE_DYNAMICS_Task(uint32_t now_ms)
         g_app_state.bike.initialized = true;
         g_app_state.bike.imu_valid = false;
         g_app_state.bike.zero_valid = false;
+        g_app_state.bike.heading_valid = false;
+        g_app_state.bike.mag_heading_valid = false;
+        g_app_state.bike.heading_source = (uint8_t)APP_BIKE_HEADING_SOURCE_NONE;
+        g_app_state.bike.heading_deg_x10 = 0;
+        g_app_state.bike.mag_heading_deg_x10 = 0;
         g_app_state.bike.last_update_ms = now_ms;
         return;
     }
@@ -2167,6 +2329,8 @@ void BIKE_DYNAMICS_Task(uint32_t now_ms)
         s_bike_runtime.lon_fused_g       = 0.0f;
         s_bike_runtime.lat_fused_g       = 0.0f;
     }
+
+    BIKE_DYN_UpdateAuxHeadingEstimate(gnss_heading_valid);
 
     BIKE_DYN_PublishState(now_ms,
                           settings,

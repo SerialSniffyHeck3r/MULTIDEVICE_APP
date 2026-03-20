@@ -23,19 +23,22 @@ extern I2C_HandleTypeDef GY86_IMU_I2C_HANDLE;
 #define GY86_MS5611_ADDR             (0x77u << 1)
 
 /* -------------------------------------------------------------------------- */
-/*  Magnetometer compile-time kill switch                                      */
+/*  Magnetometer compile-time switch                                           */
 /*                                                                            */
-/*  이 제품에서는 magnetometer를 아예 사용하지 않으므로                         */
-/*  low-level driver 레벨에서 probe / init / poll 자체를 막는다.               */
+/*  현재 정책                                                                   */
+/*  - HMC5883L raw polling은 다시 활성화한다.                                  */
+/*  - 이유                                                                       */
+/*    1) SELFTEST 의 MAG FLOW 통과                                              */
+/*    2) 보조 heading 진단용 raw 확보                                            */
+/*  - 단, BIKE_DYNAMICS의 lean / grade / lateral G / accel-decel               */
+/*    메인 추정식에는 magnetometer를 직접 피드백하지 않는다.                   */
 /*                                                                            */
-/*  값이 0이면                                                                */
-/*  - HMC5883L probe 안 함                                                     */
-/*  - HMC5883L init 안 함                                                      */
-/*  - HMC5883L poll 안 함                                                      */
-/*  - APP_STATE debug에도 mag backend / poll period를 0으로 표시               */
+/*  값이 1이면                                                                 */
+/*  - HMC5883L probe / init / poll 수행                                         */
+/*  - APP_STATE debug에 mag backend / poll period 노출                          */
 /* -------------------------------------------------------------------------- */
 #ifndef GY86_IMU_ENABLE_MAGNETOMETER
-#define GY86_IMU_ENABLE_MAGNETOMETER 0u
+#define GY86_IMU_ENABLE_MAGNETOMETER 1u
 #endif
 
 /* -------------------------------------------------------------------------- */
@@ -1401,12 +1404,15 @@ void GY86_IMU_Task(uint32_t now_ms)
 
     /* ---------------------------------------------------------------------- */
     /*  magnetometer polling                                                   */
-    /* ---------------------------------------------------------------------- */
-    /* ---------------------------------------------------------------------- */
-    /*  magnetometer polling                                                   */
     /*                                                                        */
-    /*  이번 제품에서는 magnetometer를 완전히 비활성화했으므로                 */
-    /*  이 블록은 compile-time switch가 1일 때만 살아 있다.                    */
+    /*  HMC5883L raw는                                                          */
+    /*  - SELFTEST 의 MAG FLOW 확인                                             */
+    /*  - 보조 heading 진단용                                                   */
+    /*  에 사용한다.                                                             */
+    /*                                                                        */
+    /*  주의                                                                   */
+    /*  - BIKE_DYNAMICS의 Mahony 6축 자세 추정 / lean 계산에는                  */
+    /*    직접 피드백하지 않는다.                                               */
     /* ---------------------------------------------------------------------- */
 #if GY86_IMU_ENABLE_MAGNETOMETER
     if ((s_gy86_rt.mag_online != 0u) &&

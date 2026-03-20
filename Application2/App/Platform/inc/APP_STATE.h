@@ -373,6 +373,23 @@ typedef enum
     APP_BIKE_ESTIMATOR_MODE_OBD_AIDED  = 2u
 } app_bike_estimator_mode_t;
 
+/* -------------------------------------------------------------------------- */
+/*  heading 공개 source                                                       */
+/*                                                                            */
+/*  이 값은 lean / grade 계산 경로와는 분리된 "보조 heading 출력" 전용이다.     */
+/*  - GNSS : 충분한 속도와 headAcc 조건을 만족하는 경우                         */
+/*  - MAG  : GNSS heading이 없고, tilt-compensated magnetic heading만         */
+/*           사용할 수 있을 때                                                  */
+/* -------------------------------------------------------------------------- */
+typedef enum
+{
+    APP_BIKE_HEADING_SOURCE_NONE = 0u,
+    APP_BIKE_HEADING_SOURCE_GNSS = 1u,
+    APP_BIKE_HEADING_SOURCE_MAG  = 2u
+} app_bike_heading_source_t;
+
+
+
 typedef struct
 {
     /* ---------------------------------------------------------------------- */
@@ -1698,6 +1715,38 @@ typedef struct
     uint8_t  gnss_fix_ok;
         uint8_t  gnss_numsv_used;
         uint16_t gnss_pdop_x100;
+
+
+        /* ---------------------------------------------------------------------- */
+        /*  heading diagnostic                                                     */
+        /*                                                                        */
+        /*  heading_valid                                                          */
+        /*  - 현재 공개 중인 heading 값이 유효한가                                  */
+        /*                                                                        */
+        /*  mag_heading_valid                                                      */
+        /*  - tilt-compensated magnetic heading 값이 유효한가                       */
+        /*                                                                        */
+        /*  heading_source                                                         */
+        /*  - app_bike_heading_source_t raw                                         */
+        /*                                                                        */
+        /*  heading_deg_x10                                                        */
+        /*  - 현재 공개 중인 heading 값, 0.1 deg                                    */
+        /*                                                                        */
+        /*  mag_heading_deg_x10                                                    */
+        /*  - tilt-compensated magnetic heading raw, 0.1 deg                        */
+        /*                                                                        */
+        /*  주의                                                                   */
+        /*  - 이 heading 출력은 lean / grade / lateral G 계산식에 피드백하지 않는다.*/
+        /*  - 즉, 6축 Mahony 자세 추정은 그대로 유지하고, heading은 보조 진단용이다.*/
+        /* ---------------------------------------------------------------------- */
+        bool     heading_valid;
+        bool     mag_heading_valid;
+        uint8_t  heading_source;
+        uint8_t  reserved_heading0;
+        int16_t  heading_deg_x10;
+        int16_t  mag_heading_deg_x10;
+
+
 
         /* ---------------------------------------------------------------------- */
         /*  Gyro bias calibration 공개 상태                                         */

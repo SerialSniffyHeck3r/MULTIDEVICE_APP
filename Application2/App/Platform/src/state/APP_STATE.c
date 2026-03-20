@@ -96,7 +96,6 @@ static void APP_STATE_ApplyDefaultSettingsUnlocked(void)
                g_app_state.settings.altitude.imu_aid_enabled                = 0u;
                g_app_state.settings.altitude.auto_home_capture_enabled      = 1u;
 
-               /* ------------------------------------------------------------------ */
                /*  IMU sign + sensor poll debug gate 기본값                           */
                /*                                                                    */
                /*  imu_vertical_sign = +1                                             */
@@ -105,16 +104,20 @@ static void APP_STATE_ApplyDefaultSettingsUnlocked(void)
                /*  imu_poll_enabled = 1                                               */
                /*  - MPU6050 polling은 평상시 기본 ON                                 */
                /*                                                                    */
-               /*  mag_poll_enabled = 0                                               */
-               /*             */
+               /*  mag_poll_enabled = 1                                               */
+               /*  - HMC5883L raw polling을 기본 ON으로 둔다.                         */
+               /*  - lean / grade 계산에는 직접 피드백하지 않고,                        */
+               /*    self-test + 보조 heading 진단용 raw 확보에만 사용한다.            */
                /*                                                                    */
                /*  ms5611_only = 0                                                    */
                /*  - 평상시에는 강제 barometer-only 진단 모드를 끈 상태로 시작한다.   */
                /* ------------------------------------------------------------------ */
                g_app_state.settings.altitude.imu_vertical_sign              = 1;
                g_app_state.settings.altitude.imu_poll_enabled               = 1u;
-               g_app_state.settings.altitude.mag_poll_enabled               = 0u;
+               g_app_state.settings.altitude.mag_poll_enabled               = 1u;
                g_app_state.settings.altitude.ms5611_only                    = 0u;
+
+
 
                /* ------------------------------------------------------------------ */
                /*  pressure / vario / display 반응 속도                               */
@@ -706,6 +709,15 @@ static void APP_STATE_ResetBikeUnlocked(void)
     g_app_state.bike.gnss_fix_ok                 = 0u;
     g_app_state.bike.gnss_numsv_used             = 0u;
     g_app_state.bike.gnss_pdop_x100              = 0u;
+
+    g_app_state.bike.heading_valid               = false;
+    g_app_state.bike.mag_heading_valid           = false;
+    g_app_state.bike.heading_source              = (uint8_t)APP_BIKE_HEADING_SOURCE_NONE;
+    g_app_state.bike.reserved_heading0           = 0u;
+    g_app_state.bike.heading_deg_x10             = 0;
+    g_app_state.bike.mag_heading_deg_x10         = 0;
+
+
 
     g_app_state.bike.gyro_bias_cal_active        = false;
     g_app_state.bike.gyro_bias_valid             = false;
