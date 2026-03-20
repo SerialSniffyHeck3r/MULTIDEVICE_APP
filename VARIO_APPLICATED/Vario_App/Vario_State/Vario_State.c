@@ -3,7 +3,12 @@
 #include "../Vario_Settings/Vario_Settings.h"
 
 #include <math.h>
+#include <stddef.h>
 #include <string.h>
+
+#ifndef VARIO_STATE_PI
+#define VARIO_STATE_PI 3.14159265358979323846f
+#endif
 
 #ifndef VARIO_STATE_PRESSURE_TO_ALT_FACTOR_M
 #define VARIO_STATE_PRESSURE_TO_ALT_FACTOR_M 44330.76923f
@@ -21,28 +26,56 @@
 #define VARIO_STATE_MAX_DT_S 0.250f
 #endif
 
-#ifndef VARIO_STATE_ALTITUDE_TAU_S
-#define VARIO_STATE_ALTITUDE_TAU_S 0.75f
-#endif
-
-#ifndef VARIO_STATE_VARIO_TAU_S
-#define VARIO_STATE_VARIO_TAU_S 0.45f
-#endif
-
 #ifndef VARIO_STATE_GS_TAU_S
-#define VARIO_STATE_GS_TAU_S 0.50f
+#define VARIO_STATE_GS_TAU_S 0.45f
 #endif
 
-#ifndef VARIO_STATE_MAX_ALT_JUMP_M
-#define VARIO_STATE_MAX_ALT_JUMP_M 25.0f
+#ifndef VARIO_STATE_HEADING_TAU_S
+#define VARIO_STATE_HEADING_TAU_S 0.25f
+#endif
+
+#ifndef VARIO_STATE_PUBLISH_PERIOD_MS
+#define VARIO_STATE_PUBLISH_PERIOD_MS 200u
+#endif
+
+#ifndef VARIO_STATE_HEADING_GPS_MIN_SPEED_KMH
+#define VARIO_STATE_HEADING_GPS_MIN_SPEED_KMH 4.0f
+#endif
+
+#ifndef VARIO_STATE_FLIGHT_START_CONFIRM_MS
+#define VARIO_STATE_FLIGHT_START_CONFIRM_MS 2500u
+#endif
+
+#ifndef VARIO_STATE_FLIGHT_LAND_CONFIRM_MS
+#define VARIO_STATE_FLIGHT_LAND_CONFIRM_MS 60000u
+#endif
+
+#ifndef VARIO_STATE_FLIGHT_END_SPEED_KMH
+#define VARIO_STATE_FLIGHT_END_SPEED_KMH 2.0f
+#endif
+
+#ifndef VARIO_STATE_FLIGHT_END_VARIO_MPS
+#define VARIO_STATE_FLIGHT_END_VARIO_MPS 0.30f
+#endif
+
+#ifndef VARIO_STATE_ALTITUDE_JUMP_LIMIT_M
+#define VARIO_STATE_ALTITUDE_JUMP_LIMIT_M 40.0f
 #endif
 
 #ifndef VARIO_STATE_MAX_VARIO_MPS
-#define VARIO_STATE_MAX_VARIO_MPS 10.0f
+#define VARIO_STATE_MAX_VARIO_MPS 15.0f
 #endif
 
-#ifndef VARIO_STATE_VARIO_DEADBAND_MPS
-#define VARIO_STATE_VARIO_DEADBAND_MPS 0.03f
+#ifndef VARIO_STATE_VARIO_NEAR_ZERO_MPS
+#define VARIO_STATE_VARIO_NEAR_ZERO_MPS 0.03f
+#endif
+
+#ifndef VARIO_STATE_EARTH_METERS_PER_DEG_LAT
+#define VARIO_STATE_EARTH_METERS_PER_DEG_LAT 111132.0f
+#endif
+
+#ifndef VARIO_STATE_EARTH_METERS_PER_DEG_LON
+#define VARIO_STATE_EARTH_METERS_PER_DEG_LON 111319.5f
 #endif
 
 static struct
@@ -55,27 +88,6 @@ static struct
     uint8_t         redraw_request;
     vario_runtime_t runtime;
 } s_vario_state;
-
-static float vario_state_lpf_alpha(float dt_s, float tau_s)
-{
-    if (tau_s <= 0.0f)
-    {
-        return 1.0f;
-    }
-
-    return dt_s / (tau_s + dt_s);
-}
-
-static float vario_state_pressure_to_altitude_m(float pressure_hpa, float qnh_hpa)
-{
-    if ((pressure_hpa <= 0.0f) || (qnh_hpa <= 0.0f))
-    {
-        return 0.0f;
-    }
-
-    return VARIO_STATE_PRESSURE_TO_ALT_FACTOR_M *
-           (1.0f - powf((pressure_hpa / qnh_hpa), VARIO_STATE_PRESSURE_TO_ALT_EXPONENT));
-}
 
 static float vario_state_absf(float value)
 {
@@ -97,194 +109,60 @@ static float vario_state_clampf(float value, float min_v, float max_v)
     return value;
 }
 
-static void vario_state_capture_snapshots(void)
+static float vario_state_lpf_alpha(float dt_s, float tau_s)
 {
-    APP_STATE_CopyGy86Snapshot(&s_vario_state.runtime.gy86);
-    APP_STATE_CopyGpsSnapshot(&s_vario_state.runtime.gps);
-    APP_STATE_CopyDs18b20Snapshot(&s_vario_state.runtime.ds18b20);
+    if (tau_s <= 0.0f)
+    {
+        return 1.0f;
+    }
+
+    return dt_s / (tau_s + dt_s);
 }
 
-static void vario_state_update_derived_from_baro(void)
+static float vario_state_wrap_360(float deg)
 {
-    const vario_settings_t *settings;
-    const app_gy86_state_t *gy86;
-    float                   pressure_hpa;
-    float                   qnh_hpa;
-    float                   raw_altitude_m;
-    float                   dt_s;
-    float                   alpha_alt;
-    float                   alpha_vario;
-    float                   previous_filtered_altitude_m;
-    float                   raw_vario_mps;
-    uint32_t                ts_ms;
-
-    settings = Vario_Settings_Get();
-    gy86     = &s_vario_state.runtime.gy86;
-
-    if ((gy86->status_flags & APP_GY86_STATUS_BARO_VALID) == 0u)
+    while (deg < 0.0f)
     {
-        s_vario_state.runtime.baro_valid = false;
-        return;
+        deg += 360.0f;
     }
 
-    if (gy86->baro.sample_count == s_vario_state.runtime.last_baro_sample_count)
+    while (deg >= 360.0f)
     {
-        return;
+        deg -= 360.0f;
     }
 
-    pressure_hpa   = ((float)gy86->baro.pressure_hpa_x100) * 0.01f;
-    qnh_hpa        = ((float)settings->qnh_hpa_x100) * 0.01f;
-    raw_altitude_m = vario_state_pressure_to_altitude_m(pressure_hpa, qnh_hpa);
-
-    s_vario_state.runtime.pressure_hpa_x100 = gy86->baro.pressure_hpa_x100;
-    s_vario_state.runtime.temperature_c_x100 = gy86->baro.temp_cdeg;
-    s_vario_state.runtime.pressure_hpa = pressure_hpa;
-    s_vario_state.runtime.temperature_c = ((float)gy86->baro.temp_cdeg) * 0.01f;
-    s_vario_state.runtime.baro_valid = true;
-
-    ts_ms = gy86->baro.timestamp_ms;
-
-    if (s_vario_state.runtime.derived_valid == false)
-    {
-        s_vario_state.runtime.last_baro_timestamp_ms = ts_ms;
-        s_vario_state.runtime.last_raw_altitude_m    = raw_altitude_m;
-        s_vario_state.runtime.filtered_altitude_m    = raw_altitude_m;
-        s_vario_state.runtime.filtered_vario_mps     = 0.0f;
-        s_vario_state.runtime.baro_altitude_m        = raw_altitude_m;
-        s_vario_state.runtime.baro_vario_mps         = 0.0f;
-        s_vario_state.runtime.derived_valid          = true;
-    }
-    else
-    {
-        dt_s = ((float)(ts_ms - s_vario_state.runtime.last_baro_timestamp_ms)) * 0.001f;
-        dt_s = vario_state_clampf(dt_s, VARIO_STATE_MIN_DT_S, VARIO_STATE_MAX_DT_S);
-
-        if (vario_state_absf(raw_altitude_m - s_vario_state.runtime.last_raw_altitude_m) >
-            VARIO_STATE_MAX_ALT_JUMP_M)
-        {
-            raw_altitude_m = s_vario_state.runtime.last_raw_altitude_m;
-        }
-
-        alpha_alt = vario_state_lpf_alpha(dt_s, VARIO_STATE_ALTITUDE_TAU_S);
-        previous_filtered_altitude_m = s_vario_state.runtime.filtered_altitude_m;
-        s_vario_state.runtime.filtered_altitude_m +=
-            alpha_alt * (raw_altitude_m - s_vario_state.runtime.filtered_altitude_m);
-
-        raw_vario_mps = (s_vario_state.runtime.filtered_altitude_m - previous_filtered_altitude_m) / dt_s;
-        raw_vario_mps = vario_state_clampf(raw_vario_mps,
-                                           -VARIO_STATE_MAX_VARIO_MPS,
-                                           +VARIO_STATE_MAX_VARIO_MPS);
-
-        alpha_vario = vario_state_lpf_alpha(dt_s, VARIO_STATE_VARIO_TAU_S);
-        s_vario_state.runtime.filtered_vario_mps +=
-            alpha_vario * (raw_vario_mps - s_vario_state.runtime.filtered_vario_mps);
-
-        if (vario_state_absf(s_vario_state.runtime.filtered_vario_mps) < VARIO_STATE_VARIO_DEADBAND_MPS)
-        {
-            s_vario_state.runtime.filtered_vario_mps = 0.0f;
-        }
-
-        s_vario_state.runtime.last_baro_timestamp_ms = ts_ms;
-        s_vario_state.runtime.last_raw_altitude_m    = raw_altitude_m;
-        s_vario_state.runtime.baro_altitude_m        = s_vario_state.runtime.filtered_altitude_m;
-        s_vario_state.runtime.baro_vario_mps         = s_vario_state.runtime.filtered_vario_mps;
-    }
-
-    s_vario_state.runtime.last_baro_sample_count = gy86->baro.sample_count;
-    s_vario_state.redraw_request = 1u;
+    return deg;
 }
 
-static void vario_state_update_derived_from_gps(void)
+static float vario_state_wrap_pm180(float deg)
 {
-    const app_gps_state_t *gps;
-    uint32_t               gps_ts_ms;
-    float                  raw_ground_speed_kmh;
-    float                  alpha_gs;
-
-    gps = &s_vario_state.runtime.gps;
-
-    if ((gps->fix.valid == false) ||
-        (gps->fix.fixOk == false) ||
-        (gps->fix.fixType == 0u))
+    while (deg > 180.0f)
     {
-        s_vario_state.runtime.gps_valid = false;
-        return;
+        deg -= 360.0f;
     }
 
-    /* ---------------------------------------------------------------------- */
-    /*  현재 프로젝트의 gps_fix_basic_t 에는 host_time_ms 가 없고,              */
-    /*  대신 APP_STATE publish 시각인 last_update_ms 와                        */
-    /*  GPS epoch 기준 iTOW_ms 가 공개된다.                                    */
-    /*                                                                        */
-    /*  여기서는 "새 snapshot 이 들어왔는가" 와 "필터 dt" 를 위해              */
-    /*  last_update_ms 를 사용한다.                                            */
-    /* ---------------------------------------------------------------------- */
-    gps_ts_ms = gps->fix.last_update_ms;
-
-    if ((gps_ts_ms != 0u) &&
-        (gps_ts_ms == s_vario_state.runtime.last_gps_host_time_ms))
+    while (deg < -180.0f)
     {
-        return;
+        deg += 360.0f;
     }
 
-    raw_ground_speed_kmh = ((float)gps->fix.gSpeed) * 0.0036f;
-    raw_ground_speed_kmh = vario_state_clampf(raw_ground_speed_kmh, 0.0f, 180.0f);
-
-    s_vario_state.runtime.gps_valid      = true;
-    s_vario_state.runtime.gps_altitude_m = ((float)gps->fix.hMSL) * 0.001f;
-
-    if ((s_vario_state.runtime.last_gps_host_time_ms == 0u) || (gps_ts_ms == 0u))
-    {
-        s_vario_state.runtime.filtered_ground_speed_kmh = raw_ground_speed_kmh;
-    }
-    else
-    {
-        float dt_s;
-
-        dt_s = ((float)(gps_ts_ms - s_vario_state.runtime.last_gps_host_time_ms)) * 0.001f;
-        dt_s = vario_state_clampf(dt_s, 0.020f, 0.300f);
-
-        alpha_gs = vario_state_lpf_alpha(dt_s, VARIO_STATE_GS_TAU_S);
-        s_vario_state.runtime.filtered_ground_speed_kmh +=
-            alpha_gs * (raw_ground_speed_kmh - s_vario_state.runtime.filtered_ground_speed_kmh);
-    }
-
-    s_vario_state.runtime.ground_speed_kmh = s_vario_state.runtime.filtered_ground_speed_kmh;
-    s_vario_state.runtime.last_gps_host_time_ms = gps_ts_ms;
-    s_vario_state.redraw_request = 1u;
+    return deg;
 }
 
-static void vario_state_update_temperature(void)
+static float vario_state_pressure_to_altitude_m(float pressure_hpa, float qnh_hpa)
 {
-    const app_ds18b20_state_t *ds;
-    bool                       valid;
-
-    ds = &s_vario_state.runtime.ds18b20;
-
-    valid = false;
-
-    if (((ds->status_flags & APP_DS18B20_STATUS_VALID) != 0u) &&
-        (ds->raw.temp_c_x100 != APP_DS18B20_TEMP_INVALID))
+    if ((pressure_hpa <= 0.0f) || (qnh_hpa <= 0.0f))
     {
-        valid = true;
+        return 0.0f;
     }
 
-    s_vario_state.runtime.temp_valid = valid;
+    return VARIO_STATE_PRESSURE_TO_ALT_FACTOR_M *
+           (1.0f - powf((pressure_hpa / qnh_hpa), VARIO_STATE_PRESSURE_TO_ALT_EXPONENT));
+}
 
-    if (valid == false)
-    {
-        return;
-    }
-
-    if (ds->raw.sample_count == s_vario_state.runtime.last_temp_sample_count)
-    {
-        return;
-    }
-
-    s_vario_state.runtime.temperature_c_x100 = ds->raw.temp_c_x100;
-    s_vario_state.runtime.temperature_c      = ((float)ds->raw.temp_c_x100) * 0.01f;
-    s_vario_state.runtime.last_temp_sample_count = ds->raw.sample_count;
-    s_vario_state.redraw_request = 1u;
+static float vario_state_deg_to_rad(float deg)
+{
+    return deg * (VARIO_STATE_PI / 180.0f);
 }
 
 static uint8_t vario_state_wrap_cursor(uint8_t cursor, uint8_t count, int8_t direction)
@@ -305,6 +183,750 @@ static uint8_t vario_state_wrap_cursor(uint8_t cursor, uint8_t count, int8_t dir
     return (uint8_t)next;
 }
 
+/* -------------------------------------------------------------------------- */
+/*  snapshot capture                                                          */
+/*                                                                            */
+/*  이 함수는 APP_STATE 공개 API만 사용한다.                                   */
+/*  센서 드라이버 raw register 와는 완전히 절연되어 있다.                      */
+/* -------------------------------------------------------------------------- */
+static void vario_state_capture_snapshots(void)
+{
+    APP_STATE_CopyGy86Snapshot(&s_vario_state.runtime.gy86);
+    APP_STATE_CopyGpsSnapshot(&s_vario_state.runtime.gps);
+    APP_STATE_CopyDs18b20Snapshot(&s_vario_state.runtime.ds18b20);
+    APP_STATE_CopyAltitudeSnapshot(&s_vario_state.runtime.altitude);
+    APP_STATE_CopyBikeSnapshot(&s_vario_state.runtime.bike);
+    APP_STATE_CopyClockSnapshot(&s_vario_state.runtime.clock);
+}
+
+/* -------------------------------------------------------------------------- */
+/*  pressure / temperature visible cache                                       */
+/*                                                                            */
+/*  화면 자체는 고도 계산에 APP_ALTITUDE snapshot 을 주로 사용하지만,            */
+/*  raw overlay 및 진단 문자열을 위해 pressure/temperature cache 는 유지한다.    */
+/* -------------------------------------------------------------------------- */
+static void vario_state_update_sensor_caches(void)
+{
+    const app_altitude_state_t *alt;
+    const app_gy86_state_t     *gy86;
+    const app_ds18b20_state_t  *ds;
+
+    alt = &s_vario_state.runtime.altitude;
+    gy86 = &s_vario_state.runtime.gy86;
+    ds = &s_vario_state.runtime.ds18b20;
+
+    s_vario_state.runtime.baro_valid = ((alt->initialized != false) && (alt->baro_valid != false));
+    s_vario_state.runtime.gps_valid = ((s_vario_state.runtime.gps.fix.valid != false) &&
+                                       (s_vario_state.runtime.gps.fix.fixOk != false) &&
+                                       (s_vario_state.runtime.gps.fix.fixType != 0u));
+
+    if (s_vario_state.runtime.baro_valid != false)
+    {
+        s_vario_state.runtime.pressure_hpa_x100 = alt->pressure_filt_hpa_x100;
+        s_vario_state.runtime.pressure_hpa = ((float)alt->pressure_filt_hpa_x100) * 0.01f;
+    }
+    else if ((gy86->status_flags & APP_GY86_STATUS_BARO_VALID) != 0u)
+    {
+        s_vario_state.runtime.pressure_hpa_x100 = gy86->baro.pressure_hpa_x100;
+        s_vario_state.runtime.pressure_hpa = ((float)gy86->baro.pressure_hpa_x100) * 0.01f;
+    }
+
+    if (((ds->status_flags & APP_DS18B20_STATUS_VALID) != 0u) &&
+        (ds->raw.temp_c_x100 != APP_DS18B20_TEMP_INVALID))
+    {
+        s_vario_state.runtime.temp_valid = true;
+        s_vario_state.runtime.temperature_c_x100 = ds->raw.temp_c_x100;
+        s_vario_state.runtime.temperature_c = ((float)ds->raw.temp_c_x100) * 0.01f;
+    }
+    else if ((gy86->status_flags & APP_GY86_STATUS_BARO_VALID) != 0u)
+    {
+        /* ------------------------------------------------------------------ */
+        /* 외부 온도 프로브가 없을 때는 baro 온도를 임시 진단값으로만 사용한다. */
+        /* ------------------------------------------------------------------ */
+        s_vario_state.runtime.temp_valid = true;
+        s_vario_state.runtime.temperature_c_x100 = gy86->baro.temp_cdeg;
+        s_vario_state.runtime.temperature_c = ((float)gy86->baro.temp_cdeg) * 0.01f;
+    }
+    else
+    {
+        s_vario_state.runtime.temp_valid = false;
+    }
+
+    if (s_vario_state.runtime.gps_valid != false)
+    {
+        s_vario_state.runtime.gps_altitude_m = ((float)s_vario_state.runtime.gps.fix.hMSL) * 0.001f;
+    }
+}
+
+static float vario_state_pick_fast_vario_mps(const app_altitude_state_t *alt,
+                                             const vario_settings_t *settings)
+{
+    if ((alt == NULL) || (settings == NULL))
+    {
+        return 0.0f;
+    }
+
+    switch (settings->altitude_source)
+    {
+        case VARIO_ALT_SOURCE_FUSED_NOIMU:
+            return ((float)alt->vario_fast_noimu_cms) * 0.01f;
+
+        case VARIO_ALT_SOURCE_FUSED_IMU:
+            if (alt->imu_vector_valid != false)
+            {
+                return ((float)alt->vario_fast_imu_cms) * 0.01f;
+            }
+            return ((float)alt->vario_fast_noimu_cms) * 0.01f;
+
+        case VARIO_ALT_SOURCE_DISPLAY:
+        case VARIO_ALT_SOURCE_QNH_MANUAL:
+        case VARIO_ALT_SOURCE_GPS_HMSL:
+        case VARIO_ALT_SOURCE_COUNT:
+        default:
+            if (alt->imu_vector_valid != false)
+            {
+                return ((float)alt->vario_fast_imu_cms) * 0.01f;
+            }
+            return ((float)alt->vario_fast_noimu_cms) * 0.01f;
+    }
+}
+
+static float vario_state_pick_slow_vario_mps(const app_altitude_state_t *alt,
+                                             const vario_settings_t *settings)
+{
+    if ((alt == NULL) || (settings == NULL))
+    {
+        return 0.0f;
+    }
+
+    switch (settings->altitude_source)
+    {
+        case VARIO_ALT_SOURCE_FUSED_NOIMU:
+            return ((float)alt->vario_slow_noimu_cms) * 0.01f;
+
+        case VARIO_ALT_SOURCE_FUSED_IMU:
+            if (alt->imu_vector_valid != false)
+            {
+                return ((float)alt->vario_slow_imu_cms) * 0.01f;
+            }
+            return ((float)alt->vario_slow_noimu_cms) * 0.01f;
+
+        case VARIO_ALT_SOURCE_DISPLAY:
+        case VARIO_ALT_SOURCE_QNH_MANUAL:
+        case VARIO_ALT_SOURCE_GPS_HMSL:
+        case VARIO_ALT_SOURCE_COUNT:
+        default:
+            if (alt->imu_vector_valid != false)
+            {
+                return ((float)alt->vario_slow_imu_cms) * 0.01f;
+            }
+            return ((float)alt->vario_slow_noimu_cms) * 0.01f;
+    }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  altitude / vario measurement selection                                    */
+/*                                                                            */
+/*  화면용 고도는 반드시 APP_STATE 고수준 결과를 기반으로 한다.                */
+/*  단, Flytec 스타일의 manual QNH 고도를 위해 pressure_filt_hpa_x100 을       */
+/*  이용한 재계산 경로를 허용한다.                                              */
+/* -------------------------------------------------------------------------- */
+static bool vario_state_select_measurement(float *out_altitude_m, float *out_vario_mps)
+{
+    const vario_settings_t   *settings;
+    const app_altitude_state_t *alt;
+    float                     fast_vario_mps;
+    float                     slow_vario_mps;
+    float                     slow_weight;
+    float                     altitude_m;
+
+    settings = Vario_Settings_Get();
+    alt = &s_vario_state.runtime.altitude;
+
+    if ((out_altitude_m == NULL) || (out_vario_mps == NULL))
+    {
+        return false;
+    }
+
+    if (alt->initialized == false)
+    {
+        return false;
+    }
+
+    fast_vario_mps = vario_state_pick_fast_vario_mps(alt, settings);
+    slow_vario_mps = vario_state_pick_slow_vario_mps(alt, settings);
+
+    /* ---------------------------------------------------------------------- */
+    /* integrated vario 개념                                                   */
+    /* - average seconds 가 1에 가까울수록 fast 쪽 비중이 커진다.              */
+    /* - average seconds 가 클수록 slow 쪽 비중이 커진다.                      */
+    /* ---------------------------------------------------------------------- */
+    slow_weight = ((float)(settings->digital_vario_average_seconds - 1u)) / 7.0f;
+    slow_weight = vario_state_clampf(slow_weight, 0.0f, 1.0f);
+
+    switch (settings->altitude_source)
+    {
+        case VARIO_ALT_SOURCE_QNH_MANUAL:
+            if ((alt->baro_valid == false) ||
+                (alt->pressure_filt_hpa_x100 <= 0) ||
+                (settings->qnh_hpa_x100 <= 0))
+            {
+                return false;
+            }
+
+            altitude_m = vario_state_pressure_to_altitude_m(((float)alt->pressure_filt_hpa_x100) * 0.01f,
+                                                            ((float)settings->qnh_hpa_x100) * 0.01f);
+            *out_altitude_m = altitude_m;
+            *out_vario_mps = ((float)alt->baro_vario_filt_cms) * 0.01f;
+            return true;
+
+        case VARIO_ALT_SOURCE_FUSED_NOIMU:
+            if (alt->baro_valid == false)
+            {
+                return false;
+            }
+            *out_altitude_m = ((float)alt->alt_fused_noimu_cm) * 0.01f;
+            *out_vario_mps = (fast_vario_mps * (1.0f - slow_weight)) + (slow_vario_mps * slow_weight);
+            return true;
+
+        case VARIO_ALT_SOURCE_FUSED_IMU:
+            if ((alt->baro_valid == false) && (alt->imu_vector_valid == false))
+            {
+                return false;
+            }
+            if (alt->imu_vector_valid != false)
+            {
+                *out_altitude_m = ((float)alt->alt_fused_imu_cm) * 0.01f;
+            }
+            else
+            {
+                *out_altitude_m = ((float)alt->alt_fused_noimu_cm) * 0.01f;
+            }
+            *out_vario_mps = (fast_vario_mps * (1.0f - slow_weight)) + (slow_vario_mps * slow_weight);
+            return true;
+
+        case VARIO_ALT_SOURCE_GPS_HMSL:
+            if (alt->gps_valid == false)
+            {
+                return false;
+            }
+            *out_altitude_m = ((float)alt->alt_gps_hmsl_cm) * 0.01f;
+            *out_vario_mps = (fast_vario_mps * (1.0f - slow_weight)) + (slow_vario_mps * slow_weight);
+            return true;
+
+        case VARIO_ALT_SOURCE_DISPLAY:
+        case VARIO_ALT_SOURCE_COUNT:
+        default:
+            if (alt->baro_valid == false)
+            {
+                return false;
+            }
+            *out_altitude_m = ((float)alt->alt_display_cm) * 0.01f;
+            *out_vario_mps = (fast_vario_mps * (1.0f - slow_weight)) + (slow_vario_mps * slow_weight);
+            return true;
+    }
+}
+
+static void vario_state_update_ground_speed(void)
+{
+    const app_gps_state_t *gps;
+    float                  raw_ground_speed_kmh;
+    float                  dt_s;
+    float                  alpha;
+
+    gps = &s_vario_state.runtime.gps;
+
+    if ((gps->fix.valid == false) ||
+        (gps->fix.fixOk == false) ||
+        (gps->fix.fixType == 0u))
+    {
+        s_vario_state.runtime.gps_valid = false;
+        return;
+    }
+
+    raw_ground_speed_kmh = ((float)gps->fix.gSpeed) * 0.0036f;
+    raw_ground_speed_kmh = vario_state_clampf(raw_ground_speed_kmh, 0.0f, 250.0f);
+
+    if (gps->fix.last_update_ms == 0u)
+    {
+        return;
+    }
+
+    if (s_vario_state.runtime.last_gps_host_time_ms == 0u)
+    {
+        s_vario_state.runtime.filtered_ground_speed_kmh = raw_ground_speed_kmh;
+        s_vario_state.runtime.last_gps_host_time_ms = gps->fix.last_update_ms;
+        return;
+    }
+
+    if (gps->fix.last_update_ms == s_vario_state.runtime.last_gps_host_time_ms)
+    {
+        return;
+    }
+
+    dt_s = ((float)(gps->fix.last_update_ms - s_vario_state.runtime.last_gps_host_time_ms)) * 0.001f;
+    dt_s = vario_state_clampf(dt_s, VARIO_STATE_MIN_DT_S, 0.300f);
+
+    alpha = vario_state_lpf_alpha(dt_s, VARIO_STATE_GS_TAU_S);
+    s_vario_state.runtime.filtered_ground_speed_kmh +=
+        alpha * (raw_ground_speed_kmh - s_vario_state.runtime.filtered_ground_speed_kmh);
+
+    s_vario_state.runtime.last_gps_host_time_ms = gps->fix.last_update_ms;
+}
+
+static bool vario_state_select_heading_measurement(float *out_heading_deg, uint8_t *out_source)
+{
+    const vario_settings_t *settings;
+    const app_bike_state_t *bike;
+    const app_gps_state_t  *gps;
+    float                   heading_deg;
+    float                   speed_kmh;
+
+    settings = Vario_Settings_Get();
+    bike = &s_vario_state.runtime.bike;
+    gps = &s_vario_state.runtime.gps;
+    speed_kmh = s_vario_state.runtime.filtered_ground_speed_kmh;
+
+    if ((out_heading_deg == NULL) || (out_source == NULL))
+    {
+        return false;
+    }
+
+    if ((settings->heading_source == VARIO_HEADING_SOURCE_AUTO) ||
+        (settings->heading_source == VARIO_HEADING_SOURCE_BIKE))
+    {
+        if (bike->heading_valid != false)
+        {
+            heading_deg = ((float)bike->heading_deg_x10) * 0.1f;
+            *out_heading_deg = vario_state_wrap_360(heading_deg);
+            *out_source = 1u;
+            return true;
+        }
+
+        if (settings->heading_source == VARIO_HEADING_SOURCE_BIKE)
+        {
+            return false;
+        }
+    }
+
+    if ((settings->heading_source == VARIO_HEADING_SOURCE_AUTO) ||
+        (settings->heading_source == VARIO_HEADING_SOURCE_GPS))
+    {
+        if ((gps->fix.valid != false) &&
+            (gps->fix.fixOk != false) &&
+            (gps->fix.fixType != 0u) &&
+            (speed_kmh >= VARIO_STATE_HEADING_GPS_MIN_SPEED_KMH))
+        {
+            if (gps->fix.head_veh_valid != 0u)
+            {
+                heading_deg = ((float)gps->fix.headVeh) * 0.00001f;
+                *out_heading_deg = vario_state_wrap_360(heading_deg);
+                *out_source = 2u;
+                return true;
+            }
+
+            heading_deg = ((float)gps->fix.headMot) * 0.00001f;
+            *out_heading_deg = vario_state_wrap_360(heading_deg);
+            *out_source = 3u;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void vario_state_update_heading(uint32_t now_ms)
+{
+    float    measured_heading_deg;
+    uint8_t  source;
+    float    dt_s;
+    float    alpha;
+    float    delta;
+
+    if (vario_state_select_heading_measurement(&measured_heading_deg, &source) == false)
+    {
+        return;
+    }
+
+    if (s_vario_state.runtime.heading_valid == false)
+    {
+        s_vario_state.runtime.heading_deg = measured_heading_deg;
+        s_vario_state.runtime.last_heading_deg = measured_heading_deg;
+        s_vario_state.runtime.heading_source = source;
+        s_vario_state.runtime.heading_valid = true;
+        return;
+    }
+
+    dt_s = ((float)(now_ms - s_vario_state.runtime.last_task_ms)) * 0.001f;
+    dt_s = vario_state_clampf(dt_s, VARIO_STATE_MIN_DT_S, 0.150f);
+    alpha = vario_state_lpf_alpha(dt_s, VARIO_STATE_HEADING_TAU_S);
+
+    delta = vario_state_wrap_pm180(measured_heading_deg - s_vario_state.runtime.heading_deg);
+    s_vario_state.runtime.heading_deg = vario_state_wrap_360(s_vario_state.runtime.heading_deg + (alpha * delta));
+    s_vario_state.runtime.last_heading_deg = s_vario_state.runtime.heading_deg;
+    s_vario_state.runtime.heading_source = source;
+    s_vario_state.runtime.heading_valid = true;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  app-layer display filter                                                   */
+/*                                                                            */
+/*  핵심 아이디어                                                             */
+/*  1) APP_ALTITUDE 가 이미 1차 필터링한 altitude/vario 를 받아 온다.           */
+/*  2) 상위 앱 레이어에서 다시 한 번 observer 성격의 display filter 를 건다.   */
+/*  3) 내부 상태는 baro sample cadence 에 맞춰 계속 갱신하되,                  */
+/*     화면 publish 는 5Hz 로만 한다.                                         */
+/*                                                                            */
+/*  이 방식은 "무식하게 200ms 마다 샘플 하나만 채택" 하는 것이 아니라,         */
+/*  내부 추정은 고속으로 유지하면서 표시만 절제하는 방식이다.                  */
+/* -------------------------------------------------------------------------- */
+static void vario_state_update_display_filter(uint32_t now_ms)
+{
+    (void)now_ms;
+    const vario_settings_t *settings;
+    const app_altitude_state_t *alt;
+    float                    measured_altitude_m;
+    float                    measured_vario_mps;
+    float                    dt_s;
+    float                    damping_norm;
+    float                    alt_tau_s;
+    float                    vel_tau_s;
+    float                    alt_alpha;
+    float                    vel_alpha;
+    float                    predicted_altitude_m;
+    float                    residual_m;
+
+    settings = Vario_Settings_Get();
+    alt = &s_vario_state.runtime.altitude;
+
+    if (vario_state_select_measurement(&measured_altitude_m, &measured_vario_mps) == false)
+    {
+        s_vario_state.runtime.altitude_valid = false;
+        return;
+    }
+
+    s_vario_state.runtime.altitude_valid = true;
+    s_vario_state.runtime.raw_selected_altitude_m = measured_altitude_m;
+    s_vario_state.runtime.raw_selected_vario_mps = measured_vario_mps;
+
+    if ((s_vario_state.runtime.last_altitude_update_ms != 0u) &&
+        (alt->last_update_ms == s_vario_state.runtime.last_altitude_update_ms))
+    {
+        return;
+    }
+
+    if ((s_vario_state.runtime.derived_valid == false) ||
+        (s_vario_state.runtime.last_altitude_update_ms == 0u) ||
+        (alt->last_update_ms == 0u))
+    {
+        s_vario_state.runtime.filtered_altitude_m = measured_altitude_m;
+        s_vario_state.runtime.filtered_vario_mps = measured_vario_mps;
+        s_vario_state.runtime.observer_velocity_mps = measured_vario_mps;
+        s_vario_state.runtime.last_measured_altitude_m = measured_altitude_m;
+        s_vario_state.runtime.last_accum_altitude_m = measured_altitude_m;
+        s_vario_state.runtime.last_altitude_update_ms = alt->last_update_ms;
+        s_vario_state.runtime.derived_valid = true;
+        return;
+    }
+
+    dt_s = ((float)(alt->last_update_ms - s_vario_state.runtime.last_altitude_update_ms)) * 0.001f;
+    dt_s = vario_state_clampf(dt_s, VARIO_STATE_MIN_DT_S, VARIO_STATE_MAX_DT_S);
+
+    /* ---------------------------------------------------------------------- */
+    /* damping level -> time constant                                          */
+    /* - level 1 은 민감한 편                                                   */
+    /* - level 10 은 꽤 묵직한 편                                               */
+    /* ---------------------------------------------------------------------- */
+    damping_norm = ((float)(settings->vario_damping_level - 1u)) / 9.0f;
+    damping_norm = vario_state_clampf(damping_norm, 0.0f, 1.0f);
+    alt_tau_s = 0.18f + (damping_norm * 1.00f);
+    vel_tau_s = 0.12f + (damping_norm * 0.60f);
+
+    predicted_altitude_m = s_vario_state.runtime.filtered_altitude_m +
+                           (s_vario_state.runtime.observer_velocity_mps * dt_s);
+
+    residual_m = measured_altitude_m - predicted_altitude_m;
+
+    /* ---------------------------------------------------------------------- */
+    /* gross jump 방어                                                         */
+    /* - GPS source 전환, fix glitch, QNH 급변 시 순간 튐 방지                 */
+    /* ---------------------------------------------------------------------- */
+    residual_m = vario_state_clampf(residual_m,
+                                    -VARIO_STATE_ALTITUDE_JUMP_LIMIT_M,
+                                    +VARIO_STATE_ALTITUDE_JUMP_LIMIT_M);
+
+    alt_alpha = vario_state_lpf_alpha(dt_s, alt_tau_s);
+    vel_alpha = vario_state_lpf_alpha(dt_s, vel_tau_s);
+
+    /* ---------------------------------------------------------------------- */
+    /* position correction                                                     */
+    /* ---------------------------------------------------------------------- */
+    s_vario_state.runtime.filtered_altitude_m = predicted_altitude_m + (alt_alpha * residual_m);
+
+    /* ---------------------------------------------------------------------- */
+    /* velocity correction                                                     */
+    /* - residual/dt 로 위치 오차를 속도에 환산                                 */
+    /* - measured_vario_mps 와도 다시 blend 해서 altitude derivative 와         */
+    /*   APP_ALTITUDE fast/slow vario 둘 다 활용한다.                          */
+    /* ---------------------------------------------------------------------- */
+    s_vario_state.runtime.observer_velocity_mps += (alt_alpha * 0.75f) * (residual_m / dt_s);
+    s_vario_state.runtime.observer_velocity_mps += vel_alpha *
+                                                   (measured_vario_mps - s_vario_state.runtime.observer_velocity_mps);
+    s_vario_state.runtime.observer_velocity_mps =
+        vario_state_clampf(s_vario_state.runtime.observer_velocity_mps,
+                           -VARIO_STATE_MAX_VARIO_MPS,
+                           +VARIO_STATE_MAX_VARIO_MPS);
+
+    s_vario_state.runtime.filtered_vario_mps = s_vario_state.runtime.observer_velocity_mps;
+
+    if (vario_state_absf(s_vario_state.runtime.filtered_vario_mps) < VARIO_STATE_VARIO_NEAR_ZERO_MPS)
+    {
+        s_vario_state.runtime.filtered_vario_mps = 0.0f;
+    }
+
+    s_vario_state.runtime.last_measured_altitude_m = measured_altitude_m;
+    s_vario_state.runtime.last_altitude_update_ms = alt->last_update_ms;
+}
+
+static void vario_state_update_flight_logic(uint32_t now_ms)
+{
+    const vario_settings_t *settings;
+    float                   start_speed_kmh;
+    float                   positive_gain_step_m;
+
+    settings = Vario_Settings_Get();
+    start_speed_kmh = ((float)settings->flight_start_speed_kmh_x10) * 0.1f;
+
+    if ((s_vario_state.runtime.flight_active == false) &&
+        ((s_vario_state.runtime.filtered_ground_speed_kmh >= start_speed_kmh) ||
+         (vario_state_absf(s_vario_state.runtime.filtered_vario_mps) >= 0.8f)))
+    {
+        if (s_vario_state.runtime.flight_takeoff_candidate_ms == 0u)
+        {
+            s_vario_state.runtime.flight_takeoff_candidate_ms = now_ms;
+        }
+        else if ((now_ms - s_vario_state.runtime.flight_takeoff_candidate_ms) >=
+                 VARIO_STATE_FLIGHT_START_CONFIRM_MS)
+        {
+            s_vario_state.runtime.flight_active = true;
+            s_vario_state.runtime.flight_start_ms = now_ms;
+            s_vario_state.runtime.flight_landing_candidate_ms = 0u;
+            s_vario_state.runtime.flight_time_s = 0u;
+            s_vario_state.runtime.alt3_accum_gain_m = 0.0f;
+            s_vario_state.runtime.max_top_vario_mps = 0.0f;
+            s_vario_state.runtime.last_accum_altitude_m = s_vario_state.runtime.filtered_altitude_m;
+            s_vario_state.redraw_request = 1u;
+        }
+    }
+    else if ((s_vario_state.runtime.flight_active == false) &&
+             (s_vario_state.runtime.filtered_ground_speed_kmh < start_speed_kmh) &&
+             (vario_state_absf(s_vario_state.runtime.filtered_vario_mps) < 0.8f))
+    {
+        s_vario_state.runtime.flight_takeoff_candidate_ms = 0u;
+    }
+
+    if (s_vario_state.runtime.flight_active != false)
+    {
+        s_vario_state.runtime.flight_time_s = (now_ms - s_vario_state.runtime.flight_start_ms) / 1000u;
+
+        if (s_vario_state.runtime.filtered_vario_mps > s_vario_state.runtime.max_top_vario_mps)
+        {
+            s_vario_state.runtime.max_top_vario_mps = s_vario_state.runtime.filtered_vario_mps;
+        }
+
+        positive_gain_step_m = s_vario_state.runtime.filtered_altitude_m - s_vario_state.runtime.last_accum_altitude_m;
+        if (positive_gain_step_m > 0.0f)
+        {
+            s_vario_state.runtime.alt3_accum_gain_m += positive_gain_step_m;
+        }
+        s_vario_state.runtime.last_accum_altitude_m = s_vario_state.runtime.filtered_altitude_m;
+
+        if ((s_vario_state.runtime.filtered_ground_speed_kmh <= VARIO_STATE_FLIGHT_END_SPEED_KMH) &&
+            (vario_state_absf(s_vario_state.runtime.filtered_vario_mps) <= VARIO_STATE_FLIGHT_END_VARIO_MPS))
+        {
+            if (s_vario_state.runtime.flight_landing_candidate_ms == 0u)
+            {
+                s_vario_state.runtime.flight_landing_candidate_ms = now_ms;
+            }
+            else if ((now_ms - s_vario_state.runtime.flight_landing_candidate_ms) >=
+                     VARIO_STATE_FLIGHT_LAND_CONFIRM_MS)
+            {
+                s_vario_state.runtime.flight_active = false;
+                s_vario_state.runtime.flight_takeoff_candidate_ms = 0u;
+                s_vario_state.runtime.flight_landing_candidate_ms = 0u;
+                s_vario_state.redraw_request = 1u;
+            }
+        }
+        else
+        {
+            s_vario_state.runtime.flight_landing_candidate_ms = 0u;
+        }
+    }
+}
+
+static float vario_state_distance_between_ll_deg_e7(int32_t lat1_e7,
+                                                    int32_t lon1_e7,
+                                                    int32_t lat2_e7,
+                                                    int32_t lon2_e7)
+{
+    float lat1_deg;
+    float lat2_deg;
+    float lon1_deg;
+    float lon2_deg;
+    float mean_lat_rad;
+    float dx_m;
+    float dy_m;
+
+    lat1_deg = ((float)lat1_e7) * 1.0e-7f;
+    lat2_deg = ((float)lat2_e7) * 1.0e-7f;
+    lon1_deg = ((float)lon1_e7) * 1.0e-7f;
+    lon2_deg = ((float)lon2_e7) * 1.0e-7f;
+
+    mean_lat_rad = vario_state_deg_to_rad((lat1_deg + lat2_deg) * 0.5f);
+    dx_m = (lon2_deg - lon1_deg) * (VARIO_STATE_EARTH_METERS_PER_DEG_LON * cosf(mean_lat_rad));
+    dy_m = (lat2_deg - lat1_deg) * VARIO_STATE_EARTH_METERS_PER_DEG_LAT;
+
+    return sqrtf((dx_m * dx_m) + (dy_m * dy_m));
+}
+
+static void vario_state_push_trail_point(int32_t lat_e7, int32_t lon_e7, uint32_t stamp_ms)
+{
+    uint8_t write_index;
+
+    write_index = s_vario_state.runtime.trail_head;
+    s_vario_state.runtime.trail_lat_e7[write_index] = lat_e7;
+    s_vario_state.runtime.trail_lon_e7[write_index] = lon_e7;
+    s_vario_state.runtime.trail_stamp_ms[write_index] = stamp_ms;
+
+    s_vario_state.runtime.trail_head = (uint8_t)((write_index + 1u) % VARIO_TRAIL_MAX_POINTS);
+    if (s_vario_state.runtime.trail_count < VARIO_TRAIL_MAX_POINTS)
+    {
+        ++s_vario_state.runtime.trail_count;
+    }
+
+    s_vario_state.runtime.trail_valid = (s_vario_state.runtime.trail_count > 1u) ? true : false;
+    s_vario_state.redraw_request = 1u;
+}
+
+static void vario_state_update_trail(void)
+{
+    const vario_settings_t *settings;
+    const app_gps_state_t  *gps;
+    uint8_t                 newest_index;
+    float                   dist_m;
+    uint32_t                age_ms;
+
+    settings = Vario_Settings_Get();
+    gps = &s_vario_state.runtime.gps;
+
+    if ((gps->fix.valid == false) ||
+        (gps->fix.fixOk == false) ||
+        (gps->fix.fixType == 0u))
+    {
+        return;
+    }
+
+    if (s_vario_state.runtime.trail_count == 0u)
+    {
+        vario_state_push_trail_point(gps->fix.lat, gps->fix.lon, gps->fix.last_update_ms);
+        return;
+    }
+
+    newest_index = (s_vario_state.runtime.trail_head == 0u) ?
+                       (VARIO_TRAIL_MAX_POINTS - 1u) :
+                       (uint8_t)(s_vario_state.runtime.trail_head - 1u);
+
+    dist_m = vario_state_distance_between_ll_deg_e7(s_vario_state.runtime.trail_lat_e7[newest_index],
+                                                    s_vario_state.runtime.trail_lon_e7[newest_index],
+                                                    gps->fix.lat,
+                                                    gps->fix.lon);
+    age_ms = gps->fix.last_update_ms - s_vario_state.runtime.trail_stamp_ms[newest_index];
+
+    if ((dist_m >= (float)settings->trail_spacing_m) || (age_ms >= 5000u))
+    {
+        vario_state_push_trail_point(gps->fix.lat, gps->fix.lon, gps->fix.last_update_ms);
+    }
+}
+
+static void vario_state_update_clock(void)
+{
+    uint8_t prev_hour;
+    uint8_t prev_min;
+    uint8_t prev_sec;
+
+    prev_hour = s_vario_state.runtime.local_hour;
+    prev_min  = s_vario_state.runtime.local_min;
+    prev_sec  = s_vario_state.runtime.local_sec;
+
+    if ((s_vario_state.runtime.clock.rtc_time_valid != false) ||
+        (s_vario_state.runtime.clock.rtc_read_valid != false))
+    {
+        s_vario_state.runtime.clock_valid = true;
+        s_vario_state.runtime.local_hour = s_vario_state.runtime.clock.local.hour;
+        s_vario_state.runtime.local_min  = s_vario_state.runtime.clock.local.min;
+        s_vario_state.runtime.local_sec  = s_vario_state.runtime.clock.local.sec;
+    }
+    else if (s_vario_state.runtime.gps_valid != false)
+    {
+        s_vario_state.runtime.clock_valid = true;
+        s_vario_state.runtime.local_hour = s_vario_state.runtime.gps.fix.hour;
+        s_vario_state.runtime.local_min  = s_vario_state.runtime.gps.fix.min;
+        s_vario_state.runtime.local_sec  = s_vario_state.runtime.gps.fix.sec;
+    }
+    else
+    {
+        s_vario_state.runtime.clock_valid = false;
+    }
+
+    if ((prev_hour != s_vario_state.runtime.local_hour) ||
+        (prev_min  != s_vario_state.runtime.local_min)  ||
+        (prev_sec  != s_vario_state.runtime.local_sec))
+    {
+        s_vario_state.redraw_request = 1u;
+    }
+}
+
+static void vario_state_publish_5hz(uint32_t now_ms)
+{
+    float quant_alt_m;
+    float quant_vario_mps;
+    float quant_gs_kmh;
+    float alt2_m;
+
+    if (s_vario_state.runtime.derived_valid == false)
+    {
+        return;
+    }
+
+    if ((s_vario_state.runtime.last_publish_ms != 0u) &&
+        ((now_ms - s_vario_state.runtime.last_publish_ms) < VARIO_STATE_PUBLISH_PERIOD_MS))
+    {
+        return;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /*  5Hz publish resolution                                                  */
+    /*  - altitude : 1m                                                        */
+    /*  - vario    : 0.1m/s                                                    */
+    /*  - GS       : 0.1km/h 내부 quantize                                      */
+    /* ---------------------------------------------------------------------- */
+    quant_alt_m = roundf(s_vario_state.runtime.filtered_altitude_m);
+    quant_vario_mps = roundf(s_vario_state.runtime.filtered_vario_mps * 10.0f) * 0.1f;
+    quant_gs_kmh = roundf(s_vario_state.runtime.filtered_ground_speed_kmh * 10.0f) * 0.1f;
+
+    alt2_m = quant_alt_m - (((float)Vario_Settings_Get()->alt2_reference_cm) * 0.01f);
+    alt2_m = roundf(alt2_m);
+
+    s_vario_state.runtime.baro_altitude_m = quant_alt_m;
+    s_vario_state.runtime.alt1_absolute_m = quant_alt_m;
+    s_vario_state.runtime.baro_vario_mps = quant_vario_mps;
+    s_vario_state.runtime.ground_speed_kmh = quant_gs_kmh;
+    s_vario_state.runtime.alt2_relative_m = alt2_m;
+    s_vario_state.runtime.last_publish_ms = now_ms;
+
+    s_vario_state.redraw_request = 1u;
+}
+
 void Vario_State_Init(void)
 {
     memset(&s_vario_state, 0, sizeof(s_vario_state));
@@ -316,12 +938,22 @@ void Vario_State_Init(void)
 
 void Vario_State_Task(uint32_t now_ms)
 {
-    s_vario_state.runtime.last_task_ms = now_ms;
-
     vario_state_capture_snapshots();
-    vario_state_update_derived_from_baro();
-    vario_state_update_derived_from_gps();
-    vario_state_update_temperature();
+    vario_state_update_sensor_caches();
+    vario_state_update_ground_speed();
+    vario_state_update_display_filter(now_ms);
+    vario_state_update_heading(now_ms);
+    vario_state_update_clock();
+    vario_state_update_flight_logic(now_ms);
+    vario_state_update_trail();
+    vario_state_publish_5hz(now_ms);
+
+    /* ---------------------------------------------------------------------- */
+    /* last_task_ms 갱신 시점                                                   */
+    /* - heading LPF 의 dt 는 "직전 task 와 현재 task 사이 시간" 이어야 한다.    */
+    /* - 따라서 task 시작 시점이 아니라 모든 계산이 끝난 뒤 now_ms 를 저장한다. */
+    /* ---------------------------------------------------------------------- */
+    s_vario_state.runtime.last_task_ms = now_ms;
 }
 
 vario_mode_t Vario_State_GetMode(void)
@@ -451,6 +1083,34 @@ void Vario_State_MoveValueSettingCursor(int8_t direction)
 const vario_runtime_t *Vario_State_GetRuntime(void)
 {
     return &s_vario_state.runtime;
+}
+
+void Vario_State_ResetAccumulatedGain(void)
+{
+    s_vario_state.runtime.alt3_accum_gain_m = 0.0f;
+    s_vario_state.runtime.max_top_vario_mps = 0.0f;
+    s_vario_state.runtime.last_accum_altitude_m = s_vario_state.runtime.filtered_altitude_m;
+    s_vario_state.redraw_request = 1u;
+}
+
+void Vario_State_ResetFlightMetrics(void)
+{
+    memset(s_vario_state.runtime.trail_lat_e7, 0, sizeof(s_vario_state.runtime.trail_lat_e7));
+    memset(s_vario_state.runtime.trail_lon_e7, 0, sizeof(s_vario_state.runtime.trail_lon_e7));
+    memset(s_vario_state.runtime.trail_stamp_ms, 0, sizeof(s_vario_state.runtime.trail_stamp_ms));
+
+    s_vario_state.runtime.flight_active = false;
+    s_vario_state.runtime.flight_takeoff_candidate_ms = 0u;
+    s_vario_state.runtime.flight_landing_candidate_ms = 0u;
+    s_vario_state.runtime.flight_start_ms = 0u;
+    s_vario_state.runtime.flight_time_s = 0u;
+    s_vario_state.runtime.trail_head = 0u;
+    s_vario_state.runtime.trail_count = 0u;
+    s_vario_state.runtime.trail_valid = false;
+    s_vario_state.runtime.alt3_accum_gain_m = 0.0f;
+    s_vario_state.runtime.max_top_vario_mps = 0.0f;
+    s_vario_state.runtime.last_accum_altitude_m = s_vario_state.runtime.filtered_altitude_m;
+    s_vario_state.redraw_request = 1u;
 }
 
 void Vario_State_RequestRedraw(void)

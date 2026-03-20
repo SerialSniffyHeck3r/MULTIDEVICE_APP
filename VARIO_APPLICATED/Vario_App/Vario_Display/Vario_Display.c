@@ -10,6 +10,8 @@
 #include "Vario_Dev.h"
 #include "Vario_State.h"
 
+#include <stddef.h>
+
 void Vario_Display_Init(void)
 {
     /* ---------------------------------------------------------------------- */

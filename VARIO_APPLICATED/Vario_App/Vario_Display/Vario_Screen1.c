@@ -5,362 +5,408 @@
 #include "../Vario_State/Vario_State.h"
 
 #include <math.h>
+#include <stddef.h>
 #include <stdio.h>
-#include <stdlib.h>
+#include <string.h>
 
-#define VARIO_SCREEN1_LEFT_GAUGE_X      6
-#define VARIO_SCREEN1_LEFT_GAUGE_Y     12
-#define VARIO_SCREEN1_LEFT_GAUGE_W      38
-#define VARIO_SCREEN1_LEFT_GAUGE_H     104
-
-#define VARIO_SCREEN1_RIGHT_GAUGE_X   196
-#define VARIO_SCREEN1_RIGHT_GAUGE_Y    12
-#define VARIO_SCREEN1_RIGHT_GAUGE_W    38
-#define VARIO_SCREEN1_RIGHT_GAUGE_H   104
-
-#define VARIO_SCREEN1_CENTER_X         48
-#define VARIO_SCREEN1_CENTER_Y         10
-#define VARIO_SCREEN1_CENTER_W        144
-#define VARIO_SCREEN1_CENTER_H        108
-
-#define VARIO_SCREEN1_VARIO_RANGE_MPS  5.0f
-#define VARIO_SCREEN1_GS_MAX_KMH      80.0f
+/* -------------------------------------------------------------------------- */
+/*  Page 1 layout constants                                                    */
+/*                                                                            */
+/*  사용자가 요구한 핵심 레이아웃                                              */
+/*  - 좌측 14px flush bar   : GS bar                                           */
+/*  - 우측 14px flush bar   : VARIO bar                                        */
+/*  - 우측 상단             : ALT1/ALT2/ALT3/GS                                */
+/*  - 좌측 상단             : VARIO / MAX VARIO / FLIGHT TIME                  */
+/*  - 하단 중앙 16px 안팎   : compass tape box                                 */
+/*                                                                            */
+/*  이 숫자들을 조절하면 각 UI 블록의 위치/비율이 바뀐다.                       */
+/* -------------------------------------------------------------------------- */
+#define VARIO_SCREEN1_SIDE_BAR_W         14
+#define VARIO_SCREEN1_SIDE_BAR_INNER_W    8
+#define VARIO_SCREEN1_SIDE_BAR_FILL_OFF   3
+#define VARIO_SCREEN1_CONTENT_L_PAD       4
+#define VARIO_SCREEN1_CONTENT_R_PAD       4
+#define VARIO_SCREEN1_TOP_TIME_Y          7
+#define VARIO_SCREEN1_LEFT_BLOCK_X       18
+#define VARIO_SCREEN1_LEFT_BLOCK_Y       18
+#define VARIO_SCREEN1_RIGHT_BLOCK_W      92
+#define VARIO_SCREEN1_RIGHT_BLOCK_TOP_Y  18
+#define VARIO_SCREEN1_BIG_VARIO_Y        92
+#define VARIO_SCREEN1_HEADING_LINE_Y     96
+#define VARIO_SCREEN1_COMPASS_MARGIN_X   22
+#define VARIO_SCREEN1_COMPASS_BOTTOM_GAP  0
 
 static int32_t vario_screen1_round_tenths(float value)
 {
     return (int32_t)lroundf(value * 10.0f);
 }
 
-static void vario_screen1_format_signed_1dec(char *buf, size_t buf_len, float value)
+static void vario_screen1_format_clock(char *buf, size_t buf_len, const vario_runtime_t *rt)
 {
-    int32_t tenths;
-    int32_t abs_tenths;
-    char    sign;
-
-    tenths = vario_screen1_round_tenths(value);
-    sign = (tenths < 0) ? '-' : '+';
-
-    abs_tenths = tenths;
-    if (abs_tenths < 0)
+    if ((rt != NULL) && (rt->clock_valid != false))
     {
-        abs_tenths = -abs_tenths;
-    }
-
-    snprintf(buf,
-             buf_len,
-             "%c%ld.%1ld",
-             sign,
-             (long)(abs_tenths / 10),
-             (long)(abs_tenths % 10));
-}
-
-static void vario_screen1_format_unsigned_1dec(char *buf, size_t buf_len, float value)
-{
-    int32_t tenths;
-
-    if (value < 0.0f)
-    {
-        value = 0.0f;
-    }
-
-    tenths = vario_screen1_round_tenths(value);
-
-    snprintf(buf,
-             buf_len,
-             "%ld.%1ld",
-             (long)(tenths / 10),
-             (long)(tenths % 10));
-}
-
-static void vario_screen1_format_alt_from_m(char *buf, size_t buf_len, float altitude_m)
-{
-    int32_t value;
-
-    value = Vario_Settings_AltitudeMetersToDisplayRounded(altitude_m);
-    snprintf(buf, buf_len, "%ld", (long)value);
-}
-
-static void vario_screen1_format_alt_from_cm(char *buf, size_t buf_len, int32_t altitude_cm)
-{
-    float altitude_m;
-    int32_t value;
-
-    altitude_m = ((float)altitude_cm) * 0.01f;
-    value      = Vario_Settings_AltitudeMetersToDisplayRounded(altitude_m);
-
-    snprintf(buf, buf_len, "%ld", (long)value);
-}
-
-static void vario_screen1_format_qnh(char *buf, size_t buf_len)
-{
-    snprintf(buf,
-             buf_len,
-             "%ld.%ld",
-             (long)Vario_Settings_GetQnhDisplayWhole(),
-             (long)Vario_Settings_GetQnhDisplayFrac1());
-}
-
-static void vario_screen1_format_pressure(char *buf, size_t buf_len, int32_t pressure_hpa_x100)
-{
-    int32_t whole;
-    int32_t frac1;
-
-    whole = pressure_hpa_x100 / 100;
-    frac1 = pressure_hpa_x100 % 100;
-    if (frac1 < 0)
-    {
-        frac1 = -frac1;
-    }
-
-    snprintf(buf,
-             buf_len,
-             "%ld.%1ld",
-             (long)whole,
-             (long)(frac1 / 10));
-}
-
-static void vario_screen1_format_temp(char *buf, size_t buf_len, int32_t temp_c_x100)
-{
-    int32_t whole;
-    int32_t frac1;
-
-    whole = temp_c_x100 / 100;
-    frac1 = temp_c_x100 % 100;
-    if (frac1 < 0)
-    {
-        frac1 = -frac1;
-    }
-
-    snprintf(buf,
-             buf_len,
-             "%ld.%1ld",
-             (long)whole,
-             (long)(frac1 / 10));
-}
-
-static void vario_screen1_draw_vario_gauge(u8g2_t *u8g2,
-                                           int16_t x,
-                                           int16_t y,
-                                           int16_t w,
-                                           int16_t h,
-                                           float vario_mps,
-                                           const char *value_text,
-                                           const char *unit_text)
-{
-    int16_t inner_x;
-    int16_t inner_y;
-    int16_t inner_w;
-    int16_t inner_h;
-    int16_t track_x;
-    int16_t center_y;
-    int16_t pointer_y;
-    int16_t tick;
-    float   clamped;
-    float   ratio;
-
-    inner_x = (int16_t)(x + 2);
-    inner_y = (int16_t)(y + 10);
-    inner_w = (int16_t)(w - 4);
-    inner_h = (int16_t)(h - 20);
-    track_x = (int16_t)(x + (w / 2));
-    center_y = (int16_t)(inner_y + (inner_h / 2));
-
-    clamped = vario_mps;
-    if (clamped >  VARIO_SCREEN1_VARIO_RANGE_MPS) clamped =  VARIO_SCREEN1_VARIO_RANGE_MPS;
-    if (clamped < -VARIO_SCREEN1_VARIO_RANGE_MPS) clamped = -VARIO_SCREEN1_VARIO_RANGE_MPS;
-
-    ratio = clamped / VARIO_SCREEN1_VARIO_RANGE_MPS;
-    pointer_y = (int16_t)(center_y - (ratio * ((float)inner_h * 0.5f)));
-
-    /* ---------------------------------------------------------------------- */
-    /*  좌측 세로 게이지 외곽                                                   */
-    /*  - 화면 좌측 가장자리에 붙은 climb/sink 전용 바디                        */
-    /*  - 사용 영역: x=6~43, y=12~115                                           */
-    /* ---------------------------------------------------------------------- */
-    u8g2_DrawFrame(u8g2, (uint8_t)x, (uint8_t)y, (uint8_t)w, (uint8_t)h);
-
-    /* ---------------------------------------------------------------------- */
-    /*  게이지 제목                                                            */
-    /*  - 좌측 게이지 상단 1줄                                                  */
-    /*  - 어떤 축이 "상승/하강률" 인지 명확히 알려 준다.                        */
-    /* ---------------------------------------------------------------------- */
-    u8g2_SetFont(u8g2, u8g2_font_5x8_tr);
-    Vario_Display_DrawTextCentered(u8g2, (int16_t)(x + (w / 2)), (int16_t)(y + 8), "VARIO");
-
-    /* ---------------------------------------------------------------------- */
-    /*  게이지 중심선                                                          */
-    /*  - 0.0m/s 기준선                                                         */
-    /*  - 실제 variometer 바늘의 neutral line 역할                              */
-    /* ---------------------------------------------------------------------- */
-    u8g2_DrawHLine(u8g2, (uint8_t)inner_x, (uint8_t)center_y, (uint8_t)inner_w);
-
-    /* ---------------------------------------------------------------------- */
-    /*  세로 트랙                                                              */
-    /*  - pointer 가 위아래로 움직이는 기준 축                                 */
-    /* ---------------------------------------------------------------------- */
-    u8g2_DrawVLine(u8g2, (uint8_t)track_x, (uint8_t)inner_y, (uint8_t)inner_h);
-
-    /* ---------------------------------------------------------------------- */
-    /*  눈금                                                                    */
-    /*  - 실기기 느낌을 살리기 위해 5등분 보조 tick 을 배치                     */
-    /* ---------------------------------------------------------------------- */
-    for (tick = 0; tick <= 10; ++tick)
-    {
-        int16_t tick_y;
-        int16_t tick_len;
-
-        tick_y = (int16_t)(inner_y + ((inner_h * tick) / 10));
-        tick_len = ((tick == 5) || (tick == 0) || (tick == 10)) ? 10 : 6;
-
-        u8g2_DrawHLine(u8g2,
-                       (uint8_t)(track_x - (tick_len / 2)),
-                       (uint8_t)tick_y,
-                       (uint8_t)tick_len);
-    }
-
-    /* ---------------------------------------------------------------------- */
-    /*  vario fill bar                                                          */
-    /*  - 0 중심에서 현재 pointer 위치까지 박스로 채운다                        */
-    /*  - 상승 시 위쪽, 하강 시 아래쪽으로만 채워져서                           */
-    /*    실제 variometer needle band 느낌을 만든다.                            */
-    /* ---------------------------------------------------------------------- */
-    if (pointer_y < center_y)
-    {
-        u8g2_DrawBox(u8g2,
-                     (uint8_t)(track_x - 4),
-                     (uint8_t)pointer_y,
-                     8u,
-                     (uint8_t)(center_y - pointer_y));
+        snprintf(buf,
+                 buf_len,
+                 "%02u:%02u:%02u",
+                 (unsigned)rt->local_hour,
+                 (unsigned)rt->local_min,
+                 (unsigned)rt->local_sec);
     }
     else
     {
-        u8g2_DrawBox(u8g2,
-                     (uint8_t)(track_x - 4),
-                     (uint8_t)center_y,
-                     8u,
-                     (uint8_t)(pointer_y - center_y));
+        snprintf(buf, buf_len, "--:--:--");
     }
-
-    /* ---------------------------------------------------------------------- */
-    /*  숫자 값                                                                 */
-    /*  - 사용자가 요구한 "상하 게이지가 있는 곳에 바리오 값 표시" 구현부        */
-    /*  - 게이지 하단 안쪽에 크게 넣어 즉시 읽을 수 있게 한다.                 */
-    /* ---------------------------------------------------------------------- */
-    u8g2_SetDrawColor(u8g2, 1);
-    u8g2_SetFont(u8g2, u8g2_font_6x10_mf);
-    Vario_Display_DrawTextCentered(u8g2,
-                                   (int16_t)(x + (w / 2)),
-                                   (int16_t)(y + h - 8),
-                                   value_text);
-
-    /* ---------------------------------------------------------------------- */
-    /*  단위 문자열                                                             */
-    /*  - 숫자 바로 아래 작은 단위                                              */
-    /* ---------------------------------------------------------------------- */
-    u8g2_SetFont(u8g2, u8g2_font_4x6_tf);
-    Vario_Display_DrawTextCentered(u8g2,
-                                   (int16_t)(x + (w / 2)),
-                                   (int16_t)(y + h - 2),
-                                   unit_text);
 }
 
-static void vario_screen1_draw_gs_gauge(u8g2_t *u8g2,
-                                        int16_t x,
-                                        int16_t y,
-                                        int16_t w,
-                                        int16_t h,
-                                        float gs_kmh,
-                                        const char *value_text)
+static void vario_screen1_format_flight_time(char *buf, size_t buf_len, const vario_runtime_t *rt)
 {
-    int16_t inner_x;
-    int16_t inner_y;
-    int16_t inner_w;
-    int16_t inner_h;
-    int16_t track_x;
+    uint32_t t;
+    uint32_t hh;
+    uint32_t mm;
+    uint32_t ss;
+
+    if (rt == NULL)
+    {
+        snprintf(buf, buf_len, "00:00:00");
+        return;
+    }
+
+    t = rt->flight_time_s;
+    hh = t / 3600u;
+    mm = (t % 3600u) / 60u;
+    ss = t % 60u;
+
+    snprintf(buf, buf_len, "%02lu:%02lu:%02lu", (unsigned long)hh, (unsigned long)mm, (unsigned long)ss);
+}
+
+static void vario_screen1_format_altitude(char *buf, size_t buf_len, float altitude_m)
+{
+    snprintf(buf,
+             buf_len,
+             "%ld",
+             (long)Vario_Settings_AltitudeMetersToDisplayRounded(altitude_m));
+}
+
+static void vario_screen1_format_speed(char *buf, size_t buf_len, float speed_kmh)
+{
+    snprintf(buf,
+             buf_len,
+             "%ld",
+             (long)Vario_Settings_SpeedToDisplayRounded(speed_kmh));
+}
+
+static void vario_screen1_format_signed_vspeed(char *buf, size_t buf_len, float vspd_mps)
+{
+    float disp;
+
+    disp = Vario_Settings_VSpeedMpsToDisplayFloat(vspd_mps);
+
+    if (Vario_Settings_Get()->vspeed_unit == VARIO_VSPEED_UNIT_FPM)
+    {
+        snprintf(buf, buf_len, "%+ld", (long)lroundf(disp));
+    }
+    else
+    {
+        snprintf(buf, buf_len, "%+.1f", (double)disp);
+    }
+}
+
+static void vario_screen1_format_heading(char *buf, size_t buf_len, const vario_runtime_t *rt)
+{
+    if ((rt != NULL) && (rt->heading_valid != false))
+    {
+        snprintf(buf, buf_len, "%03ld", (long)lroundf(rt->heading_deg));
+    }
+    else
+    {
+        snprintf(buf, buf_len, "---");
+    }
+}
+
+static void vario_screen1_draw_gs_bar(u8g2_t *u8g2,
+                                      const vario_viewport_t *v,
+                                      const vario_settings_t *settings,
+                                      float gs_kmh)
+{
+    int16_t x;
+    int16_t y;
+    int16_t h;
+    int16_t center_x;
     int16_t fill_top_y;
-    int16_t tick;
-    float   clamped;
+    float   clamped_gs;
     float   ratio;
+    uint8_t tick;
 
-    inner_x = (int16_t)(x + 2);
-    inner_y = (int16_t)(y + 10);
-    inner_w = (int16_t)(w - 4);
-    inner_h = (int16_t)(h - 20);
-    track_x = (int16_t)(x + (w / 2));
+    if ((u8g2 == NULL) || (v == NULL) || (settings == NULL) || (settings->show_gs_bar == 0u))
+    {
+        return;
+    }
 
-    clamped = gs_kmh;
-    if (clamped < 0.0f) clamped = 0.0f;
-    if (clamped > VARIO_SCREEN1_GS_MAX_KMH) clamped = VARIO_SCREEN1_GS_MAX_KMH;
+    x = v->x;
+    y = v->y;
+    h = v->h;
+    center_x = (int16_t)(x + (VARIO_SCREEN1_SIDE_BAR_W / 2));
 
-    ratio = clamped / VARIO_SCREEN1_GS_MAX_KMH;
-    fill_top_y = (int16_t)(inner_y + inner_h - (ratio * inner_h));
+    clamped_gs = gs_kmh;
+    if (clamped_gs < 0.0f)
+    {
+        clamped_gs = 0.0f;
+    }
+    if (clamped_gs > (float)settings->gs_range_kmh)
+    {
+        clamped_gs = (float)settings->gs_range_kmh;
+    }
 
-    /* ---------------------------------------------------------------------- */
-    /*  우측 GS 세로 게이지 외곽                                                */
-    /*  - 화면 우측 가장자리 x=196~233                                          */
-    /*  - GS(ground speed) 전용 세로 축                                        */
-    /* ---------------------------------------------------------------------- */
-    u8g2_DrawFrame(u8g2, (uint8_t)x, (uint8_t)y, (uint8_t)w, (uint8_t)h);
-
-    /* ---------------------------------------------------------------------- */
-    /*  우측 게이지 제목                                                        */
-    /* ---------------------------------------------------------------------- */
-    u8g2_SetFont(u8g2, u8g2_font_5x8_tr);
-    Vario_Display_DrawTextCentered(u8g2, (int16_t)(x + (w / 2)), (int16_t)(y + 8), "GS");
+    ratio = clamped_gs / (float)settings->gs_range_kmh;
+    fill_top_y = (int16_t)(y + h - (ratio * (float)h));
 
     /* ---------------------------------------------------------------------- */
-    /*  세로 기준 트랙                                                          */
+    /*  GS bar scale                                                           */
+    /*  - 바깥 frame 없이, 좌측 벽에 붙은 14px 폭 scale                         */
+    /*  - 가로 눈금을 위에서 아래까지 채운다.                                   */
     /* ---------------------------------------------------------------------- */
-    u8g2_DrawVLine(u8g2, (uint8_t)track_x, (uint8_t)inner_y, (uint8_t)inner_h);
-
-    /* ---------------------------------------------------------------------- */
-    /*  GS scale tick                                                          */
-    /*  - 0~80km/h 를 10등분한 보조 눈금                                       */
-    /* ---------------------------------------------------------------------- */
-    for (tick = 0; tick <= 10; ++tick)
+    for (tick = 0u; tick <= 10u; ++tick)
     {
         int16_t tick_y;
-        int16_t tick_len;
+        uint8_t tick_len;
 
-        tick_y = (int16_t)(inner_y + ((inner_h * tick) / 10));
-        tick_len = ((tick == 0) || (tick == 10)) ? 10 : 6;
-
+        tick_y = (int16_t)(y + ((h * (int16_t)tick) / 10));
+        tick_len = ((tick % 2u) == 0u) ? (uint8_t)(VARIO_SCREEN1_SIDE_BAR_W - 2) : 8u;
         u8g2_DrawHLine(u8g2,
-                       (uint8_t)(track_x - (tick_len / 2)),
+                       (uint8_t)x,
                        (uint8_t)tick_y,
-                       (uint8_t)tick_len);
+                       tick_len);
     }
 
     /* ---------------------------------------------------------------------- */
     /*  GS fill column                                                         */
-    /*  - 하단에서 위로 차오르는 막대형 표시                                    */
-    /*  - 실제 ground speed 크기를 한눈에 읽기 쉽게 한다.                      */
+    /*  - 하단에서 위로 차오르는 막대                                           */
     /* ---------------------------------------------------------------------- */
     u8g2_DrawBox(u8g2,
-                 (uint8_t)(track_x - 4),
+                 (uint8_t)(x + VARIO_SCREEN1_SIDE_BAR_FILL_OFF),
                  (uint8_t)fill_top_y,
-                 8u,
-                 (uint8_t)((inner_y + inner_h) - fill_top_y));
+                 VARIO_SCREEN1_SIDE_BAR_INNER_W,
+                 (uint8_t)((y + h) - fill_top_y));
 
-    /* ---------------------------------------------------------------------- */
-    /*  GS 숫자 값                                                              */
-    /*  - 우측 게이지 하단 안쪽                                                 */
-    /* ---------------------------------------------------------------------- */
-    u8g2_SetDrawColor(u8g2, 1);
-    u8g2_SetFont(u8g2, u8g2_font_6x10_mf);
-    Vario_Display_DrawTextCentered(u8g2,
-                                   (int16_t)(x + (w / 2)),
-                                   (int16_t)(y + h - 8),
-                                   value_text);
-
-    /* ---------------------------------------------------------------------- */
-    /*  GS 단위                                                                 */
-    /* ---------------------------------------------------------------------- */
+    /* 작은 GS 라벨 */
     u8g2_SetFont(u8g2, u8g2_font_4x6_tf);
     Vario_Display_DrawTextCentered(u8g2,
-                                   (int16_t)(x + (w / 2)),
+                                   center_x,
                                    (int16_t)(y + h - 2),
-                                   "km/h");
+                                   "GS");
+}
+
+static void vario_screen1_draw_vario_bar(u8g2_t *u8g2,
+                                         const vario_viewport_t *v,
+                                         const vario_settings_t *settings,
+                                         float vario_mps)
+{
+    int16_t x;
+    int16_t y;
+    int16_t h;
+    int16_t center_y;
+    int16_t bar_top_y;
+    int16_t bar_bottom_y;
+    float   range_mps;
+    float   clamped_vario;
+    float   ratio;
+    int32_t tick_mps_x10;
+
+    if ((u8g2 == NULL) || (v == NULL) || (settings == NULL))
+    {
+        return;
+    }
+
+    x = (int16_t)(v->x + v->w - VARIO_SCREEN1_SIDE_BAR_W);
+    y = v->y;
+    h = v->h;
+    center_y = (int16_t)(y + (h / 2));
+    range_mps = ((float)settings->vario_range_mps_x10) * 0.1f;
+
+    clamped_vario = vario_mps;
+    if (clamped_vario > range_mps)
+    {
+        clamped_vario = range_mps;
+    }
+    if (clamped_vario < -range_mps)
+    {
+        clamped_vario = -range_mps;
+    }
+
+    ratio = clamped_vario / range_mps;
+    if (ratio >= 0.0f)
+    {
+        bar_top_y = (int16_t)(center_y - (ratio * ((float)h * 0.5f)));
+        bar_bottom_y = center_y;
+    }
+    else
+    {
+        bar_top_y = center_y;
+        bar_bottom_y = (int16_t)(center_y - (ratio * ((float)h * 0.5f)));
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /*  VARIO bar scale                                                        */
+    /*  - 우측 벽에 딱 붙는 14px bar                                            */
+    /*  - frame 없이 full-height tick 만 그림                                  */
+    /*  - 0m/s 는 중앙, +는 위, -는 아래                                        */
+    /* ---------------------------------------------------------------------- */
+    for (tick_mps_x10 = -(int32_t)settings->vario_range_mps_x10;
+         tick_mps_x10 <= (int32_t)settings->vario_range_mps_x10;
+         tick_mps_x10 += 5)
+    {
+        int16_t tick_y;
+        uint8_t tick_len;
+        float   tick_ratio;
+
+        tick_ratio = ((float)tick_mps_x10) / ((float)settings->vario_range_mps_x10);
+        tick_y = (int16_t)(center_y - (tick_ratio * ((float)h * 0.5f)));
+        tick_len = ((tick_mps_x10 % 10) == 0) ? (uint8_t)(VARIO_SCREEN1_SIDE_BAR_W - 1) : 7u;
+
+        u8g2_DrawHLine(u8g2,
+                       (uint8_t)x,
+                       (uint8_t)tick_y,
+                       tick_len);
+    }
+
+    if (bar_bottom_y < bar_top_y)
+    {
+        int16_t tmp;
+        tmp = bar_top_y;
+        bar_top_y = bar_bottom_y;
+        bar_bottom_y = tmp;
+    }
+
+    u8g2_DrawBox(u8g2,
+                 (uint8_t)(x + VARIO_SCREEN1_SIDE_BAR_FILL_OFF),
+                 (uint8_t)bar_top_y,
+                 VARIO_SCREEN1_SIDE_BAR_INNER_W,
+                 (uint8_t)(bar_bottom_y - bar_top_y));
+
+    u8g2_SetFont(u8g2, u8g2_font_4x6_tf);
+    Vario_Display_DrawTextCentered(u8g2,
+                                   (int16_t)(x + (VARIO_SCREEN1_SIDE_BAR_W / 2)),
+                                   (int16_t)(y + 6),
+                                   "V");
+}
+
+static void vario_screen1_compass_label_for_heading(int16_t heading_deg, char *buf, size_t buf_len)
+{
+    int16_t norm;
+
+    norm = (int16_t)heading_deg;
+    while (norm < 0)
+    {
+        norm += 360;
+    }
+    while (norm >= 360)
+    {
+        norm -= 360;
+    }
+
+    if (norm == 0)
+    {
+        snprintf(buf, buf_len, "N");
+    }
+    else if (norm == 90)
+    {
+        snprintf(buf, buf_len, "E");
+    }
+    else if (norm == 180)
+    {
+        snprintf(buf, buf_len, "S");
+    }
+    else if (norm == 270)
+    {
+        snprintf(buf, buf_len, "W");
+    }
+    else
+    {
+        snprintf(buf, buf_len, "%d", norm);
+    }
+}
+
+static void vario_screen1_draw_compass_tape(u8g2_t *u8g2,
+                                            const vario_viewport_t *v,
+                                            const vario_settings_t *settings,
+                                            const vario_runtime_t *rt)
+{
+    int16_t box_h;
+    int16_t x;
+    int16_t y;
+    int16_t w;
+    int16_t center_x;
+    int16_t center_heading;
+    int16_t span_deg;
+    int16_t deg;
+    char    label[8];
+
+    if ((u8g2 == NULL) || (v == NULL) || (settings == NULL) || (rt == NULL))
+    {
+        return;
+    }
+
+    box_h = (int16_t)settings->compass_box_height_px;
+    if (box_h < 14)
+    {
+        box_h = 14;
+    }
+    if (box_h > 22)
+    {
+        box_h = 22;
+    }
+
+    x = (int16_t)(v->x + VARIO_SCREEN1_COMPASS_MARGIN_X + VARIO_SCREEN1_SIDE_BAR_W);
+    w = (int16_t)(v->w - (2 * VARIO_SCREEN1_COMPASS_MARGIN_X) - (2 * VARIO_SCREEN1_SIDE_BAR_W));
+    y = (int16_t)(v->y + v->h - box_h - VARIO_SCREEN1_COMPASS_BOTTOM_GAP);
+    center_x = (int16_t)(x + (w / 2));
+    center_heading = (rt->heading_valid != false) ? (int16_t)lroundf(rt->heading_deg) : 0;
+    span_deg = (int16_t)settings->compass_span_deg;
+
+    /* ---------------------------------------------------------------------- */
+    /*  하단 compass tape box                                                  */
+    /*  - 사용자가 요구한 "툭 튀어나온" 하단 방위 그래픽 본체                  */
+    /*  - box 높이/폭은 settings 와 매크로로 조절 가능                         */
+    /* ---------------------------------------------------------------------- */
+    u8g2_DrawFrame(u8g2, (uint8_t)x, (uint8_t)y, (uint8_t)w, (uint8_t)box_h);
+
+    for (deg = center_heading - (span_deg / 2);
+         deg <= center_heading + (span_deg / 2);
+         deg += 5)
+    {
+        int16_t diff_deg;
+        int16_t tick_x;
+        uint8_t tick_h;
+
+        diff_deg = (int16_t)(deg - center_heading);
+        tick_x = (int16_t)(center_x + (((float)diff_deg / (float)span_deg) * (float)w));
+
+        if ((tick_x <= x) || (tick_x >= (x + w - 1)))
+        {
+            continue;
+        }
+
+        tick_h = ((deg % 30) == 0) ? (uint8_t)(box_h - 5) : (((deg % 15) == 0) ? (uint8_t)(box_h - 8) : 4u);
+        u8g2_DrawVLine(u8g2,
+                       (uint8_t)tick_x,
+                       (uint8_t)(y + box_h - tick_h - 1),
+                       tick_h);
+
+        if ((deg % 30) == 0)
+        {
+            vario_screen1_compass_label_for_heading(deg, label, sizeof(label));
+            u8g2_SetFont(u8g2, u8g2_font_4x6_tf);
+            Vario_Display_DrawTextCentered(u8g2,
+                                           tick_x,
+                                           (int16_t)(y + 6),
+                                           label);
+        }
+    }
+
+    /* center marker */
+    u8g2_DrawVLine(u8g2, (uint8_t)center_x, (uint8_t)(y + 1), (uint8_t)(box_h - 2));
+    u8g2_DrawLine(u8g2, (uint8_t)(center_x - 3), (uint8_t)(y + 3), (uint8_t)center_x, (uint8_t)(y + 1));
+    u8g2_DrawLine(u8g2, (uint8_t)(center_x + 3), (uint8_t)(y + 3), (uint8_t)center_x, (uint8_t)(y + 1));
 }
 
 void Vario_Screen1_Render(u8g2_t *u8g2, const vario_buttonbar_t *buttonbar)
@@ -368,17 +414,18 @@ void Vario_Screen1_Render(u8g2_t *u8g2, const vario_buttonbar_t *buttonbar)
     const vario_viewport_t *v;
     const vario_runtime_t  *rt;
     const vario_settings_t *settings;
-    char                    qnh_text[20];
-    char                    pressure_text[20];
-    char                    temp_text[20];
-    char                    now_alt_text[20];
+    int16_t                 content_right_x;
+    int16_t                 right_block_x;
+    char                    clock_text[20];
+    char                    flight_text[24];
     char                    alt1_text[20];
     char                    alt2_text[20];
     char                    alt3_text[20];
-    char                    vario_text[20];
     char                    gs_text[20];
-    char                    unit_text[8];
-    char                    vs_unit_text[8];
+    char                    vario_big_text[24];
+    char                    vario_small_text[24];
+    char                    max_vario_text[24];
+    char                    heading_text[12];
 
     (void)buttonbar;
 
@@ -386,150 +433,148 @@ void Vario_Screen1_Render(u8g2_t *u8g2, const vario_buttonbar_t *buttonbar)
     rt       = Vario_State_GetRuntime();
     settings = Vario_Settings_Get();
 
-    vario_screen1_format_qnh(qnh_text, sizeof(qnh_text));
-    vario_screen1_format_pressure(pressure_text, sizeof(pressure_text), rt->pressure_hpa_x100);
-    vario_screen1_format_temp(temp_text, sizeof(temp_text), rt->temperature_c_x100);
-    vario_screen1_format_alt_from_m(now_alt_text, sizeof(now_alt_text), rt->baro_altitude_m);
-    vario_screen1_format_alt_from_cm(alt1_text, sizeof(alt1_text), settings->alt1_cm);
-    vario_screen1_format_alt_from_cm(alt2_text, sizeof(alt2_text), settings->alt2_cm);
-    vario_screen1_format_alt_from_cm(alt3_text, sizeof(alt3_text), settings->alt3_cm);
-    vario_screen1_format_signed_1dec(vario_text, sizeof(vario_text), rt->baro_vario_mps);
-    vario_screen1_format_unsigned_1dec(gs_text, sizeof(gs_text), rt->ground_speed_kmh);
-    snprintf(unit_text, sizeof(unit_text), "%s", Vario_Settings_GetAltitudeUnitText());
-    snprintf(vs_unit_text, sizeof(vs_unit_text), "%s", Vario_Settings_GetVSpeedUnitText());
+    content_right_x = (int16_t)(v->x + v->w - VARIO_SCREEN1_SIDE_BAR_W - VARIO_SCREEN1_CONTENT_R_PAD);
+    right_block_x   = (int16_t)(content_right_x - VARIO_SCREEN1_RIGHT_BLOCK_W);
+
+    vario_screen1_format_clock(clock_text, sizeof(clock_text), rt);
+    vario_screen1_format_flight_time(flight_text, sizeof(flight_text), rt);
+    vario_screen1_format_altitude(alt1_text, sizeof(alt1_text), rt->alt1_absolute_m);
+    vario_screen1_format_altitude(alt2_text, sizeof(alt2_text), rt->alt2_relative_m);
+    vario_screen1_format_altitude(alt3_text, sizeof(alt3_text), rt->alt3_accum_gain_m);
+    vario_screen1_format_speed(gs_text, sizeof(gs_text), rt->ground_speed_kmh);
+    vario_screen1_format_signed_vspeed(vario_big_text, sizeof(vario_big_text), rt->baro_vario_mps);
+    vario_screen1_format_signed_vspeed(vario_small_text, sizeof(vario_small_text), rt->baro_vario_mps);
+    vario_screen1_format_signed_vspeed(max_vario_text, sizeof(max_vario_text), rt->max_top_vario_mps);
+    vario_screen1_format_heading(heading_text, sizeof(heading_text), rt);
+
+    /* side bars */
+    vario_screen1_draw_gs_bar(u8g2, v, settings, rt->ground_speed_kmh);
+    vario_screen1_draw_vario_bar(u8g2, v, settings, rt->baro_vario_mps);
 
     /* ---------------------------------------------------------------------- */
-    /*  Screen1 은 사용자가 요구한 대로 240x128 전체를 그대로 쓰는 full-screen */
-    /*  레이아웃이다.                                                          */
+    /*  상단 중앙 현재 시각                                                     */
+    /*  - settings.show_current_time 으로 on/off 가능                           */
     /* ---------------------------------------------------------------------- */
-    (void)v;
+    if (settings->show_current_time != 0u)
+    {
+        u8g2_SetFont(u8g2, u8g2_font_5x8_tr);
+        Vario_Display_DrawTextCentered(u8g2,
+                                       (int16_t)(v->x + (v->w / 2)),
+                                       (int16_t)(v->y + VARIO_SCREEN1_TOP_TIME_Y),
+                                       clock_text);
+    }
 
     /* ---------------------------------------------------------------------- */
-    /*  상단 실시간 상태 줄                                                     */
-    /*  - 좌측: 현재 baro altitude (실시간)                                     */
-    /*  - 중앙: 현재 QNH                                                        */
-    /*  - 우측: 현재 pressure / temperature                                     */
-    /*                                                                        */
-    /*  이 줄은 "실시간 센서 상태" 를 보여 주고,                                */
-    /*  아래 큰 ALT1/ALT2/ALT3 블록은 사용자가 저장한 reference 값을 보여 준다. */
+    /*  좌상단 VARIO information block                                         */
     /* ---------------------------------------------------------------------- */
     u8g2_SetFont(u8g2, u8g2_font_5x8_tr);
+    u8g2_DrawStr(u8g2,
+                 (uint8_t)VARIO_SCREEN1_LEFT_BLOCK_X,
+                 (uint8_t)VARIO_SCREEN1_LEFT_BLOCK_Y,
+                 "VARIO");
 
-    /* 현재 실시간 고도 라벨과 값: 화면 상단 중앙 좌측 */
-    u8g2_DrawStr(u8g2, 52u, 8u, "BARO");
-    u8g2_SetFont(u8g2, u8g2_font_6x10_mf);
-    u8g2_DrawStr(u8g2, 82u, 9u, now_alt_text);
-    u8g2_SetFont(u8g2, u8g2_font_4x6_tf);
-    u8g2_DrawStr(u8g2, 112u, 9u, unit_text);
+    u8g2_SetFont(u8g2, u8g2_font_10x20_mf);
+    u8g2_DrawStr(u8g2,
+                 (uint8_t)VARIO_SCREEN1_LEFT_BLOCK_X,
+                 (uint8_t)(VARIO_SCREEN1_LEFT_BLOCK_Y + 18),
+                 vario_small_text);
 
-    /* 현재 QNH: 상단 중앙 */
+    if (settings->show_max_vario != 0u)
+    {
+        char max_line[30];
+        snprintf(max_line, sizeof(max_line), "MAX %s", max_vario_text);
+        u8g2_SetFont(u8g2, u8g2_font_5x8_tr);
+        u8g2_DrawStr(u8g2,
+                     (uint8_t)VARIO_SCREEN1_LEFT_BLOCK_X,
+                     (uint8_t)(VARIO_SCREEN1_LEFT_BLOCK_Y + 31),
+                     max_line);
+    }
+
+    if (settings->show_flight_time != 0u)
+    {
+        char flt_line[32];
+        snprintf(flt_line, sizeof(flt_line), "FLT %s", flight_text);
+        u8g2_SetFont(u8g2, u8g2_font_5x8_tr);
+        u8g2_DrawStr(u8g2,
+                     (uint8_t)VARIO_SCREEN1_LEFT_BLOCK_X,
+                     (uint8_t)(VARIO_SCREEN1_LEFT_BLOCK_Y + 41),
+                     flt_line);
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /*  우상단 ALT1 / ALT2 / ALT3 / GS block                                   */
+    /*                                                                            */
+    /*  ALT1 은 가장 크게, ALT2/ALT3 은 소형 reference/gain 정보로 아래에 둔다. */
+    /* ---------------------------------------------------------------------- */
     u8g2_SetFont(u8g2, u8g2_font_5x8_tr);
-    u8g2_DrawStr(u8g2, 118u, 8u, "QNH");
-    u8g2_SetFont(u8g2, u8g2_font_6x10_mf);
-    u8g2_DrawStr(u8g2, 142u, 9u, qnh_text);
+    u8g2_DrawStr(u8g2,
+                 (uint8_t)right_block_x,
+                 (uint8_t)VARIO_SCREEN1_RIGHT_BLOCK_TOP_Y,
+                 "ALT1");
 
-    /* 현재 pressure: 상단 우측 첫 번째 상태 */
-    u8g2_SetFont(u8g2, u8g2_font_4x6_tf);
-    u8g2_DrawStr(u8g2, 172u, 6u, pressure_text);
-    u8g2_DrawStr(u8g2, 208u, 6u, "hPa");
-
-    /* 현재 temperature: 상단 우측 두 번째 상태 */
-    u8g2_DrawStr(u8g2, 172u, 11u, temp_text);
-    u8g2_DrawStr(u8g2, 208u, 11u, "C");
-
-    /* ---------------------------------------------------------------------- */
-    /*  좌측 vario 세로 게이지                                                  */
-    /*  - 사용자가 요구한 "좌측에 상하 속도 계기판"                            */
-    /*  - 숫자 vario 값도 같은 기둥 안에 함께 표시                              */
-    /* ---------------------------------------------------------------------- */
-    vario_screen1_draw_vario_gauge(u8g2,
-                                   VARIO_SCREEN1_LEFT_GAUGE_X,
-                                   VARIO_SCREEN1_LEFT_GAUGE_Y,
-                                   VARIO_SCREEN1_LEFT_GAUGE_W,
-                                   VARIO_SCREEN1_LEFT_GAUGE_H,
-                                   rt->baro_vario_mps,
-                                   vario_text,
-                                   vs_unit_text);
-
-    /* ---------------------------------------------------------------------- */
-    /*  우측 GS 세로 게이지                                                     */
-    /*  - 사용자가 요구한 "우측에 GS 계기판"                                  */
-    /*  - 0~80km/h 범위를 세로 막대로 보여 준다.                               */
-    /* ---------------------------------------------------------------------- */
-    vario_screen1_draw_gs_gauge(u8g2,
-                                VARIO_SCREEN1_RIGHT_GAUGE_X,
-                                VARIO_SCREEN1_RIGHT_GAUGE_Y,
-                                VARIO_SCREEN1_RIGHT_GAUGE_W,
-                                VARIO_SCREEN1_RIGHT_GAUGE_H,
-                                rt->ground_speed_kmh,
-                                gs_text);
-
-    /* ---------------------------------------------------------------------- */
-    /*  중앙 ALT1 카드 상단 라벨                                                */
-    /*  - 중앙 대형 숫자 블록이 ALT1 임을 명확히 표시                           */
-    /*  - 위치: 중앙 영역 상단 x=102 기준                                       */
-    /* ---------------------------------------------------------------------- */
-    u8g2_SetFont(u8g2, u8g2_font_6x12_mf);
-    Vario_Display_DrawTextCentered(u8g2, 120, 24, "ALT1");
-
-    /* ---------------------------------------------------------------------- */
-    /*  중앙 ALT1 대형 값                                                       */
-    /*  - 사용자가 요구한 "ALT1 크게" 구현부                                   */
-    /*  - 위치: 화면 중앙 x=120, baseline y=58                                  */
-    /*  - 실제 값은 Vario settings 의 ALT1 reference 값                         */
-    /* ---------------------------------------------------------------------- */
     u8g2_SetFont(u8g2, u8g2_font_logisoso20_tf);
-    Vario_Display_DrawTextCentered(u8g2, 120, 58, alt1_text);
+    u8g2_DrawStr(u8g2,
+                 (uint8_t)right_block_x,
+                 (uint8_t)(VARIO_SCREEN1_RIGHT_BLOCK_TOP_Y + 22),
+                 alt1_text);
 
-    /* ALT1 단위: 대형 숫자 우측 하단 */
-    u8g2_SetFont(u8g2, u8g2_font_6x10_mf);
-    u8g2_DrawStr(u8g2, 162u, 58u, unit_text);
+    u8g2_SetFont(u8g2, u8g2_font_4x6_tf);
+    u8g2_DrawStr(u8g2,
+                 (uint8_t)(right_block_x + 54),
+                 (uint8_t)(VARIO_SCREEN1_RIGHT_BLOCK_TOP_Y + 22),
+                 Vario_Settings_GetAltitudeUnitText());
 
-    /* ---------------------------------------------------------------------- */
-    /*  중앙 하단 ALT2 라벨과 값                                                */
-    /*  - 사용자가 요구한 "ALT2 ALT3 를 ALT1 밑에 중간 크기로 표시"           */
-    /*  - 좌측 절반 카드                                                        */
-    /* ---------------------------------------------------------------------- */
-    u8g2_SetFont(u8g2, u8g2_font_6x10_mf);
-    u8g2_DrawStr(u8g2, 62u, 78u, "ALT2");
-    u8g2_SetFont(u8g2, u8g2_font_9x15_mf);
-    u8g2_DrawStr(u8g2, 56u, 98u, alt2_text);
     u8g2_SetFont(u8g2, u8g2_font_5x8_tr);
-    u8g2_DrawStr(u8g2, 106u, 98u, unit_text);
-
-    /* ---------------------------------------------------------------------- */
-    /*  중앙 하단 ALT3 라벨과 값                                                */
-    /*  - ALT2 카드 오른쪽 절반                                                 */
-    /* ---------------------------------------------------------------------- */
-    u8g2_SetFont(u8g2, u8g2_font_6x10_mf);
-    u8g2_DrawStr(u8g2, 142u, 78u, "ALT3");
-    u8g2_SetFont(u8g2, u8g2_font_9x15_mf);
-    u8g2_DrawStr(u8g2, 136u, 98u, alt3_text);
-    u8g2_SetFont(u8g2, u8g2_font_5x8_tr);
-    u8g2_DrawStr(u8g2, 186u, 98u, unit_text);
-
-    /* ---------------------------------------------------------------------- */
-    /*  ALT2 / ALT3 구획선                                                     */
-    /*  - 중앙 하단 두 개의 중형 필드를 카드처럼 분리                            */
-    /* ---------------------------------------------------------------------- */
-    u8g2_DrawFrame(u8g2, 52u, 66u, 136u, 40u);
-    u8g2_DrawVLine(u8g2, 120u, 66u, 40u);
-
-    /* ---------------------------------------------------------------------- */
-    /*  raw overlay                                                            */
-    /*  - 개발 모드에서만 화면 맨 아래 작은 글씨로 pressure/temperature 출력     */
-    /* ---------------------------------------------------------------------- */
-    if (settings->audio_enabled != 0u)
     {
-        u8g2_SetFont(u8g2, u8g2_font_4x6_tf);
-        u8g2_DrawStr(u8g2, 96u, 126u, "AUD ON");
-    }
-    else
-    {
-        u8g2_SetFont(u8g2, u8g2_font_4x6_tf);
-        u8g2_DrawStr(u8g2, 96u, 126u, "AUD OFF");
+        char line[28];
+
+        snprintf(line, sizeof(line), "ALT2 %s", alt2_text);
+        u8g2_DrawStr(u8g2,
+                     (uint8_t)right_block_x,
+                     (uint8_t)(VARIO_SCREEN1_RIGHT_BLOCK_TOP_Y + 31),
+                     line);
+
+        snprintf(line, sizeof(line), "ALT3 %s", alt3_text);
+        u8g2_DrawStr(u8g2,
+                     (uint8_t)right_block_x,
+                     (uint8_t)(VARIO_SCREEN1_RIGHT_BLOCK_TOP_Y + 40),
+                     line);
+
+        snprintf(line, sizeof(line), "GS   %s %s", gs_text, Vario_Settings_GetSpeedUnitText());
+        u8g2_DrawStr(u8g2,
+                     (uint8_t)right_block_x,
+                     (uint8_t)(VARIO_SCREEN1_RIGHT_BLOCK_TOP_Y + 49),
+                     line);
     }
 
-    /* 개발용 raw overlay: full-screen 하단 좌측 */
+    /* ---------------------------------------------------------------------- */
+    /*  우측 중앙 큰 vario 값                                                   */
+    /*  - 사용자가 요구한 "우측 bar 옆, 세로 중앙에 조금 크게" 구현부          */
+    /* ---------------------------------------------------------------------- */
+    u8g2_SetFont(u8g2, u8g2_font_10x20_mf);
+    Vario_Display_DrawTextRight(u8g2,
+                                (int16_t)(v->x + v->w - VARIO_SCREEN1_SIDE_BAR_W - 8),
+                                (int16_t)VARIO_SCREEN1_BIG_VARIO_Y,
+                                vario_big_text);
+
+    u8g2_SetFont(u8g2, u8g2_font_4x6_tf);
+    Vario_Display_DrawTextRight(u8g2,
+                                (int16_t)(v->x + v->w - VARIO_SCREEN1_SIDE_BAR_W - 8),
+                                (int16_t)(VARIO_SCREEN1_BIG_VARIO_Y + 7),
+                                Vario_Settings_GetVSpeedUnitText());
+
+    /* heading numeric just above compass */
+    {
+        char hdg_line[20];
+        snprintf(hdg_line, sizeof(hdg_line), "HDG %s", heading_text);
+        u8g2_SetFont(u8g2, u8g2_font_5x8_tr);
+        Vario_Display_DrawTextCentered(u8g2,
+                                       (int16_t)(v->x + (v->w / 2)),
+                                       VARIO_SCREEN1_HEADING_LINE_Y,
+                                       hdg_line);
+    }
+
+    vario_screen1_draw_compass_tape(u8g2, v, settings, rt);
+
     Vario_Display_DrawRawOverlay(u8g2, Vario_Display_GetFullViewport());
 }

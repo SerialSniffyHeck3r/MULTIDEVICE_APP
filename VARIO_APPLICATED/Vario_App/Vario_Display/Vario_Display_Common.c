@@ -4,6 +4,7 @@
 #include "Vario_State.h"
 
 #include <stdio.h>
+#include <stddef.h>
 
 /* -------------------------------------------------------------------------- */
 /* 기본 viewport 규격                                                          */

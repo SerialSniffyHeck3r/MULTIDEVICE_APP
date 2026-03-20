@@ -33,42 +33,51 @@ void Vario_Setting_Render(u8g2_t *u8g2, const vario_buttonbar_t *buttonbar)
              (dev->raw_overlay_enabled != 0u) ? "RAW ON" : "RAW OFF");
 
     /* ---------------------------------------------------------------------- */
-    /*  이 화면은 status bar + bottom bar 를 실제로 사용하는                    */
-    /*  content viewport 계열 화면이다.                                        */
+    /*  Root menu                                                              */
+    /*                                                                            */
+    /*  상태머신 mode 는 그대로 두고,                                           */
+    /*  사용자가 요구한 의미에 맞게 item label 만 새로 정리했다.                */
     /* ---------------------------------------------------------------------- */
-    Vario_Display_DrawPageTitle(u8g2, v, "VARIO SETTINGS", "MENU ROOT");
+    Vario_Display_DrawPageTitle(u8g2, v, "VARIO SETTINGS", "ROOT");
 
-    /* QuickSet 진입 행 */
     Vario_Display_DrawMenuRow(u8g2,
                               v,
                               (int16_t)(v->y + 24),
                               (Vario_State_GetSettingsCursor() == VARIO_SETTING_MENU_QUICKSET),
-                              "QuickSet",
+                              "Flight/Audio",
                               "open");
 
-    /* ValueSetting 진입 행 */
     Vario_Display_DrawMenuRow(u8g2,
                               v,
                               (int16_t)(v->y + 38),
                               (Vario_State_GetSettingsCursor() == VARIO_SETTING_MENU_VALUESETTING),
-                              "ValueSet",
+                              "Graphics",
                               "open");
 
-    /* Audio 토글/상태 행 */
     Vario_Display_DrawMenuRow(u8g2,
                               v,
                               (int16_t)(v->y + 52),
                               (Vario_State_GetSettingsCursor() == VARIO_SETTING_MENU_AUDIO),
-                              "Audio",
+                              "Audio Quick",
                               audio_text);
 
-    /* Debug overlay 토글 행 */
     Vario_Display_DrawMenuRow(u8g2,
                               v,
                               (int16_t)(v->y + 66),
                               (Vario_State_GetSettingsCursor() == VARIO_SETTING_MENU_DEBUG),
                               "Debug",
                               debug_text);
+
+    /* ---------------------------------------------------------------------- */
+    /*  하단 설명                                                              */
+    /*  - 기존 버튼 구조를 그대로 유지하므로,                                   */
+    /*    이 화면은 "어느 세부 페이지로 들어갈지" 를 선택하는 허브 역할이다.    */
+    /* ---------------------------------------------------------------------- */
+    u8g2_SetFont(u8g2, u8g2_font_4x6_tf);
+    u8g2_DrawStr(u8g2,
+                 (uint8_t)(v->x + 4),
+                 (uint8_t)(v->y + v->h - 10),
+                 "Flight=QNH/unit/source/audio  Graphics=layout/range/trail");
 
     Vario_Display_DrawRawOverlay(u8g2, v);
 }

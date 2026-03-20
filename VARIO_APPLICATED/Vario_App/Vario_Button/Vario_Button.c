@@ -17,45 +17,39 @@ static void vario_button_handle_main_screen(const button_event_t *event)
     {
         case BUTTON_ID_1:
             /* -------------------------------------------------------------- */
-            /*  Screen1 direct jump                                            */
+            /*  Screen1 direct jump                                           */
             /* -------------------------------------------------------------- */
             Vario_State_SetMode(VARIO_MODE_SCREEN_1);
             break;
 
         case BUTTON_ID_2:
             /* -------------------------------------------------------------- */
-            /*  이전 메인 화면                                                 */
+            /*  이전 메인 화면                                                */
             /* -------------------------------------------------------------- */
             Vario_State_SelectPreviousMainScreen();
             break;
 
         case BUTTON_ID_3:
             /* -------------------------------------------------------------- */
-            /*  다음 메인 화면                                                 */
+            /*  다음 메인 화면                                                */
             /* -------------------------------------------------------------- */
             Vario_State_SelectNextMainScreen();
             break;
 
         case BUTTON_ID_4:
             /* -------------------------------------------------------------- */
-            /*  비행 중 자주 쓰는 quick QNH down                               */
+            /*  Flytec 류 기기에서 자주 쓰는 in-flight QNH trim               */
             /* -------------------------------------------------------------- */
             Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_QNH, -1);
             Vario_State_RequestRedraw();
             break;
 
         case BUTTON_ID_5:
-            /* -------------------------------------------------------------- */
-            /*  비행 중 자주 쓰는 quick QNH up                                 */
-            /* -------------------------------------------------------------- */
             Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_QNH, +1);
             Vario_State_RequestRedraw();
             break;
 
         case BUTTON_ID_6:
-            /* -------------------------------------------------------------- */
-            /*  설정 루트 진입                                                 */
-            /* -------------------------------------------------------------- */
             Vario_State_EnterSettings();
             break;
 
@@ -159,6 +153,9 @@ static void vario_button_handle_quickset(const button_event_t *event)
             break;
 
         case BUTTON_ID_6:
+            /* -------------------------------------------------------------- */
+            /* Flight/Audio page -> Graphics page 빠른 왕복                   */
+            /* -------------------------------------------------------------- */
             Vario_State_EnterValueSetting();
             break;
 
@@ -214,8 +211,7 @@ static void vario_button_handle_valuesetting(const button_event_t *event)
 void Vario_Button_Init(void)
 {
     /* ---------------------------------------------------------------------- */
-    /*  현재 단계에서는 별도 런타임 버퍼가 없으므로                             */
-    /*  init body 는 비워 둔다.                                                */
+    /*  현재 구조에서는 별도 런타임 버퍼가 없다.                                */
     /* ---------------------------------------------------------------------- */
 }
 
@@ -268,10 +264,6 @@ void Vario_Button_GetButtonBar(vario_mode_t mode, vario_buttonbar_t *out_bar)
         case VARIO_MODE_SCREEN_1:
         case VARIO_MODE_SCREEN_2:
         case VARIO_MODE_SCREEN_3:
-            /* ------------------------------------------------------------------ */
-            /*  full-screen 화면은 실제 하단바를 그리지 않더라도                  */
-            /*  key 의미는 여기에서 공통 관리한다.                                */
-            /* ------------------------------------------------------------------ */
             out_bar->f1 = "SCR1";
             out_bar->f2 = "PREV";
             out_bar->f3 = "NEXT";
@@ -285,7 +277,7 @@ void Vario_Button_GetButtonBar(vario_mode_t mode, vario_buttonbar_t *out_bar)
             out_bar->f2 = "UP";
             out_bar->f3 = "DN";
             out_bar->f4 = "OPEN";
-            out_bar->f5 = "OPEN";
+            out_bar->f5 = "DO";
             out_bar->f6 = "DO";
             break;
 
@@ -295,7 +287,7 @@ void Vario_Button_GetButtonBar(vario_mode_t mode, vario_buttonbar_t *out_bar)
             out_bar->f3 = "NEXT";
             out_bar->f4 = "-";
             out_bar->f5 = "+";
-            out_bar->f6 = "VALUE";
+            out_bar->f6 = "GRAPH";
             break;
 
         case VARIO_MODE_VALUESETTING:
@@ -304,7 +296,7 @@ void Vario_Button_GetButtonBar(vario_mode_t mode, vario_buttonbar_t *out_bar)
             out_bar->f3 = "NEXT";
             out_bar->f4 = "-";
             out_bar->f5 = "+";
-            out_bar->f6 = "QSET";
+            out_bar->f6 = "FLIGHT";
             break;
 
         case VARIO_MODE_COUNT:

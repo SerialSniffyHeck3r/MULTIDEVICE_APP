@@ -1,127 +1,58 @@
 #include "Vario_Screen3.h"
 
 #include "Vario_Display_Common.h"
-#include "Vario_Settings.h"
-#include "Vario_State.h"
 
-#include <math.h>
 #include <stdio.h>
 
-static void vario_screen3_format_alt_cm(char *buf, size_t buf_len, int32_t altitude_cm)
-{
-    float altitude_m;
-    int32_t value;
-
-    altitude_m = ((float)altitude_cm) * 0.01f;
-    value      = Vario_Settings_AltitudeMetersToDisplayRounded(altitude_m);
-
-    snprintf(buf, buf_len, "%ld", (long)value);
-}
-
-static void vario_screen3_format_qnh(char *buf, size_t buf_len)
-{
-    snprintf(buf,
-             buf_len,
-             "%ld.%ld",
-             (long)Vario_Settings_GetQnhDisplayWhole(),
-             (long)Vario_Settings_GetQnhDisplayFrac1());
-}
-
+/* -------------------------------------------------------------------------- */
+/*  Screen 3 stub page                                                         */
+/*                                                                            */
+/*  사용자의 요구사항                                                          */
+/*  - 페이지 3은 이번 세션에서 실제 계기 그래픽을 넣지 않고 stub 으로 유지한다. */
+/*                                                                            */
+/*  유지 이유                                                                  */
+/*  - 상태머신 구조는 그대로 보존한다.                                         */
+/*  - SCREEN_3 mode 는 살아 있으므로 버튼 흐름/화면 전환 구조가 깨지지 않는다.  */
+/*  - 추후 glide computer, thermal assistant, final-glide page 같은 고급      */
+/*    페이지를 이 자리에 이식할 수 있다.                                      */
+/*                                                                            */
+/*  조정 포인트                                                                */
+/*  - 타이틀 위치를 바꾸고 싶으면 Vario_Display_DrawPageTitle() 를 수정하거나   */
+/*    아래의 y baseline 숫자를 조절한다.                                      */
+/*  - 가운데 메시지의 폰트 크기를 바꾸고 싶으면 u8g2_SetFont() 의 폰트를        */
+/*    변경한다.                                                               */
+/* -------------------------------------------------------------------------- */
 void Vario_Screen3_Render(u8g2_t *u8g2, const vario_buttonbar_t *buttonbar)
 {
-    const vario_runtime_t  *rt;
-    const vario_settings_t *settings;
-    char                    alt1_text[24];
-    char                    alt2_text[24];
-    char                    alt3_text[24];
-    char                    qnh_text[24];
-    char                    unit_text[24];
-    char                    audio_text[24];
+    const vario_viewport_t *v;
+    char                    line1[24];
+    char                    line2[32];
 
     (void)buttonbar;
 
-    rt       = Vario_State_GetRuntime();
-    settings = Vario_Settings_Get();
+    v = Vario_Display_GetFullViewport();
 
-    vario_screen3_format_alt_cm(alt1_text, sizeof(alt1_text), settings->alt1_cm);
-    vario_screen3_format_alt_cm(alt2_text, sizeof(alt2_text), settings->alt2_cm);
-    vario_screen3_format_alt_cm(alt3_text, sizeof(alt3_text), settings->alt3_cm);
-    vario_screen3_format_qnh(qnh_text, sizeof(qnh_text));
-    snprintf(unit_text,
-             sizeof(unit_text),
-             "%s / %s",
-             Vario_Settings_GetAltitudeUnitText(),
-             Vario_Settings_GetVSpeedUnitText());
-    snprintf(audio_text,
-             sizeof(audio_text),
-             "%s %u%%",
-             Vario_Settings_GetAudioOnOffText(),
-             (unsigned)settings->audio_volume_percent);
+    Vario_Display_DrawPageTitle(u8g2, v, "PAGE 3", "STUB");
 
     /* ---------------------------------------------------------------------- */
-    /*  Screen3 full-screen 정보 패널                                           */
-    /*  - 저장된 ALT1/ALT2/ALT3                                                 */
-    /*  - 현재 QNH / unit / audio                                               */
-    /*  - 현재 pressure / temperature                                           */
+    /* 중앙 stub 메시지                                                        */
+    /* - 이 페이지가 고의적으로 비워져 있음을 명확히 보여 준다.                */
+    /* - 본문은 full viewport 중심에 배치한다.                                 */
     /* ---------------------------------------------------------------------- */
+    snprintf(line1, sizeof(line1), "RESERVED");
+    snprintf(line2, sizeof(line2), "for future graphics");
+
+    u8g2_SetFont(u8g2, u8g2_font_10x20_mf);
+    Vario_Display_DrawTextCentered(u8g2,
+                                   (int16_t)(v->x + (v->w / 2)),
+                                   (int16_t)(v->y + (v->h / 2) - 4),
+                                   line1);
+
     u8g2_SetFont(u8g2, u8g2_font_6x12_mf);
-    u8g2_DrawStr(u8g2, 4u, 12u, "PRESET / STATUS");
+    Vario_Display_DrawTextCentered(u8g2,
+                                   (int16_t)(v->x + (v->w / 2)),
+                                   (int16_t)(v->y + (v->h / 2) + 14),
+                                   line2);
 
-    /* ALT1 카드 */
-    u8g2_DrawFrame(u8g2, 6u, 18u, 72u, 42u);
-    u8g2_SetFont(u8g2, u8g2_font_6x10_mf);
-    u8g2_DrawStr(u8g2, 12u, 30u, "ALT1");
-    u8g2_SetFont(u8g2, u8g2_font_10x20_mf);
-    u8g2_DrawStr(u8g2, 12u, 52u, alt1_text);
-
-    /* ALT2 카드 */
-    u8g2_DrawFrame(u8g2, 84u, 18u, 72u, 42u);
-    u8g2_SetFont(u8g2, u8g2_font_6x10_mf);
-    u8g2_DrawStr(u8g2, 90u, 30u, "ALT2");
-    u8g2_SetFont(u8g2, u8g2_font_10x20_mf);
-    u8g2_DrawStr(u8g2, 90u, 52u, alt2_text);
-
-    /* ALT3 카드 */
-    u8g2_DrawFrame(u8g2, 162u, 18u, 72u, 42u);
-    u8g2_SetFont(u8g2, u8g2_font_6x10_mf);
-    u8g2_DrawStr(u8g2, 168u, 30u, "ALT3");
-    u8g2_SetFont(u8g2, u8g2_font_10x20_mf);
-    u8g2_DrawStr(u8g2, 168u, 52u, alt3_text);
-
-    /* 하단 좌측 상태 카드: QNH / unit / audio */
-    u8g2_DrawFrame(u8g2, 6u, 68u, 110u, 50u);
-    u8g2_SetFont(u8g2, u8g2_font_6x10_mf);
-    u8g2_DrawStr(u8g2, 12u, 82u, "QNH");
-    u8g2_DrawStr(u8g2, 48u, 82u, qnh_text);
-    u8g2_DrawStr(u8g2, 12u, 96u, "UNIT");
-    u8g2_DrawStr(u8g2, 48u, 96u, unit_text);
-    u8g2_DrawStr(u8g2, 12u, 110u, "AUD");
-    u8g2_DrawStr(u8g2, 48u, 110u, audio_text);
-
-    /* 하단 우측 상태 카드: pressure / temp / live GS */
-    u8g2_DrawFrame(u8g2, 124u, 68u, 110u, 50u);
-    u8g2_SetFont(u8g2, u8g2_font_6x10_mf);
-    {
-        char buf[24];
-        int32_t whole;
-        int32_t frac;
-
-        whole = rt->pressure_hpa_x100 / 100;
-        frac  = rt->pressure_hpa_x100 % 100;
-        if (frac < 0) frac = -frac;
-        snprintf(buf, sizeof(buf), "%ld.%1ld hPa", (long)whole, (long)(frac / 10));
-        u8g2_DrawStr(u8g2, 130u, 82u, buf);
-
-        whole = rt->temperature_c_x100 / 100;
-        frac  = rt->temperature_c_x100 % 100;
-        if (frac < 0) frac = -frac;
-        snprintf(buf, sizeof(buf), "%ld.%1ld C", (long)whole, (long)(frac / 10));
-        u8g2_DrawStr(u8g2, 130u, 96u, buf);
-
-        snprintf(buf, sizeof(buf), "GS %ld km/h", (long)lroundf(rt->ground_speed_kmh));
-        u8g2_DrawStr(u8g2, 130u, 110u, buf);
-    }
-
-    /* 개발용 raw overlay: full-screen 하단 좌측 */
-    Vario_Display_DrawRawOverlay(u8g2, Vario_Display_GetFullViewport());
+    Vario_Display_DrawRawOverlay(u8g2, v);
 }
