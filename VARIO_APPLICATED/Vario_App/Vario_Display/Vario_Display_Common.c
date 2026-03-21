@@ -3,6 +3,7 @@
 #include "Vario_Dev.h"
 #include "Vario_State.h"
 #include "../Vario_Settings/Vario_Settings.h"
+#include "Vario_Icon_Resources.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -35,54 +36,122 @@
 /* -------------------------------------------------------------------------- */
 /* 공통 Flight UI layout                                                       */
 /*                                                                            */
-/* 사용자가 추후 위치/폰트를 쉽게 옮길 수 있도록 주요 UI 블록을 전부 상수화했다. */
-/* 아래 숫자만 바꾸면 요소가 바로 이동하도록 의도된 좌표계다.                  */
+/* 이 섹션이 Screen 1/2/3 공용 shell 의 "치수 창고" 다.                         */
+/*                                                                            */
+/* 유지 규칙                                                                   */
+/* 1) 화면 위치/폰트/간격은 이 섹션의 매크로부터 먼저 바꾼다.                   */
+/* 2) renderer 는 APP_STATE 를 직접 읽지 않고                                 */
+/*    Vario_State_GetRuntime() 가 만든 rt field 만 사용한다.                   */
+/* 3) 표시 단위는 Vario_Settings.* helper 로만 바꾼다.                         */
+/*    즉, ALT2 를 ft 로 따로 표시하고 싶으면 Vario_Settings 쪽 단위를 바꾸고,   */
+/*    여기서는 unit text 와 rounded value helper 만 호출한다.                  */
+/*                                                                            */
+/* 좌표 기준                                                                   */
+/* - 모든 Y 는 full viewport top 기준 offset 이다.                             */
+/* - right aligned 항목은 right margin 매크로를 바꾸면 전체가 같이 이동한다.   */
+/* - bottom value 영역은 meta(MAX/value) 와 main value box 를 분리해서         */
+/*   숫자가 서로 겹치지 않게 고정 폭으로 유지한다.                              */
 /* -------------------------------------------------------------------------- */
-#define VARIO_UI_SIDE_BAR_W              14
-#define VARIO_UI_GAUGE_INSTANT_W          8
-#define VARIO_UI_GAUGE_AVG_W              5
-#define VARIO_UI_GAUGE_GAP_W              1
-
-#define VARIO_UI_TOP_LEFT_PAD_X           4
-#define VARIO_UI_TOP_RIGHT_PAD_X          0
-#define VARIO_UI_TOP_FLT_BASELINE_Y      11
-#define VARIO_UI_TOP_GLD_BASELINE_Y      22
-#define VARIO_UI_TOP_CLOCK_BASELINE_Y    15
-#define VARIO_UI_TOP_ALT1_TOP_Y           0
-#define VARIO_UI_TOP_ALT_ROW_TOP_Y       23
-
-#define VARIO_UI_NAV_LABEL_BASELINE_Y    32
-#define VARIO_UI_NAV_LABEL_TO_COMPASS_GAP 3
-#define VARIO_UI_COMPASS_MAX_RADIUS      32
-#define VARIO_UI_COMPASS_SIDE_MARGIN      8
-#define VARIO_UI_COMPASS_LABEL_INSET      6
-#define VARIO_UI_COMPASS_BOTTOM_GAP       4
-
-#define VARIO_UI_BOTTOM_BOX_W            92
-#define VARIO_UI_BOTTOM_BOX_H            24
-#define VARIO_UI_BOTTOM_BOX_BOTTOM_PAD    1
-#define VARIO_UI_BOTTOM_LABEL_BASELINE_Y 99
-#define VARIO_UI_BOTTOM_VARIO_X_PAD       4
-#define VARIO_UI_BOTTOM_GS_X_PAD          4
-#define VARIO_UI_BOTTOM_ICON_GAP_Y        3
-
-#define VARIO_UI_STUB_TITLE_BASELINE_DY  -2
-#define VARIO_UI_STUB_SUB_BASELINE_DY    14
+#define VARIO_UI_SIDE_BAR_W                       14
+#define VARIO_UI_GAUGE_INSTANT_W                   8
+#define VARIO_UI_GAUGE_AVG_W                       5
+#define VARIO_UI_GAUGE_GAP_W                       1
 
 /* -------------------------------------------------------------------------- */
-/* Bar scale definition                                                        */
+/* 상단 좌측 FLT/GLD block                                                     */
 /* -------------------------------------------------------------------------- */
-#define VARIO_UI_VARIO_HALFSTEP_COUNT     8u
-#define VARIO_UI_VARIO_HALFSTEP_MPS       0.5f
-#define VARIO_UI_VARIO_MAX_ABS_MPS        (VARIO_UI_VARIO_HALFSTEP_COUNT * VARIO_UI_VARIO_HALFSTEP_MPS)
+#define VARIO_UI_TOP_LEFT_PAD_X                    4
+#define VARIO_UI_TOP_FLT_BASELINE_Y               14
+#define VARIO_UI_TOP_GLD_BASELINE_Y               29
 
-#define VARIO_UI_GS_STEP_COUNT           10u
-#define VARIO_UI_GS_STEP_KMH              5.0f
-#define VARIO_UI_GS_MIN_VISIBLE_KMH      10.0f
-#define VARIO_UI_GS_MAX_KMH              60.0f
+/* -------------------------------------------------------------------------- */
+/* 상단 중앙 CLOCK                                                             */
+/* - 사용자가 요구한 대로 현재 시각 폰트는 한 단계 낮춰 둔다.                  */
+/* -------------------------------------------------------------------------- */
+#define VARIO_UI_TOP_CLOCK_BASELINE_Y             12
 
-#define VARIO_UI_SCALE_MAJOR_W           14u
-#define VARIO_UI_SCALE_MINOR_W            8u
+/* -------------------------------------------------------------------------- */
+/* 상단 우측 ALT block                                                         */
+/* - ALT1은 화면 제일 위에 붙인다.                                              */
+/* - ALT2는 ALT1 바로 아래에 "중간 크기" row 로 내린다.                        */
+/* - ALT3는 ALT2 아래에 독립 row 로 둔다.                                       */
+/* - 세 row 모두 right aligned 로 계산해서 벽과 겹치지 않게 한다.              */
+/* -------------------------------------------------------------------------- */
+#define VARIO_UI_TOP_RIGHT_PAD_X                   4
+#define VARIO_UI_TOP_ALT1_TOP_Y                    0
+#define VARIO_UI_TOP_ALT1_ICON_TOP_DY              4
+#define VARIO_UI_TOP_ALT1_ICON_VALUE_GAP           3
+#define VARIO_UI_TOP_ALT1_VALUE_UNIT_GAP           2
+#define VARIO_UI_TOP_ALT1_UNIT_TOP_DY             12
+#define VARIO_UI_TOP_ALT2_TOP_Y                   28
+#define VARIO_UI_TOP_ALT2_ICON_TOP_DY              4
+#define VARIO_UI_TOP_ALT3_TOP_Y                   50
+#define VARIO_UI_TOP_ALT3_ICON_TOP_DY              2
+#define VARIO_UI_TOP_ALT_ROW_ICON_GAP              3
+#define VARIO_UI_TOP_ALT_ROW_VALUE_UNIT_GAP        2
+
+/* -------------------------------------------------------------------------- */
+/* 중앙 NAV / COMPASS                                                          */
+/* - 지름을 5px 키우라는 요구를 반영하기 위해 diameter grow 상수를 분리했다.    */
+/* - 실제 반지름 증가는 정수 픽셀 좌표계라 ceil(5/2)=3 px 로 반올림한다.       */
+/* - 원의 맨 아래가 자기 영역의 최하단에 닿도록 center_y 를 계산한다.          */
+/* -------------------------------------------------------------------------- */
+#define VARIO_UI_NAV_LABEL_BASELINE_Y             33
+#define VARIO_UI_NAV_LABEL_TO_COMPASS_GAP          2
+#define VARIO_UI_COMPASS_MAX_RADIUS               35
+#define VARIO_UI_COMPASS_DIAMETER_GROW_PX          5
+#define VARIO_UI_COMPASS_SIDE_MARGIN               8
+#define VARIO_UI_COMPASS_LABEL_INSET               7
+#define VARIO_UI_COMPASS_BOTTOM_GAP                0
+
+/* -------------------------------------------------------------------------- */
+/* 하단 MAX/meta + main value block                                            */
+/* - meta label/value 는 main number box 와 분리된 Y 를 써서 겹침을 방지한다.   */
+/* - main number box 는 고정 폭/고정 높이이며 decimal 은 dot 없이 top-frac 로   */
+/*   그린다.                                                                   */
+/* -------------------------------------------------------------------------- */
+#define VARIO_UI_BOTTOM_BOX_W                     92
+#define VARIO_UI_BOTTOM_BOX_H                     24
+#define VARIO_UI_BOTTOM_BOX_BOTTOM_PAD             0
+#define VARIO_UI_BOTTOM_META_LABEL_BASELINE_Y     94
+#define VARIO_UI_BOTTOM_META_VALUE_BASELINE_Y    102
+#define VARIO_UI_BOTTOM_VALUE_BASELINE_DY         21
+#define VARIO_UI_BOTTOM_VARIO_X_PAD                4
+#define VARIO_UI_BOTTOM_GS_X_PAD                   4
+#define VARIO_UI_BOTTOM_ICON_GAP_Y                 1
+
+/* -------------------------------------------------------------------------- */
+/* page 3 stub                                                                 */
+/* -------------------------------------------------------------------------- */
+#define VARIO_UI_STUB_TITLE_BASELINE_DY           -2
+#define VARIO_UI_STUB_SUB_BASELINE_DY             14
+
+/* -------------------------------------------------------------------------- */
+/* side bar scale definition                                                   */
+/* - left vario  : inside edge(right edge) 에 tick 가 붙는다.                   */
+/* - right GS    : inside edge(left edge) 에 tick 가 붙는다.                    */
+/* - 0.0 m/s line 은 3px 두께 + 최장 길이로 그려 중심을 강하게 표시한다.        */
+/* -------------------------------------------------------------------------- */
+#define VARIO_UI_VARIO_HALFSTEP_COUNT              8u
+#define VARIO_UI_VARIO_HALFSTEP_MPS                0.5f
+#define VARIO_UI_VARIO_MAX_ABS_MPS                 (VARIO_UI_VARIO_HALFSTEP_COUNT * VARIO_UI_VARIO_HALFSTEP_MPS)
+#define VARIO_UI_VARIO_ZERO_LINE_W                 14u
+#define VARIO_UI_VARIO_ZERO_LINE_THICKNESS          3u
+#define VARIO_UI_GS_STEP_COUNT                    10u
+#define VARIO_UI_GS_STEP_KMH                       5.0f
+#define VARIO_UI_GS_MIN_VISIBLE_KMH               10.0f
+#define VARIO_UI_GS_MAX_KMH                       60.0f
+#define VARIO_UI_SCALE_MAJOR_W                    14u
+#define VARIO_UI_SCALE_MINOR_W                     8u
+
+/* -------------------------------------------------------------------------- */
+/* decimal typography                                                          */
+/* - 소수점은 '.' 을 찍지 않는다.                                               */
+/* - frac digit 은 정수부 오른쪽 위에 작은 폰트로 top-align 한다.               */
+/* - gap/top bias 를 바꾸면 frac digit 의 떠 있는 느낌을 조절할 수 있다.       */
+/* -------------------------------------------------------------------------- */
+#define VARIO_UI_DECIMAL_FRAC_GAP_X                1
+#define VARIO_UI_DECIMAL_FRAC_TOP_BIAS_Y           0
 
 /* -------------------------------------------------------------------------- */
 /* Flight average / peak cache                                                 */
@@ -90,50 +159,45 @@
 /* APP_STATE snapshot 구조는 그대로 유지하고,                                  */
 /* display 계층이 publish 값(5 Hz)을 다시 누적해서 평균/Top Speed 를 만든다.    */
 /* -------------------------------------------------------------------------- */
-#define VARIO_UI_AVG_BUFFER_SIZE         96u
+#define VARIO_UI_AVG_BUFFER_SIZE                  96u
 
 /* -------------------------------------------------------------------------- */
 /* 수동 WP 기본값                                                              */
+/* -------------------------------------------------------------------------- */
+#define VARIO_UI_DEFAULT_WP_VALID                 0u
+#define VARIO_UI_DEFAULT_WP_LAT_E7                0
+#define VARIO_UI_DEFAULT_WP_LON_E7                0
+
+/* -------------------------------------------------------------------------- */
+/* 폰트 지정                                                                   */
 /*                                                                            */
-/* 현재 repo 에 waypoint 저장소가 따로 없어서,                                 */
-/* WP mode 는 display 계층의 수동 좌표를 사용한다.                             */
-/* 나중에 실제 waypoint 저장소가 생기면 setter 구현만 교체하면 된다.           */
+/* 사용법                                                                     */
+/* - 글꼴을 바꾸고 싶으면 아래 FONT 매크로만 교체한다.                          */
+/* - 좌표와 폰트를 함께 손보면 충돌 없이 레이아웃을 재배치하기 쉽다.            */
 /* -------------------------------------------------------------------------- */
-#define VARIO_UI_DEFAULT_WP_VALID        0u
-#define VARIO_UI_DEFAULT_WP_LAT_E7       0
-#define VARIO_UI_DEFAULT_WP_LON_E7       0
+#define VARIO_UI_FONT_TOP_FLT_VALUE               u8g2_font_9x15_mf
+#define VARIO_UI_FONT_TOP_GLD_LABEL               u8g2_font_6x12_mf
+#define VARIO_UI_FONT_TOP_GLD_VALUE               u8g2_font_9x15_mf
+#define VARIO_UI_FONT_TOP_GLD_SUFFIX              u8g2_font_5x8_tr
+#define VARIO_UI_FONT_TOP_CLOCK                   u8g2_font_6x12_mf
 
-/* -------------------------------------------------------------------------- */
-/* 아이콘 bitmap                                                               */
-/*                                                                            */
-/* - ALT1 icon : 사용자 제공 XBM                                              */
-/* - VARIO up/down icon : 부호 대신 방향성을 전달                              */
-/* - GS avg arrow : 우측 평균 속도 위치 indicator                              */
-/* -------------------------------------------------------------------------- */
-#define VARIO_UI_ICON_ALT1_W 9
-#define VARIO_UI_ICON_ALT1_H 9
-static const unsigned char s_vario_ui_icon_alt1_bits[] = {
-    0x10,0xfe,0x38,0xfe,0x6c,0xfe,0xc6,0xfe,0x00,0xfe,0x00,0xfe,
-    0xaa,0xfe,0xff,0xff,0xff,0xff
-};
+#define VARIO_UI_FONT_ALT1_VALUE                  u8g2_font_logisoso20_tf
+#define VARIO_UI_FONT_ALT1_UNIT                   u8g2_font_5x8_tr
+#define VARIO_UI_FONT_ALT2_VALUE                  u8g2_font_9x15_mf
+#define VARIO_UI_FONT_ALT2_UNIT                   u8g2_font_5x8_tr
+#define VARIO_UI_FONT_ALT3_VALUE                  u8g2_font_6x12_mf
+#define VARIO_UI_FONT_ALT3_UNIT                   u8g2_font_5x8_tr
 
-#define VARIO_UI_ICON_VARIO_UP_W 9
-#define VARIO_UI_ICON_VARIO_UP_H 5
-static const unsigned char s_vario_ui_icon_vario_up_bits[] = {
-    0x10,0xfe,0x38,0xfe,0x7c,0xfe,0xfe,0xfe,0xff,0xff
-};
+#define VARIO_UI_FONT_NAV_LINE                    u8g2_font_6x12_mf
+#define VARIO_UI_FONT_COMPASS_CARDINAL            u8g2_font_5x8_tr
 
-#define VARIO_UI_ICON_VARIO_DOWN_W 9
-#define VARIO_UI_ICON_VARIO_DOWN_H 5
-static const unsigned char s_vario_ui_icon_vario_down_bits[] = {
-    0xff,0xff,0xfe,0xfe,0x7c,0xfe,0x38,0xfe,0x10,0xfe
-};
+#define VARIO_UI_FONT_BOTTOM_MAIN                 u8g2_font_10x20_mf
+#define VARIO_UI_FONT_BOTTOM_FRAC                u8g2_font_5x8_tr
+#define VARIO_UI_FONT_BOTTOM_MAX_LABEL            u8g2_font_4x6_tf
+#define VARIO_UI_FONT_BOTTOM_MAX_VALUE            u8g2_font_5x8_tr
 
-#define VARIO_UI_ICON_GS_AVG_W 5
-#define VARIO_UI_ICON_GS_AVG_H 5
-static const unsigned char s_vario_ui_icon_gs_avg_bits[] = {
-    0xe7,0xee,0xfc,0xee,0xe7
-};
+#define VARIO_UI_FONT_STUB_TITLE                  u8g2_font_10x20_mf
+#define VARIO_UI_FONT_STUB_SUB                    u8g2_font_6x12_mf
 
 typedef enum
 {
@@ -357,28 +421,51 @@ static void vario_display_draw_xbm(u8g2_t *u8g2,
 
 static void vario_display_draw_alt_badge(u8g2_t *u8g2, int16_t x, int16_t y_top, char digit_ch)
 {
-    char text[2];
-
     if (u8g2 == NULL)
     {
         return;
     }
 
     /* ---------------------------------------------------------------------- */
-    /* ALT2 / ALT3 inline badge                                                */
-    /* - 사용자 제공 XBM 은 ALT1 만 있었으므로,                                 */
-    /*   ALT2/ALT3 는 작은 badge 형태로 그려 교체 포인트를 명확히 남긴다.       */
-    /* - badge 전체 좌표는 이 함수의 x/y_top 만 바꾸면 이동된다.                */
+    /* ALT1 / ALT2 / ALT3 icon resource draw                                   */
+    /* - 아이콘 비트맵은 Vario_Icon_Resources.h 에서만 관리한다.                */
+    /* - 여기서는 digit_ch 로 어떤 리소스를 찍을지만 결정한다.                  */
+    /* - 위치를 옮기고 싶으면 caller 의 x / y_top 계산식만 수정하면 된다.       */
     /* ---------------------------------------------------------------------- */
-    text[0] = digit_ch;
-    text[1] = '\0';
+    switch (digit_ch)
+    {
+        case '1':
+            vario_display_draw_xbm(u8g2,
+                                   x,
+                                   y_top,
+                                   VARIO_ICON_ALT1_WIDTH,
+                                   VARIO_ICON_ALT1_HEIGHT,
+                                   vario_icon_alt1_bits);
+            break;
 
-    u8g2_DrawFrame(u8g2, x, y_top, 9u, 9u);
-    u8g2_SetFontPosTop(u8g2);
-    u8g2_SetFont(u8g2, u8g2_font_4x6_tf);
-    u8g2_DrawStr(u8g2, x + 2, y_top + 1, text);
-    u8g2_SetFontPosBaseline(u8g2);
+        case '2':
+            vario_display_draw_xbm(u8g2,
+                                   x,
+                                   y_top,
+                                   VARIO_ICON_ALT2_WIDTH,
+                                   VARIO_ICON_ALT2_HEIGHT,
+                                   vario_icon_alt2_bits);
+            break;
+
+        case '3':
+            vario_display_draw_xbm(u8g2,
+                                   x,
+                                   y_top,
+                                   VARIO_ICON_ALT3_WIDTH,
+                                   VARIO_ICON_ALT3_HEIGHT,
+                                   vario_icon_alt3_bits);
+            break;
+
+        default:
+            break;
+    }
 }
+
 
 static void vario_display_format_clock(char *buf, size_t buf_len, const vario_runtime_t *rt)
 {
@@ -453,6 +540,32 @@ static void vario_display_format_signed_altitude(char *buf, size_t buf_len, floa
              (long)Vario_Settings_AltitudeMetersToDisplayRounded(altitude_m));
 }
 
+/* -------------------------------------------------------------------------- */
+/* per-row altitude formatter                                                 */
+/*                                                                            */
+/* ALT1 / ALT2 / ALT3 가 서로 다른 단위를 가질 수 있게 하기 위한 helper 다.      */
+/* 현재 common shell 에서는                                                   */
+/* - ALT1 : settings->altitude_unit                                            */
+/* - ALT2 : settings->alt2_unit                                                */
+/* - ALT3 : settings->altitude_unit                                            */
+/* 조합을 사용한다.                                                            */
+/* -------------------------------------------------------------------------- */
+static void vario_display_format_altitude_with_unit(char *buf,
+                                                    size_t buf_len,
+                                                    float altitude_m,
+                                                    vario_alt_unit_t unit)
+{
+    if ((buf == NULL) || (buf_len == 0u))
+    {
+        return;
+    }
+
+    snprintf(buf,
+             buf_len,
+             "%ld",
+             (long)Vario_Settings_AltitudeMetersToDisplayRoundedWithUnit(altitude_m, unit));
+}
+
 static void vario_display_format_speed_value(char *buf, size_t buf_len, float speed_kmh)
 {
     float display_value;
@@ -476,6 +589,26 @@ static void vario_display_format_vario_value_abs(char *buf, size_t buf_len, floa
     }
 
     display_value = Vario_Settings_VSpeedMpsToDisplayFloat(vario_display_absf(vario_mps));
+    if (Vario_Settings_Get()->vspeed_unit == VARIO_VSPEED_UNIT_FPM)
+    {
+        snprintf(buf, buf_len, "%ld", (long)lroundf(display_value));
+    }
+    else
+    {
+        snprintf(buf, buf_len, "%.1f", (double)display_value);
+    }
+}
+
+static void vario_display_format_vario_value_signed(char *buf, size_t buf_len, float vario_mps)
+{
+    float display_value;
+
+    if ((buf == NULL) || (buf_len == 0u))
+    {
+        return;
+    }
+
+    display_value = Vario_Settings_VSpeedMpsToDisplayFloat(vario_mps);
     if (Vario_Settings_Get()->vspeed_unit == VARIO_VSPEED_UNIT_FPM)
     {
         snprintf(buf, buf_len, "%ld", (long)lroundf(display_value));
@@ -553,8 +686,7 @@ static void vario_display_format_nav_distance(char *buf,
                                               bool valid,
                                               float distance_m)
 {
-    float distance_km;
-    float distance_mi;
+    float display_distance;
 
     if ((buf == NULL) || (buf_len == 0u) || (label == NULL))
     {
@@ -563,21 +695,25 @@ static void vario_display_format_nav_distance(char *buf,
 
     if (valid == false)
     {
-        snprintf(buf, buf_len, "to %s ---.-km / ---.-mi", label);
+        snprintf(buf,
+                 buf_len,
+                 "%s ---.-%s",
+                 label,
+                 Vario_Settings_GetNavDistanceUnitText());
         return;
     }
 
-    distance_km = distance_m * 0.001f;
-    distance_km = vario_display_clampf(distance_km, 0.0f, 999.9f);
-    distance_mi = distance_km * 0.621371f;
+    display_distance = Vario_Settings_NavDistanceMetersToDisplayFloat(distance_m);
+    display_distance = vario_display_clampf(display_distance, 0.0f, 999.9f);
 
     snprintf(buf,
              buf_len,
-             "to %s %.1fkm / %.1fmi",
+             "%s %.1f%s",
              label,
-             (double)distance_km,
-             (double)distance_mi);
+             (double)display_distance,
+             Vario_Settings_GetNavDistanceUnitText());
 }
+
 
 static bool vario_display_recent_average(const float *samples,
                                          const uint32_t *stamps,
@@ -826,7 +962,7 @@ static void vario_display_compute_nav_solution(const vario_runtime_t *rt,
 
     if (s_vario_ui_dynamic.nav_mode == VARIO_NAV_TARGET_WP)
     {
-        snprintf(out_solution->label, sizeof(out_solution->label), "WP");
+        snprintf(out_solution->label, sizeof(out_solution->label), "WPT1");
     }
     else
     {
@@ -1026,13 +1162,17 @@ static void vario_display_draw_decimal_value(u8g2_t *u8g2,
                                              const char *value_text)
 {
     char    whole[16];
-    char    frac[16];
+    char    frac[4];
     const char *dot_pos;
     int16_t whole_w;
     int16_t frac_w;
     int16_t total_w;
     int16_t draw_x;
     int16_t bottom_y;
+    int16_t main_ascent;
+    int16_t frac_ascent;
+    int16_t whole_baseline;
+    int16_t frac_baseline;
 
     if ((u8g2 == NULL) || (main_font == NULL) || (frac_font == NULL) || (value_text == NULL))
     {
@@ -1058,12 +1198,17 @@ static void vario_display_draw_decimal_value(u8g2_t *u8g2,
         }
         memcpy(whole, value_text, whole_len);
         whole[whole_len] = '\0';
-        snprintf(frac, sizeof(frac), "%s", dot_pos);
+
+        if (dot_pos[1] != '\0')
+        {
+            frac[0] = dot_pos[1];
+            frac[1] = '\0';
+        }
     }
 
     whole_w = vario_display_measure_text(u8g2, main_font, whole);
     frac_w = (frac[0] != '\0') ? vario_display_measure_text(u8g2, frac_font, frac) : 0;
-    total_w = (int16_t)(whole_w + frac_w);
+    total_w = (int16_t)(whole_w + ((frac[0] != '\0') ? (VARIO_UI_DECIMAL_FRAC_GAP_X + frac_w) : 0));
 
     switch (align)
     {
@@ -1088,18 +1233,26 @@ static void vario_display_draw_decimal_value(u8g2_t *u8g2,
 
     bottom_y = (int16_t)(box_y + box_h - 1);
 
-    u8g2_SetFontPosBottom(u8g2);
+    u8g2_SetFontPosBaseline(u8g2);
     u8g2_SetFont(u8g2, main_font);
-    u8g2_DrawStr(u8g2, draw_x, bottom_y, whole);
+    main_ascent = (int16_t)u8g2_GetAscent(u8g2);
+    whole_baseline = bottom_y;
+    u8g2_DrawStr(u8g2, draw_x, whole_baseline, whole);
 
     if (frac[0] != '\0')
     {
         u8g2_SetFont(u8g2, frac_font);
-        u8g2_DrawStr(u8g2, (int16_t)(draw_x + whole_w), bottom_y, frac);
+        frac_ascent = (int16_t)u8g2_GetAscent(u8g2);
+        frac_baseline = (int16_t)((whole_baseline - main_ascent) + frac_ascent + VARIO_UI_DECIMAL_FRAC_TOP_BIAS_Y);
+        u8g2_DrawStr(u8g2,
+                     (int16_t)(draw_x + whole_w + VARIO_UI_DECIMAL_FRAC_GAP_X),
+                     frac_baseline,
+                     frac);
     }
 
     u8g2_SetFontPosBaseline(u8g2);
 }
+
 
 static void vario_display_draw_top_left_metrics(u8g2_t *u8g2,
                                                 const vario_viewport_t *v,
@@ -1119,46 +1272,43 @@ static void vario_display_draw_top_left_metrics(u8g2_t *u8g2,
     x = (int16_t)(v->x + VARIO_UI_SIDE_BAR_W + VARIO_UI_TOP_LEFT_PAD_X);
 
     /* ---------------------------------------------------------------------- */
-    /* 좌상단 FLT TIME value only                                              */
-    /* - 폰트      : 6x12 medium                                                */
-    /* - 기준점    : full viewport 기준 left + 14px bar 이후 4px                */
-    /* - 수정 포인트: VARIO_UI_TOP_FLT_BASELINE_Y / VARIO_UI_TOP_LEFT_PAD_X     */
+    /* 좌상단 FLT TIME                                                         */
+    /* - 기존보다 한 단계 크게 해서 한눈에 읽히게 한다.                         */
+    /* - baseline 조정은 VARIO_UI_TOP_FLT_BASELINE_Y 만 바꾸면 된다.            */
     /* ---------------------------------------------------------------------- */
     vario_display_format_flight_time(flight_time, sizeof(flight_time), rt);
-    u8g2_SetFont(u8g2, u8g2_font_6x12_mf);
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_TOP_FLT_VALUE);
     u8g2_DrawStr(u8g2,
                  x,
                  (int16_t)(v->y + VARIO_UI_TOP_FLT_BASELINE_Y),
                  flight_time);
 
     /* ---------------------------------------------------------------------- */
-    /* 좌상단 GLD row                                                          */
-    /* - GLD label  : 4x6 small                                                 */
-    /* - value      : 6x12 medium                                               */
-    /* - suffix :1  : 4x6 small                                                 */
-    /* - 수정 포인트: VARIO_UI_TOP_GLD_BASELINE_Y                               */
+    /* 좌상단 GLD                                                              */
+    /* - label/value 모두 살짝 키워 commercial 느낌을 맞춘다.                  */
     /* ---------------------------------------------------------------------- */
     vario_display_format_glide_ratio(glide_text, sizeof(glide_text), rt);
-    u8g2_SetFont(u8g2, u8g2_font_4x6_tf);
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_TOP_GLD_LABEL);
     u8g2_DrawStr(u8g2,
                  x,
                  (int16_t)(v->y + VARIO_UI_TOP_GLD_BASELINE_Y),
                  "GLD");
 
-    gld_value_x = (int16_t)(x + 16);
-    u8g2_SetFont(u8g2, u8g2_font_6x12_mf);
+    gld_value_x = (int16_t)(x + 23);
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_TOP_GLD_VALUE);
     u8g2_DrawStr(u8g2,
                  gld_value_x,
                  (int16_t)(v->y + VARIO_UI_TOP_GLD_BASELINE_Y),
                  glide_text);
 
     suffix_x = (int16_t)(gld_value_x + u8g2_GetStrWidth(u8g2, glide_text) + 2);
-    u8g2_SetFont(u8g2, u8g2_font_4x6_tf);
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_TOP_GLD_SUFFIX);
     u8g2_DrawStr(u8g2,
                  suffix_x,
                  (int16_t)(v->y + VARIO_UI_TOP_GLD_BASELINE_Y),
                  ":1");
 }
+
 
 static void vario_display_draw_top_center_clock(u8g2_t *u8g2,
                                                 const vario_viewport_t *v,
@@ -1174,96 +1324,138 @@ static void vario_display_draw_top_center_clock(u8g2_t *u8g2,
 
     /* ---------------------------------------------------------------------- */
     /* 상단 중앙 현재 시각                                                     */
-    /* - 폰트      : 9x15 medium-large                                          */
-    /* - 기준점    : 화면 정중앙 x / y + 15 baseline                            */
-    /* - FLT TIME 과 겹치지 않도록 top-right ALT1 폭과 top-left block 사이      */
-    /*   중앙에만 배치한다.                                                     */
+    /* - 사용자 요구대로 기존보다 한 단계 작은 폰트를 사용한다.                 */
     /* ---------------------------------------------------------------------- */
     vario_display_format_clock(clock_text, sizeof(clock_text), rt);
-    u8g2_SetFont(u8g2, u8g2_font_9x15_mf);
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_TOP_CLOCK);
     Vario_Display_DrawTextCentered(u8g2,
                                    (int16_t)(v->x + (v->w / 2)),
                                    (int16_t)(v->y + VARIO_UI_TOP_CLOCK_BASELINE_Y),
                                    clock_text);
 }
 
+
 static void vario_display_draw_top_right_altitudes(u8g2_t *u8g2,
                                                    const vario_viewport_t *v,
                                                    const vario_runtime_t *rt)
 {
+    const vario_settings_t *settings;
     char    alt1_text[24];
     char    alt2_text[24];
     char    alt3_text[24];
+    const char *alt1_unit;
+    const char *alt2_unit;
+    const char *alt3_unit;
     int16_t right_limit_x;
-    int16_t alt1_w;
-    int16_t alt1_x;
-    int16_t alt1_icon_x;
-    int16_t row_y;
-    int16_t a3_icon_x;
-    int16_t a3_value_x;
-    int16_t a2_icon_x;
-    int16_t a2_value_x;
-    int16_t a3_value_w;
-    int16_t a2_value_w;
+    int16_t value_w;
+    int16_t unit_w;
+    int16_t icon_x;
+    int16_t value_x;
+    int16_t unit_x;
+    int16_t row_top_y;
 
     if ((u8g2 == NULL) || (v == NULL) || (rt == NULL))
     {
         return;
     }
 
+    settings = Vario_Settings_Get();
+    if (settings == NULL)
+    {
+        return;
+    }
+
     right_limit_x = (int16_t)(v->x + v->w - VARIO_UI_SIDE_BAR_W - VARIO_UI_TOP_RIGHT_PAD_X);
 
-    vario_display_format_altitude(alt1_text, sizeof(alt1_text), rt->alt1_absolute_m);
-    vario_display_format_signed_altitude(alt2_text, sizeof(alt2_text), rt->alt2_relative_m);
-    vario_display_format_signed_altitude(alt3_text, sizeof(alt3_text), rt->alt3_accum_gain_m);
+    vario_display_format_altitude_with_unit(alt1_text, sizeof(alt1_text), rt->alt1_absolute_m, settings->altitude_unit);
+    vario_display_format_altitude_with_unit(alt2_text, sizeof(alt2_text), rt->alt2_relative_m, settings->alt2_unit);
+    vario_display_format_altitude_with_unit(alt3_text, sizeof(alt3_text), rt->alt3_accum_gain_m, settings->altitude_unit);
+    alt1_unit = Vario_Settings_GetAltitudeUnitTextForUnit(settings->altitude_unit);
+    alt2_unit = Vario_Settings_GetAltitudeUnitTextForUnit(settings->alt2_unit);
+    alt3_unit = Vario_Settings_GetAltitudeUnitTextForUnit(settings->altitude_unit);
 
     /* ---------------------------------------------------------------------- */
-    /* ALT1 big block                                                          */
-    /* - 폰트      : logisoso20                                                */
-    /* - 정렬      : top aligned + right aligned                               */
-    /* - 수정 포인트: VARIO_UI_TOP_ALT1_TOP_Y / VARIO_UI_TOP_RIGHT_PAD_X       */
+    /* ALT1                                                                    */
+    /* - icon 1 + 큰 숫자 + unit 을 한 row 에서 right align 한다.              */
+    /* - value/unit/icon gap 은 매크로로 분리되어 있어 충돌 시 바로 수정 가능. */
     /* ---------------------------------------------------------------------- */
     u8g2_SetFontPosTop(u8g2);
-    u8g2_SetFont(u8g2, u8g2_font_logisoso20_tf);
-    alt1_w = (int16_t)u8g2_GetStrWidth(u8g2, alt1_text);
-    alt1_x = (int16_t)(right_limit_x - alt1_w);
-    alt1_icon_x = (int16_t)(alt1_x - VARIO_UI_ICON_ALT1_W - 3);
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_ALT1_VALUE);
+    value_w = (int16_t)u8g2_GetStrWidth(u8g2, alt1_text);
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_ALT1_UNIT);
+    unit_w = (int16_t)u8g2_GetStrWidth(u8g2, alt1_unit);
 
-    vario_display_draw_xbm(u8g2,
-                           alt1_icon_x,
-                           (int16_t)(v->y + VARIO_UI_TOP_ALT1_TOP_Y),
-                           VARIO_UI_ICON_ALT1_W,
-                           VARIO_UI_ICON_ALT1_H,
-                           s_vario_ui_icon_alt1_bits);
+    unit_x = (int16_t)(right_limit_x - unit_w);
+    value_x = (int16_t)(unit_x - VARIO_UI_TOP_ALT1_VALUE_UNIT_GAP - value_w);
+    icon_x = (int16_t)(value_x - VARIO_UI_TOP_ALT1_ICON_VALUE_GAP - VARIO_ICON_ALT1_WIDTH);
+
+    vario_display_draw_alt_badge(u8g2,
+                                 icon_x,
+                                 (int16_t)(v->y + VARIO_UI_TOP_ALT1_TOP_Y + VARIO_UI_TOP_ALT1_ICON_TOP_DY),
+                                 '1');
+
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_ALT1_VALUE);
     u8g2_DrawStr(u8g2,
-                 alt1_x,
+                 value_x,
                  (int16_t)(v->y + VARIO_UI_TOP_ALT1_TOP_Y),
                  alt1_text);
-    u8g2_SetFontPosBaseline(u8g2);
+
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_ALT1_UNIT);
+    u8g2_DrawStr(u8g2,
+                 unit_x,
+                 (int16_t)(v->y + VARIO_UI_TOP_ALT1_TOP_Y + VARIO_UI_TOP_ALT1_UNIT_TOP_DY),
+                 alt1_unit);
 
     /* ---------------------------------------------------------------------- */
-    /* ALT2 / ALT3 inline row                                                  */
-    /* - 한 줄 배치                                                            */
-    /* - ALT2 / ALT3 숫자는 나중에 badge/icon만 바꾸면 즉시 교체 가능           */
-    /* - 수정 포인트: VARIO_UI_TOP_ALT_ROW_TOP_Y                               */
+    /* ALT2                                                                    */
+    /* - ALT1 바로 아래에 "중간 크기" row 로 배치한다.                          */
+    /* - ALT2 는 전용 unit(settings->alt2_unit)을 사용하므로                    */
+    /*   alt1/alt3 와 달라도 안전하게 표시된다.                                 */
     /* ---------------------------------------------------------------------- */
-    row_y = (int16_t)(v->y + VARIO_UI_TOP_ALT_ROW_TOP_Y);
-    u8g2_SetFontPosTop(u8g2);
-    u8g2_SetFont(u8g2, u8g2_font_5x8_tr);
-    a3_value_w = (int16_t)u8g2_GetStrWidth(u8g2, alt3_text);
-    a2_value_w = (int16_t)u8g2_GetStrWidth(u8g2, alt2_text);
+    row_top_y = (int16_t)(v->y + VARIO_UI_TOP_ALT2_TOP_Y);
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_ALT2_VALUE);
+    value_w = (int16_t)u8g2_GetStrWidth(u8g2, alt2_text);
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_ALT2_UNIT);
+    unit_w = (int16_t)u8g2_GetStrWidth(u8g2, alt2_unit);
 
-    a3_value_x = (int16_t)(right_limit_x - a3_value_w);
-    a3_icon_x = (int16_t)(a3_value_x - 11);
-    a2_value_x = (int16_t)(a3_icon_x - 12 - a2_value_w);
-    a2_icon_x = (int16_t)(a2_value_x - 11);
+    unit_x = (int16_t)(right_limit_x - unit_w);
+    value_x = (int16_t)(unit_x - VARIO_UI_TOP_ALT_ROW_VALUE_UNIT_GAP - value_w);
+    icon_x = (int16_t)(value_x - VARIO_UI_TOP_ALT_ROW_ICON_GAP - VARIO_ICON_ALT2_WIDTH);
 
-    vario_display_draw_alt_badge(u8g2, a2_icon_x, row_y, '2');
-    u8g2_DrawStr(u8g2, a2_value_x, row_y, alt2_text);
-    vario_display_draw_alt_badge(u8g2, a3_icon_x, row_y, '3');
-    u8g2_DrawStr(u8g2, a3_value_x, row_y, alt3_text);
+    vario_display_draw_alt_badge(u8g2,
+                                 icon_x,
+                                 (int16_t)(row_top_y + VARIO_UI_TOP_ALT2_ICON_TOP_DY),
+                                 '2');
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_ALT2_VALUE);
+    u8g2_DrawStr(u8g2, value_x, row_top_y, alt2_text);
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_ALT2_UNIT);
+    u8g2_DrawStr(u8g2, unit_x, (int16_t)(row_top_y + 4), alt2_unit);
+
+    /* ---------------------------------------------------------------------- */
+    /* ALT3                                                                    */
+    /* ---------------------------------------------------------------------- */
+    row_top_y = (int16_t)(v->y + VARIO_UI_TOP_ALT3_TOP_Y);
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_ALT3_VALUE);
+    value_w = (int16_t)u8g2_GetStrWidth(u8g2, alt3_text);
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_ALT3_UNIT);
+    unit_w = (int16_t)u8g2_GetStrWidth(u8g2, alt3_unit);
+
+    unit_x = (int16_t)(right_limit_x - unit_w);
+    value_x = (int16_t)(unit_x - VARIO_UI_TOP_ALT_ROW_VALUE_UNIT_GAP - value_w);
+    icon_x = (int16_t)(value_x - VARIO_UI_TOP_ALT_ROW_ICON_GAP - VARIO_ICON_ALT3_WIDTH);
+
+    vario_display_draw_alt_badge(u8g2,
+                                 icon_x,
+                                 (int16_t)(row_top_y + VARIO_UI_TOP_ALT3_ICON_TOP_DY),
+                                 '3');
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_ALT3_VALUE);
+    u8g2_DrawStr(u8g2, value_x, row_top_y, alt3_text);
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_ALT3_UNIT);
+    u8g2_DrawStr(u8g2, unit_x, (int16_t)(row_top_y + 2), alt3_unit);
+
     u8g2_SetFontPosBaseline(u8g2);
 }
+
 
 static void vario_display_draw_vario_side_bar(u8g2_t *u8g2,
                                               const vario_viewport_t *v,
@@ -1279,6 +1471,9 @@ static void vario_display_draw_vario_side_bar(u8g2_t *u8g2,
     int16_t left_bar_x;
     int16_t instant_x;
     int16_t avg_x;
+    int16_t tick_x;
+    int16_t center_y;
+    uint8_t thick_i;
 
     if ((u8g2 == NULL) || (v == NULL))
     {
@@ -1290,24 +1485,37 @@ static void vario_display_draw_vario_side_bar(u8g2_t *u8g2,
     avg_x = (int16_t)(left_bar_x + VARIO_UI_GAUGE_INSTANT_W + VARIO_UI_GAUGE_GAP_W);
 
     /* ---------------------------------------------------------------------- */
-    /* VARIO left side scale                                                   */
-    /* - 14px 전체 폭을 scale background 로 유지                               */
-    /* - 0~7px  : instantaneous fill                                            */
-    /* - 9~13px : n초 average fill                                              */
-    /* - major tick : 1.0 m/s                                                   */
-    /* - minor tick : 0.5 m/s                                                   */
+    /* left VARIO scale                                                        */
+    /* - tick 는 inside edge(우측 edge)에 맞춰 붙인다.                          */
+    /* - 짧은 눈금도 우측 wall 기준으로 밀어 넣는다.                            */
     /* ---------------------------------------------------------------------- */
     for (level = 0u; level < VARIO_UI_VARIO_HALFSTEP_COUNT; ++level)
     {
         uint8_t tick_w;
 
         tick_w = ((level % 2u) != 0u) ? VARIO_UI_SCALE_MAJOR_W : VARIO_UI_SCALE_MINOR_W;
+        tick_x = (int16_t)(left_bar_x + VARIO_UI_SIDE_BAR_W - tick_w);
 
         vario_display_get_vario_slot_rect(v, true, level, &slot_y, &slot_h);
-        u8g2_DrawHLine(u8g2, left_bar_x, slot_y, tick_w);
+        u8g2_DrawHLine(u8g2, tick_x, slot_y, tick_w);
 
         vario_display_get_vario_slot_rect(v, false, level, &slot_y, &slot_h);
-        u8g2_DrawHLine(u8g2, left_bar_x, slot_y, tick_w);
+        u8g2_DrawHLine(u8g2, tick_x, slot_y, tick_w);
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* 0.0 center emphasis                                                     */
+    /* - 3px 두께 + 최장 tick                                                  */
+    /* ---------------------------------------------------------------------- */
+    center_y = (int16_t)(v->y + (v->h / 2));
+    for (thick_i = 0u; thick_i < VARIO_UI_VARIO_ZERO_LINE_THICKNESS; ++thick_i)
+    {
+        int16_t zero_y;
+        zero_y = (int16_t)(center_y - 1 + (int16_t)thick_i);
+        u8g2_DrawHLine(u8g2,
+                       (int16_t)(left_bar_x + VARIO_UI_SIDE_BAR_W - VARIO_UI_VARIO_ZERO_LINE_W),
+                       zero_y,
+                       VARIO_UI_VARIO_ZERO_LINE_W);
     }
 
     vario_display_compute_vario_fill(instant_vario_mps, &first_level, &count, &positive);
@@ -1332,6 +1540,7 @@ static void vario_display_draw_vario_side_bar(u8g2_t *u8g2,
                      (slot_h > 1) ? (slot_h - 1) : slot_h);
     }
 }
+
 
 static void vario_display_draw_gs_side_bar(u8g2_t *u8g2,
                                            const vario_viewport_t *v,
@@ -1360,20 +1569,16 @@ static void vario_display_draw_gs_side_bar(u8g2_t *u8g2,
 
     /* ---------------------------------------------------------------------- */
     /* GS right side scale                                                     */
-    /* - 14px 전체 폭을 scale background 로 유지                               */
-    /* - 우측 8px  : instantaneous fill                                         */
-    /* - 좌측 5px  : average speed arrow                                        */
-    /* - 10 km/h major, 5 km/h minor 성격을 half-step 으로 표현                */
+    /* - tick 는 inside edge(좌측 edge) 에 붙인다.                              */
+    /* - 짧은 tick 도 left wall 기준으로 밀어 넣는다.                           */
     /* ---------------------------------------------------------------------- */
     for (level = 0u; level < VARIO_UI_GS_STEP_COUNT; ++level)
     {
         uint8_t tick_w;
-        int16_t tick_x;
 
         tick_w = ((level % 2u) == 0u) ? VARIO_UI_SCALE_MAJOR_W : VARIO_UI_SCALE_MINOR_W;
-        tick_x = (int16_t)(right_bar_x + VARIO_UI_SIDE_BAR_W - tick_w);
         vario_display_get_gs_slot_rect(v, level, &slot_y, &slot_h);
-        u8g2_DrawHLine(u8g2, tick_x, slot_y, tick_w);
+        u8g2_DrawHLine(u8g2, right_bar_x, slot_y, tick_w);
     }
 
     fill_steps = vario_display_compute_gs_fill_steps(instant_speed_kmh);
@@ -1394,88 +1599,99 @@ static void vario_display_draw_gs_side_bar(u8g2_t *u8g2,
                                                  VARIO_UI_GS_MAX_KMH);
         ratio = (clamped_avg_speed - VARIO_UI_GS_MIN_VISIBLE_KMH) /
                 (VARIO_UI_GS_MAX_KMH - VARIO_UI_GS_MIN_VISIBLE_KMH);
-        arrow_y = (int16_t)(v->y + v->h - 1 - lroundf(ratio * (float)(v->h - VARIO_UI_ICON_GS_AVG_H)) - (VARIO_UI_ICON_GS_AVG_H / 2));
+        arrow_y = (int16_t)(v->y + v->h - 1 - lroundf(ratio * (float)(v->h - VARIO_ICON_GS_AVG_HEIGHT)) - (VARIO_ICON_GS_AVG_HEIGHT / 2));
         if (arrow_y < v->y)
         {
             arrow_y = v->y;
         }
-        if ((arrow_y + VARIO_UI_ICON_GS_AVG_H) > (v->y + v->h))
+        if ((arrow_y + VARIO_ICON_GS_AVG_HEIGHT) > (v->y + v->h))
         {
-            arrow_y = (int16_t)(v->y + v->h - VARIO_UI_ICON_GS_AVG_H);
+            arrow_y = (int16_t)(v->y + v->h - VARIO_ICON_GS_AVG_HEIGHT);
         }
 
         vario_display_draw_xbm(u8g2,
                                avg_x,
                                arrow_y,
-                               VARIO_UI_ICON_GS_AVG_W,
-                               VARIO_UI_ICON_GS_AVG_H,
-                               s_vario_ui_icon_gs_avg_bits);
+                               VARIO_ICON_GS_AVG_WIDTH,
+                               VARIO_ICON_GS_AVG_HEIGHT,
+                               vario_icon_gs_avg_bits);
     }
 }
+
 
 static void vario_display_draw_vario_value_block(u8g2_t *u8g2,
                                                  const vario_viewport_t *v,
                                                  const vario_runtime_t *rt)
 {
+    const vario_settings_t *settings;
     char    value_text[20];
-    char    top_text[24];
+    char    max_text[20];
     int16_t box_x;
     int16_t box_y;
     int16_t icon_x;
     int16_t icon_y;
-    char    top_vario_value[20];
 
     if ((u8g2 == NULL) || (v == NULL) || (rt == NULL))
     {
         return;
     }
 
+    settings = Vario_Settings_Get();
     box_x = (int16_t)(v->x + VARIO_UI_SIDE_BAR_W + VARIO_UI_BOTTOM_VARIO_X_PAD);
     box_y = (int16_t)(v->y + v->h - VARIO_UI_BOTTOM_BOX_H - VARIO_UI_BOTTOM_BOX_BOTTOM_PAD);
 
-    vario_display_format_vario_value_abs(value_text, sizeof(value_text), rt->baro_vario_mps);
-    vario_display_format_vario_small_abs(top_vario_value, sizeof(top_vario_value), rt->max_top_vario_mps);
-    snprintf(top_text, sizeof(top_text), "Top Vario %s", top_vario_value);
+    vario_display_format_vario_value_signed(value_text, sizeof(value_text), rt->baro_vario_mps);
+    vario_display_format_vario_small_abs(max_text, sizeof(max_text), rt->max_top_vario_mps);
 
     /* ---------------------------------------------------------------------- */
-    /* 좌하단 VARIO top line                                                   */
-    /* - 폰트      : 4x6 small                                                  */
-    /* - 기준점    : left number block 상단                                     */
+    /* MAX meta                                                                 */
+    /* - 사용자가 지적한 Top Vario 문구를 제거하고 MAX + 값 두 줄로 단순화한다. */
     /* ---------------------------------------------------------------------- */
-    u8g2_SetFont(u8g2, u8g2_font_4x6_tf);
-    u8g2_DrawStr(u8g2,
-                 box_x,
-                 (int16_t)(v->y + VARIO_UI_BOTTOM_LABEL_BASELINE_Y),
-                 top_text);
+    if ((settings == NULL) || (settings->show_max_vario != 0u))
+    {
+        u8g2_SetFont(u8g2, VARIO_UI_FONT_BOTTOM_MAX_LABEL);
+        u8g2_DrawStr(u8g2,
+                     box_x,
+                     (int16_t)(v->y + VARIO_UI_BOTTOM_META_LABEL_BASELINE_Y),
+                     "MAX");
 
-    icon_x = (int16_t)(box_x + ((VARIO_UI_BOTTOM_BOX_W - VARIO_UI_ICON_VARIO_UP_W) / 2));
-    icon_y = (int16_t)(box_y - VARIO_UI_ICON_VARIO_UP_H - VARIO_UI_BOTTOM_ICON_GAP_Y);
+        u8g2_SetFont(u8g2, VARIO_UI_FONT_BOTTOM_MAX_VALUE);
+        u8g2_DrawStr(u8g2,
+                     box_x,
+                     (int16_t)(v->y + VARIO_UI_BOTTOM_META_VALUE_BASELINE_Y),
+                     max_text);
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* current vario direction icon                                             */
+    /* - main value box 의 상단 중앙에 얹어 숫자와 분리한다.                    */
+    /* ---------------------------------------------------------------------- */
+    icon_x = (int16_t)(box_x + ((VARIO_UI_BOTTOM_BOX_W - VARIO_ICON_VARIO_UP_WIDTH) / 2));
+    icon_y = (int16_t)(box_y + VARIO_UI_BOTTOM_ICON_GAP_Y);
 
     if (rt->baro_vario_mps > 0.05f)
     {
         vario_display_draw_xbm(u8g2,
                                icon_x,
                                icon_y,
-                               VARIO_UI_ICON_VARIO_UP_W,
-                               VARIO_UI_ICON_VARIO_UP_H,
-                               s_vario_ui_icon_vario_up_bits);
+                               VARIO_ICON_VARIO_UP_WIDTH,
+                               VARIO_ICON_VARIO_UP_HEIGHT,
+                               vario_icon_vario_up_bits);
     }
     else if (rt->baro_vario_mps < -0.05f)
     {
         vario_display_draw_xbm(u8g2,
                                icon_x,
                                icon_y,
-                               VARIO_UI_ICON_VARIO_DOWN_W,
-                               VARIO_UI_ICON_VARIO_DOWN_H,
-                               s_vario_ui_icon_vario_down_bits);
+                               VARIO_ICON_VARIO_DOWN_WIDTH,
+                               VARIO_ICON_VARIO_DOWN_HEIGHT,
+                               vario_icon_vario_down_bits);
     }
 
     /* ---------------------------------------------------------------------- */
-    /* 좌하단 VARIO numeric box                                                */
-    /* - 가상 box 크기 : 19.9 급 숫자 + 여유분                                  */
-    /* - 하단 bottom 정렬                                                      */
-    /* - 정렬      : 좌측 고정                                                  */
-    /* - 부호는 icon 으로 전달하므로 숫자는 절대값만 표시                       */
+    /* 좌하단 VARIO main value                                                 */
+    /* - 고정 폭 box 안에서 left align                                          */
+    /* - decimal 은 '.' 없이 상단 소수 digit 으로 분리된다.                     */
     /* ---------------------------------------------------------------------- */
     vario_display_draw_decimal_value(u8g2,
                                      box_x,
@@ -1483,18 +1699,18 @@ static void vario_display_draw_vario_value_block(u8g2_t *u8g2,
                                      VARIO_UI_BOTTOM_BOX_W,
                                      VARIO_UI_BOTTOM_BOX_H,
                                      VARIO_UI_ALIGN_LEFT,
-                                     u8g2_font_10x20_mf,
-                                     u8g2_font_9x15_mf,
+                                     VARIO_UI_FONT_BOTTOM_MAIN,
+                                     VARIO_UI_FONT_BOTTOM_FRAC,
                                      value_text);
 }
+
 
 static void vario_display_draw_speed_value_block(u8g2_t *u8g2,
                                                  const vario_viewport_t *v,
                                                  const vario_runtime_t *rt)
 {
     char    value_text[20];
-    char    top_text[24];
-    char    top_speed_value[20];
+    char    max_text[20];
     int16_t box_x;
     int16_t box_y;
 
@@ -1507,20 +1723,24 @@ static void vario_display_draw_speed_value_block(u8g2_t *u8g2,
     box_y = (int16_t)(v->y + v->h - VARIO_UI_BOTTOM_BOX_H - VARIO_UI_BOTTOM_BOX_BOTTOM_PAD);
 
     vario_display_format_speed_value(value_text, sizeof(value_text), rt->ground_speed_kmh);
-    vario_display_format_speed_small(top_speed_value, sizeof(top_speed_value), s_vario_ui_dynamic.top_speed_kmh);
-    snprintf(top_text, sizeof(top_text), "Top Speed %s", top_speed_value);
+    vario_display_format_speed_small(max_text, sizeof(max_text), s_vario_ui_dynamic.top_speed_kmh);
 
-    u8g2_SetFont(u8g2, u8g2_font_4x6_tf);
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_BOTTOM_MAX_LABEL);
     Vario_Display_DrawTextRight(u8g2,
                                 (int16_t)(box_x + VARIO_UI_BOTTOM_BOX_W),
-                                (int16_t)(v->y + VARIO_UI_BOTTOM_LABEL_BASELINE_Y),
-                                top_text);
+                                (int16_t)(v->y + VARIO_UI_BOTTOM_META_LABEL_BASELINE_Y),
+                                "MAX");
+
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_BOTTOM_MAX_VALUE);
+    Vario_Display_DrawTextRight(u8g2,
+                                (int16_t)(box_x + VARIO_UI_BOTTOM_BOX_W),
+                                (int16_t)(v->y + VARIO_UI_BOTTOM_META_VALUE_BASELINE_Y),
+                                max_text);
 
     /* ---------------------------------------------------------------------- */
-    /* 우하단 GS numeric box                                                   */
-    /* - 가상 box 크기 : 99.9 급 숫자 + 여유분                                  */
-    /* - 하단 bottom 정렬                                                      */
-    /* - 정렬      : 우측 고정                                                  */
+    /* 우하단 GS main value                                                    */
+    /* - right aligned fixed box                                               */
+    /* - decimal 은 '.' 없이 상단 소수 digit 으로 분리된다.                     */
     /* ---------------------------------------------------------------------- */
     vario_display_draw_decimal_value(u8g2,
                                      box_x,
@@ -1528,10 +1748,11 @@ static void vario_display_draw_speed_value_block(u8g2_t *u8g2,
                                      VARIO_UI_BOTTOM_BOX_W,
                                      VARIO_UI_BOTTOM_BOX_H,
                                      VARIO_UI_ALIGN_RIGHT,
-                                     u8g2_font_10x20_mf,
-                                     u8g2_font_9x15_mf,
+                                     VARIO_UI_FONT_BOTTOM_MAIN,
+                                     VARIO_UI_FONT_BOTTOM_FRAC,
                                      value_text);
 }
+
 
 static void vario_display_draw_stub_overlay(u8g2_t *u8g2,
                                             const vario_viewport_t *v,
@@ -1549,13 +1770,13 @@ static void vario_display_draw_stub_overlay(u8g2_t *u8g2,
     center_x = (int16_t)(v->x + (v->w / 2));
     center_y = (int16_t)(v->y + (v->h / 2));
 
-    u8g2_SetFont(u8g2, u8g2_font_10x20_mf);
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_STUB_TITLE);
     Vario_Display_DrawTextCentered(u8g2,
                                    center_x,
                                    (int16_t)(center_y + VARIO_UI_STUB_TITLE_BASELINE_DY),
                                    title);
 
-    u8g2_SetFont(u8g2, u8g2_font_6x12_mf);
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_STUB_SUB);
     Vario_Display_DrawTextCentered(u8g2,
                                    center_x,
                                    (int16_t)(center_y + VARIO_UI_STUB_SUB_BASELINE_DY),
@@ -1686,15 +1907,32 @@ static void vario_display_draw_compass(u8g2_t *u8g2,
         }
     }
 
+    radius = (int16_t)(radius + ((VARIO_UI_COMPASS_DIAMETER_GROW_PX + 1) / 2));
+
+    if ((bottom_limit_y - top_limit_y) > 0)
+    {
+        int16_t max_r_from_height;
+        max_r_from_height = (int16_t)((bottom_limit_y - top_limit_y) / 2);
+        if (radius > max_r_from_height)
+        {
+            radius = max_r_from_height;
+        }
+    }
+
     if (radius < 18)
     {
         radius = 18;
     }
 
-    center_y = (int16_t)(top_limit_y + radius);
-    if ((center_y + radius) > bottom_limit_y)
+    /* ---------------------------------------------------------------------- */
+    /* 사용자가 요청한 위치 규칙                                               */
+    /* - X는 화면 정중앙 고정                                                  */
+    /* - Y는 원의 가장 밑부분이 자기 영역 최하단에 딱 닿도록 아래로 내린다.      */
+    /* ---------------------------------------------------------------------- */
+    center_y = (int16_t)(bottom_limit_y - radius);
+    if ((center_y - radius) < top_limit_y)
     {
-        center_y = (int16_t)(bottom_limit_y - radius);
+        center_y = (int16_t)(top_limit_y + radius);
     }
 
     vario_display_format_nav_distance(nav_text,
@@ -1703,29 +1941,17 @@ static void vario_display_draw_compass(u8g2_t *u8g2,
                                       nav->current_valid && nav->target_valid,
                                       nav->distance_m);
 
-    /* ---------------------------------------------------------------------- */
-    /* compass title / distance line                                           */
-    /* - 폰트      : 6x12 medium                                                */
-    /* - 기준점    : 나침반 원 바로 위 중심                                     */
-    /* - 수정 포인트: VARIO_UI_NAV_LABEL_BASELINE_Y                             */
-    /* ---------------------------------------------------------------------- */
-    u8g2_SetFont(u8g2, u8g2_font_6x12_mf);
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_NAV_LINE);
     Vario_Display_DrawTextCentered(u8g2,
                                    center_x,
                                    label_baseline_y,
                                    nav_text);
 
-    /* compass circle */
     u8g2_DrawCircle(u8g2, center_x, center_y, radius, U8G2_DRAW_ALL);
     u8g2_DrawBox(u8g2, center_x - 1, center_y - 1, 3u, 3u);
 
     heading_deg = (rt->heading_valid != false) ? rt->heading_deg : 0.0f;
 
-    /* ---------------------------------------------------------------------- */
-    /* rotating compass tick / cardinal                                        */
-    /* - 화면 top 은 항상 현재 진행 방향(heading)                               */
-    /* - heading invalid 이면 north-up 으로 동작                                */
-    /* ---------------------------------------------------------------------- */
     for (i = 0; i < 360; i += 30)
     {
         float   rel_deg;
@@ -1759,7 +1985,7 @@ static void vario_display_draw_compass(u8g2_t *u8g2,
         };
         uint8_t ci;
 
-        u8g2_SetFont(u8g2, u8g2_font_5x8_tr);
+        u8g2_SetFont(u8g2, VARIO_UI_FONT_COMPASS_CARDINAL);
         for (ci = 0u; ci < (uint8_t)(sizeof(cards) / sizeof(cards[0])); ++ci)
         {
             float   rel_deg;
@@ -1775,7 +2001,6 @@ static void vario_display_draw_compass(u8g2_t *u8g2,
         }
     }
 
-    /* aircraft heading marker fixed to top */
     u8g2_DrawLine(u8g2, center_x, (int16_t)(center_y - radius + 2), center_x, (int16_t)(center_y - radius + 10));
     u8g2_DrawLine(u8g2,
                   (int16_t)(center_x - 4),
@@ -1788,12 +2013,6 @@ static void vario_display_draw_compass(u8g2_t *u8g2,
                   center_x,
                   (int16_t)(center_y - radius + 2));
 
-    /* ---------------------------------------------------------------------- */
-    /* target arrow                                                            */
-    /* - nav target 이 있으면 circle 내부에 bearing arrow 를 그림               */
-    /* - heading 이 valid 면 현재 진행방향 기준 상대 bearing                    */
-    /* - invalid 면 north-up bearing                                            */
-    /* ---------------------------------------------------------------------- */
     if ((nav->current_valid != false) && (nav->target_valid != false))
     {
         float   rad;
@@ -1828,6 +2047,7 @@ static void vario_display_draw_compass(u8g2_t *u8g2,
         u8g2_DrawLine(u8g2, right_x, right_y, tip_x, tip_y);
     }
 }
+
 
 void Vario_Display_SetViewports(const vario_viewport_t *full_viewport,
                                 const vario_viewport_t *content_viewport)
@@ -2020,6 +2240,32 @@ void Vario_Display_DrawMenuRow(u8g2_t *u8g2,
     u8g2_SetDrawColor(u8g2, 1);
 }
 
+/* -------------------------------------------------------------------------- */
+/* 공통 Flight renderer                                                        */
+/*                                                                            */
+/* 데이터 연결 방법                                                             */
+/* 1) APP_STATE 의 원본 필드를 화면 코드에서 직접 읽지 않는다.                 */
+/* 2) Vario_State.c 가 APP_STATE snapshot 을 memcpy/가공해서                    */
+/*    vario_runtime_t 로 공개한다.                                             */
+/* 3) 여기 renderer 는                                                         */
+/*       const vario_runtime_t *rt = Vario_State_GetRuntime();                 */
+/*    로 rt 포인터를 얻은 뒤,                                                  */
+/*       rt->alt1_absolute_m                                                   */
+/*       rt->alt2_relative_m                                                   */
+/*       rt->alt3_accum_gain_m                                                 */
+/*       rt->baro_vario_mps                                                    */
+/*       rt->ground_speed_kmh                                                  */
+/*       rt->heading_deg                                                       */
+/*    같은 "상위 레이어 공개 필드" 만 draw 한다.                              */
+/* 4) 새 UI 항목이 필요하면 이 파일에서 APP_STATE 를 뒤지지 말고,              */
+/*    Vario_State.h/.c 의 vario_runtime_t 에 field 를 추가하고                 */
+/*    여기서는 그 field 를 읽어 그리기만 한다.                                 */
+/*                                                                            */
+/* 폰트/좌표 조정 방법                                                          */
+/* - 상단 매크로 블록의 FONT / *_X / *_Y / *_PAD / *_GAP 값만 조정한다.        */
+/* - right aligned block 은 right_limit_x 계산 하나로 같이 움직인다.           */
+/* - decimal 숫자 모양은 vario_display_draw_decimal_value() 가 담당한다.       */
+/* -------------------------------------------------------------------------- */
 void Vario_Display_RenderFlightPage(u8g2_t *u8g2, vario_flight_page_mode_t mode)
 {
     const vario_viewport_t *v;

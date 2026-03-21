@@ -142,8 +142,17 @@ typedef struct
 
     /* ---------------------------------------------------------------------- */
     /*  단위 설정                                                              */
+    /*                                                                          */
+    /*  altitude_unit                                                           */
+    /*  - ALT1 / ALT3 기본 단위                                                */
+    /*                                                                          */
+    /*  alt2_unit                                                               */
+    /*  - ALT2 전용 단위                                                        */
+    /*  - 사용자가 요청한 "ALT2는 ft, ALT1/ALT3는 m" 조합을 지원하기 위해      */
+    /*    별도 필드로 분리한다.                                                 */
     /* ---------------------------------------------------------------------- */
     vario_alt_unit_t     altitude_unit;
+    vario_alt_unit_t     alt2_unit;
     vario_vspeed_unit_t  vspeed_unit;
     vario_speed_unit_t   speed_unit;
 
@@ -208,16 +217,20 @@ int32_t Vario_Settings_GetQnhDisplayFrac2(void);
 int32_t Vario_Settings_GetQnhDisplayFrac1(void);
 
 int32_t Vario_Settings_AltitudeMetersToDisplayRounded(float altitude_m);
+int32_t Vario_Settings_AltitudeMetersToDisplayRoundedWithUnit(float altitude_m, vario_alt_unit_t unit);
 int32_t Vario_Settings_AltitudeCentimetersToDisplayRounded(int32_t altitude_cm);
 int32_t Vario_Settings_VSpeedToDisplayRounded(float vspd_mps);
 int32_t Vario_Settings_SpeedToDisplayRounded(float speed_kmh);
 
 float Vario_Settings_SpeedKmhToDisplayFloat(float speed_kmh);
 float Vario_Settings_VSpeedMpsToDisplayFloat(float vspd_mps);
+float Vario_Settings_NavDistanceMetersToDisplayFloat(float distance_m);
 
 const char *Vario_Settings_GetAltitudeUnitText(void);
+const char *Vario_Settings_GetAltitudeUnitTextForUnit(vario_alt_unit_t unit);
 const char *Vario_Settings_GetVSpeedUnitText(void);
 const char *Vario_Settings_GetSpeedUnitText(void);
+const char *Vario_Settings_GetNavDistanceUnitText(void);
 const char *Vario_Settings_GetAudioOnOffText(void);
 const char *Vario_Settings_GetAltitudeSourceText(void);
 const char *Vario_Settings_GetHeadingSourceText(void);

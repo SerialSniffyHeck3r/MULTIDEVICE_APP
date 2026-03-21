@@ -213,6 +213,7 @@ void Vario_Settings_Init(void)
     s_vario_settings.qnh_hpa_x100                = 101325;
     s_vario_settings.alt2_reference_cm           = 0;
     s_vario_settings.altitude_unit               = VARIO_ALT_UNIT_METER;
+    s_vario_settings.alt2_unit                   = VARIO_ALT_UNIT_FEET;
     s_vario_settings.vspeed_unit                 = VARIO_VSPEED_UNIT_MPS;
     s_vario_settings.speed_unit                  = VARIO_SPEED_UNIT_KMH;
     s_vario_settings.altitude_source             = VARIO_ALT_SOURCE_QNH_MANUAL;
@@ -486,9 +487,15 @@ int32_t Vario_Settings_GetQnhDisplayFrac1(void)
 
 int32_t Vario_Settings_AltitudeMetersToDisplayRounded(float altitude_m)
 {
+    return Vario_Settings_AltitudeMetersToDisplayRoundedWithUnit(altitude_m,
+                                                                 s_vario_settings.altitude_unit);
+}
+
+int32_t Vario_Settings_AltitudeMetersToDisplayRoundedWithUnit(float altitude_m, vario_alt_unit_t unit)
+{
     float converted;
 
-    if (s_vario_settings.altitude_unit == VARIO_ALT_UNIT_FEET)
+    if (unit == VARIO_ALT_UNIT_FEET)
     {
         converted = altitude_m * 3.2808399f;
     }
@@ -552,9 +559,35 @@ float Vario_Settings_VSpeedMpsToDisplayFloat(float vspd_mps)
     return vspd_mps;
 }
 
+float Vario_Settings_NavDistanceMetersToDisplayFloat(float distance_m)
+{
+    /* ---------------------------------------------------------------------- */
+    /*  START/WPT 거리 표시는 사용자의 요청대로 km 또는 mi 둘 중 하나만 쓴다.   */
+    /*                                                                          */
+    /*  정책                                                                    */
+    /*  - speed_unit == MPH  : miles                                            */
+    /*  - 그 외(KMH / KNOT) : kilometers                                        */
+    /*                                                                          */
+    /*  KNOT 사용 중에도 km 를 쓰는 이유는                                      */
+    /*  이번 요구사항이 "km / mi 중 택1" 이고, nautical mile 단위는            */
+    /*  명시적으로 원하지 않았기 때문이다.                                      */
+    /* ---------------------------------------------------------------------- */
+    if (s_vario_settings.speed_unit == VARIO_SPEED_UNIT_MPH)
+    {
+        return distance_m * 0.0006213712f;
+    }
+
+    return distance_m * 0.001f;
+}
+
 const char *Vario_Settings_GetAltitudeUnitText(void)
 {
-    if (s_vario_settings.altitude_unit == VARIO_ALT_UNIT_FEET)
+    return Vario_Settings_GetAltitudeUnitTextForUnit(s_vario_settings.altitude_unit);
+}
+
+const char *Vario_Settings_GetAltitudeUnitTextForUnit(vario_alt_unit_t unit)
+{
+    if (unit == VARIO_ALT_UNIT_FEET)
     {
         return "ft";
     }
@@ -586,6 +619,16 @@ const char *Vario_Settings_GetSpeedUnitText(void)
         default:
             return "km/h";
     }
+}
+
+const char *Vario_Settings_GetNavDistanceUnitText(void)
+{
+    if (s_vario_settings.speed_unit == VARIO_SPEED_UNIT_MPH)
+    {
+        return "mi";
+    }
+
+    return "km";
 }
 
 const char *Vario_Settings_GetAudioOnOffText(void)
