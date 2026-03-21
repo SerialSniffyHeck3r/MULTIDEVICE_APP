@@ -1,6 +1,8 @@
 #include "Vario_State.h"
 
-#include "../Vario_Settings/Vario_Settings.h"
+#include "Vario_Settings.h"
+
+#include "Vario_UiVarioFilter.h"
 
 #include <math.h>
 #include <stddef.h>
@@ -80,14 +82,28 @@
 
 static struct
 {
-    vario_mode_t    current_mode;
-    vario_mode_t    previous_main_mode;
-    uint8_t         settings_cursor;
-    uint8_t         quickset_cursor;
-    uint8_t         valuesetting_cursor;
-    uint8_t         redraw_request;
+    vario_mode_t current_mode;
+    vario_mode_t previous_main_mode;
+    uint8_t settings_cursor;
+    uint8_t quickset_cursor;
+    uint8_t valuesetting_cursor;
+    uint8_t redraw_request;
+
+    /* ---------------------------------------------------------------------- */
+    /* runtime                                                                */
+    /* - 페이지 렌더러가 직접 읽는 공개 runtime                                */
+    /* ---------------------------------------------------------------------- */
     vario_runtime_t runtime;
+
+    /* ---------------------------------------------------------------------- */
+    /* UI vario 전용 robust filter 상태                                        */
+    /* - main screen 의 큰/작은 vario 숫자와 오른쪽 side bar 에                */
+    /*   최종적으로 반영될 display vario 를 만든다.                             */
+    /* - APP_STATE slow vario snapshot 만 입력으로 사용한다.                   */
+    /* ---------------------------------------------------------------------- */
+    vario_ui_vario_filter_t ui_vario_filter;
 } s_vario_state;
+
 
 static float vario_state_absf(float value)
 {
@@ -568,37 +584,52 @@ static void vario_state_update_heading(uint32_t now_ms)
     s_vario_state.runtime.heading_valid = true;
 }
 
+
 /* -------------------------------------------------------------------------- */
-/*  app-layer display filter                                                   */
+/* app-layer display filter                                                   */
 /*                                                                            */
-/*  핵심 아이디어                                                             */
-/*  1) APP_ALTITUDE 가 이미 1차 필터링한 altitude/vario 를 받아 온다.           */
-/*  2) 상위 앱 레이어에서 다시 한 번 observer 성격의 display filter 를 건다.   */
-/*  3) 내부 상태는 baro sample cadence 에 맞춰 계속 갱신하되,                  */
-/*     화면 publish 는 5Hz 로만 한다.                                         */
+/* 설계 분리                                                                  */
+/* 1) altitude                                                                 */
+/*    - 기존 observer 기반 altitude filter 를 유지한다.                       */
+/*    - 이유: altitude 쪽은 누적고도/상대고도 계산과도 연결되어 있기 때문.   */
 /*                                                                            */
-/*  이 방식은 "무식하게 200ms 마다 샘플 하나만 채택" 하는 것이 아니라,         */
-/*  내부 추정은 고속으로 유지하면서 표시만 절제하는 방식이다.                  */
+/* 2) current vario                                                            */
+/*    - legacy debug 에서 이미 sane 했던 APP_ALTITUDE slow_vario 를           */
+/*      별도의 robust UI filter 에 태운다.                                    */
+/*    - 즉, 현재 화면에 보이는 baro_vario_mps 는                               */
+/*      "selected measurement 의 직통값" 이 아니라                             */
+/*      "slow_vario + outlier reject + adaptive smooth + zero hysteresis"     */
+/*      경로를 탄 display 전용 값이 된다.                                     */
+/*                                                                            */
+/* 3) 경계 규칙                                                                */
+/*    - 이 함수는 APP_STATE snapshot 복사본만 사용한다.                        */
+/*    - 저수준 sensor driver / register / bus 데이터는 직접 읽지 않는다.      */
 /* -------------------------------------------------------------------------- */
 static void vario_state_update_display_filter(uint32_t now_ms)
 {
-    (void)now_ms;
     const vario_settings_t *settings;
     const app_altitude_state_t *alt;
-    float                    measured_altitude_m;
-    float                    measured_vario_mps;
-    float                    dt_s;
-    float                    damping_norm;
-    float                    alt_tau_s;
-    float                    vel_tau_s;
-    float                    alt_alpha;
-    float                    vel_alpha;
-    float                    predicted_altitude_m;
-    float                    residual_m;
+    float measured_altitude_m;
+    float measured_vario_mps;
+    float ui_vario_input_mps;
+    uint32_t filter_timestamp_ms;
+    float dt_s;
+    float damping_norm;
+    float alt_tau_s;
+    float vel_tau_s;
+    float alt_alpha;
+    float vel_alpha;
+    float predicted_altitude_m;
+    float residual_m;
 
     settings = Vario_Settings_Get();
     alt = &s_vario_state.runtime.altitude;
 
+    /* ---------------------------------------------------------------------- */
+    /* 1) selected altitude / legacy selected vario 확보                       */
+    /* - altitude observer 는 기존 selected measurement 경로를 그대로 쓴다.    */
+    /* - raw_selected_* 는 진단 관찰용으로 그대로 보존한다.                    */
+    /* ---------------------------------------------------------------------- */
     if (vario_state_select_measurement(&measured_altitude_m, &measured_vario_mps) == false)
     {
         s_vario_state.runtime.altitude_valid = false;
@@ -609,36 +640,75 @@ static void vario_state_update_display_filter(uint32_t now_ms)
     s_vario_state.runtime.raw_selected_altitude_m = measured_altitude_m;
     s_vario_state.runtime.raw_selected_vario_mps = measured_vario_mps;
 
+    /* ---------------------------------------------------------------------- */
+    /* 2) UI current vario 입력원                                              */
+    /* - main UI 가 사용할 current vario 는 오직 slow_vario 를 쓴다.           */
+    /* - QNH manual 이든 fused/noimu 이든 altitude source 선택을 따라          */
+    /*   적절한 slow path 를 vario_state_pick_slow_vario_mps() 가 고른다.      */
+    /* ---------------------------------------------------------------------- */
+    ui_vario_input_mps = vario_state_pick_slow_vario_mps(alt, settings);
+    filter_timestamp_ms = (alt->last_update_ms != 0u) ? alt->last_update_ms : now_ms;
+
+    /* ---------------------------------------------------------------------- */
+    /* 3) 같은 altitude snapshot 에 대해 중복 계산하지 않음                    */
+    /* ---------------------------------------------------------------------- */
     if ((s_vario_state.runtime.last_altitude_update_ms != 0u) &&
         (alt->last_update_ms == s_vario_state.runtime.last_altitude_update_ms))
     {
         return;
     }
 
+    /* ---------------------------------------------------------------------- */
+    /* 4) 첫 유효 샘플 진입                                                     */
+    /* - altitude / observer / ui filter 모두 같은 시작점으로 맞춘다.          */
+    /* - 시작 프레임에서 숫자가 튀지 않도록 UI filter ring buffer 를            */
+    /*   첫 샘플 값으로 채운다.                                                */
+    /* ---------------------------------------------------------------------- */
     if ((s_vario_state.runtime.derived_valid == false) ||
         (s_vario_state.runtime.last_altitude_update_ms == 0u) ||
         (alt->last_update_ms == 0u))
     {
         s_vario_state.runtime.filtered_altitude_m = measured_altitude_m;
-        s_vario_state.runtime.filtered_vario_mps = measured_vario_mps;
+
+        /* ------------------------------------------------------------------ */
+        /* filtered_vario_mps 는 이제 UI display 전용 robust current vario 다. */
+        /* 이 값은 이후 5Hz publish 에서 round(0.1m/s) 되어                    */
+        /* Screen 1 의 큰 숫자/작은 숫자/세로 막대에 직접 쓰인다.              */
+        /* ------------------------------------------------------------------ */
+        s_vario_state.runtime.filtered_vario_mps = ui_vario_input_mps;
+
+        /* ------------------------------------------------------------------ */
+        /* altitude observer 의 내부 속도 상태는 기존 selected vario 로 초기화 */
+        /* - altitude prediction 안정성을 위해 기존 의미를 유지한다.           */
+        /* ------------------------------------------------------------------ */
         s_vario_state.runtime.observer_velocity_mps = measured_vario_mps;
+
         s_vario_state.runtime.last_measured_altitude_m = measured_altitude_m;
         s_vario_state.runtime.last_accum_altitude_m = measured_altitude_m;
         s_vario_state.runtime.last_altitude_update_ms = alt->last_update_ms;
         s_vario_state.runtime.derived_valid = true;
+
+        Vario_UiVarioFilter_Reset(&s_vario_state.ui_vario_filter,
+                                  ui_vario_input_mps,
+                                  filter_timestamp_ms);
         return;
     }
 
+    /* ---------------------------------------------------------------------- */
+    /* 5) altitude observer update                                              */
+    /* - altitude / accumulated gain 경로는 기존 observer 수식을 유지한다.     */
+    /* ---------------------------------------------------------------------- */
     dt_s = ((float)(alt->last_update_ms - s_vario_state.runtime.last_altitude_update_ms)) * 0.001f;
     dt_s = vario_state_clampf(dt_s, VARIO_STATE_MIN_DT_S, VARIO_STATE_MAX_DT_S);
 
     /* ---------------------------------------------------------------------- */
-    /* damping level -> time constant                                          */
-    /* - level 1 은 민감한 편                                                   */
-    /* - level 10 은 꽤 묵직한 편                                               */
+    /* damping level -> time constant                                           */
+    /* - level 1  : 민감                                                        */
+    /* - level 10 : 묵직                                                        */
     /* ---------------------------------------------------------------------- */
     damping_norm = ((float)(settings->vario_damping_level - 1u)) / 9.0f;
     damping_norm = vario_state_clampf(damping_norm, 0.0f, 1.0f);
+
     alt_tau_s = 0.18f + (damping_norm * 1.00f);
     vel_tau_s = 0.12f + (damping_norm * 0.60f);
 
@@ -648,8 +718,10 @@ static void vario_state_update_display_filter(uint32_t now_ms)
     residual_m = measured_altitude_m - predicted_altitude_m;
 
     /* ---------------------------------------------------------------------- */
-    /* gross jump 방어                                                         */
-    /* - GPS source 전환, fix glitch, QNH 급변 시 순간 튐 방지                 */
+    /* gross jump 방어                                                          */
+    /* - GPS source 전환                                                        */
+    /* - fix glitch                                                             */
+    /* - QNH 급변                                                               */
     /* ---------------------------------------------------------------------- */
     residual_m = vario_state_clampf(residual_m,
                                     -VARIO_STATE_ALTITUDE_JUMP_LIMIT_M,
@@ -659,34 +731,41 @@ static void vario_state_update_display_filter(uint32_t now_ms)
     vel_alpha = vario_state_lpf_alpha(dt_s, vel_tau_s);
 
     /* ---------------------------------------------------------------------- */
-    /* position correction                                                     */
+    /* position correction                                                      */
     /* ---------------------------------------------------------------------- */
     s_vario_state.runtime.filtered_altitude_m = predicted_altitude_m + (alt_alpha * residual_m);
 
     /* ---------------------------------------------------------------------- */
-    /* velocity correction                                                     */
-    /* - residual/dt 로 위치 오차를 속도에 환산                                 */
-    /* - measured_vario_mps 와도 다시 blend 해서 altitude derivative 와         */
-    /*   APP_ALTITUDE fast/slow vario 둘 다 활용한다.                          */
+    /* observer 내부 속도 상태 갱신                                             */
+    /* - altitude prediction 용 내부 상태는 계속 유지한다.                     */
+    /* - 하지만 current vario 표시값 자체는 아래의 UI robust filter 가 맡는다. */
     /* ---------------------------------------------------------------------- */
     s_vario_state.runtime.observer_velocity_mps += (alt_alpha * 0.75f) * (residual_m / dt_s);
     s_vario_state.runtime.observer_velocity_mps += vel_alpha *
                                                    (measured_vario_mps - s_vario_state.runtime.observer_velocity_mps);
+
     s_vario_state.runtime.observer_velocity_mps =
         vario_state_clampf(s_vario_state.runtime.observer_velocity_mps,
                            -VARIO_STATE_MAX_VARIO_MPS,
                            +VARIO_STATE_MAX_VARIO_MPS);
 
-    s_vario_state.runtime.filtered_vario_mps = s_vario_state.runtime.observer_velocity_mps;
-
-    if (vario_state_absf(s_vario_state.runtime.filtered_vario_mps) < VARIO_STATE_VARIO_NEAR_ZERO_MPS)
-    {
-        s_vario_state.runtime.filtered_vario_mps = 0.0f;
-    }
+    /* ---------------------------------------------------------------------- */
+    /* 6) UI current vario robust filter                                        */
+    /* - 입력  : APP_ALTITUDE slow_vario                                        */
+    /* - 출력  : Screen 1 current vario 로 publish 될 값                        */
+    /* - 특징  : outlier reject + adaptive EMA + short median + zero latch      */
+    /* ---------------------------------------------------------------------- */
+    s_vario_state.runtime.filtered_vario_mps =
+        Vario_UiVarioFilter_Update(&s_vario_state.ui_vario_filter,
+                                   ui_vario_input_mps,
+                                   filter_timestamp_ms,
+                                   settings->vario_damping_level,
+                                   settings->digital_vario_average_seconds);
 
     s_vario_state.runtime.last_measured_altitude_m = measured_altitude_m;
     s_vario_state.runtime.last_altitude_update_ms = alt->last_update_ms;
 }
+
 
 static void vario_state_update_flight_logic(uint32_t now_ms)
 {
@@ -930,6 +1009,8 @@ static void vario_state_publish_5hz(uint32_t now_ms)
 void Vario_State_Init(void)
 {
     memset(&s_vario_state, 0, sizeof(s_vario_state));
+
+    Vario_UiVarioFilter_Init(&s_vario_state.ui_vario_filter);
 
     s_vario_state.current_mode       = VARIO_MODE_SCREEN_1;
     s_vario_state.previous_main_mode = VARIO_MODE_SCREEN_1;

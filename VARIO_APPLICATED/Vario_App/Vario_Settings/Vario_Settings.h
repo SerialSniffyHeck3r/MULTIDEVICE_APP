@@ -167,8 +167,8 @@ typedef struct
     /*  - 값이 클수록 화면의 숫자는 더 차분해지지만 반응은 약간 느려진다.       */
     /*                                                                            */
     /*  digital_vario_average_seconds                                          */
-    /*  - Flytec Element 계열의 integrated vario 평균시간 개념을 단순화한 값    */
-    /*  - 1~8초 범위                                                           */
+    /*  - Flytec/6030/6015 계열 integrated vario 시간 개념을 반영한 값         */
+    /*  - 1~30초 범위                                                          */
     /*                                                                            */
     /*  climb/sink tone threshold                                              */
     /*  - tone 활성 deadband.                                                  */

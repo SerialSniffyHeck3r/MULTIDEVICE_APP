@@ -226,7 +226,7 @@ void Vario_Settings_Init(void)
     s_vario_settings.flight_start_speed_kmh_x10  = 50u;
     s_vario_settings.compass_span_deg            = 120u;
     s_vario_settings.compass_box_height_px       = 16u;
-    s_vario_settings.vario_range_mps_x10         = 50u;
+    s_vario_settings.vario_range_mps_x10         = 100u;
     s_vario_settings.gs_range_kmh                = 80u;
     s_vario_settings.trail_range_m               = 250u;
     s_vario_settings.trail_spacing_m             = 15u;
@@ -294,7 +294,7 @@ void Vario_Settings_AdjustQuickSet(vario_quickset_item_t item, int8_t direction)
                 vario_settings_clamp_u8((uint8_t)((int32_t)s_vario_settings.digital_vario_average_seconds +
                                                   (int32_t)direction),
                                         1u,
-                                        8u);
+                                        30u);
             break;
 
         case VARIO_QUICKSET_ITEM_CLIMB_TONE_THRESHOLD:

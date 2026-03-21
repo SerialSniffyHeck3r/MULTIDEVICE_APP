@@ -50,6 +50,26 @@ typedef enum
 #define VARIO_TRAIL_MAX_POINTS 96u
 #endif
 
+#ifndef VARIO_HISTORY_MAX_SAMPLES
+#define VARIO_HISTORY_MAX_SAMPLES 160u
+#endif
+
+/* -------------------------------------------------------------------------- */
+/*  renderer read contract                                                     */
+/*                                                                            */
+/*  Screen1/Screen2 같은 renderer 는 아래 규칙을 반드시 따른다.                 */
+/*                                                                            */
+/*  1) APP_STATE 를 직접 읽지 않는다.                                         */
+/*  2) const vario_runtime_t *rt = Vario_State_GetRuntime(); 만 사용한다.      */
+/*  3) 필요한 표시값이 없으면 APP_STATE 필드를 화면 코드에서 끌어오지 말고,      */
+/*     이 구조체에 field 를 추가하고 Vario_State.c 에서 계산해서 넣는다.        */
+/*  4) 즉, renderer 는 read-only / draw-only 계층이다.                         */
+/*                                                                            */
+/*  이 규칙을 지켜야                                                           */
+/*  - CubeMX/IOC 재생성에 강하고                                               */
+/*  - APP_STATE 구조 변경이 화면 코드 전체로 번지지 않으며                      */
+/*  - 필터링/단위변환/유효성판정을 한 곳(Vario_State.c)에 집중시킬 수 있다.     */
+/* -------------------------------------------------------------------------- */
 typedef struct
 {
     uint32_t last_task_ms;
@@ -79,6 +99,7 @@ typedef struct
     bool     derived_valid;
     bool     flight_active;
     bool     trail_valid;
+    bool     glide_ratio_valid;
 
     /* ---------------------------------------------------------------------- */
     /*  원시/중간 표시값                                                        */
@@ -111,6 +132,8 @@ typedef struct
     float    ground_speed_kmh;
     float    heading_deg;
     float    max_top_vario_mps;
+    float    average_vario_mps;
+    float    glide_ratio;
     float    alt1_absolute_m;
     float    alt2_relative_m;
     float    alt3_accum_gain_m;
@@ -145,6 +168,22 @@ typedef struct
     uint32_t flight_landing_candidate_ms;
     uint32_t flight_start_ms;
     uint32_t flight_time_s;
+
+    /* ---------------------------------------------------------------------- */
+    /*  5Hz publish history                                                    */
+    /*                                                                            */
+    /*  history_altitude_m                                                     */
+    /*  - PAGE 1 altitude trend graph의 sparkline 데이터                        */
+    /*                                                                            */
+    /*  history_vario_mps                                                      */
+    /*  - average/integrated vario 계산용 최근 publish history                  */
+    /*  - digital_vario_average_seconds 설정값이 이 배열 길이보다 길어져도       */
+    /*    가용 샘플 수까지만 평균낸다.                                          */
+    /* ---------------------------------------------------------------------- */
+    uint16_t history_head;
+    uint16_t history_count;
+    float    history_altitude_m[VARIO_HISTORY_MAX_SAMPLES];
+    float    history_vario_mps[VARIO_HISTORY_MAX_SAMPLES];
 
     /* ---------------------------------------------------------------------- */
     /*  breadcrumb trail ring buffer                                           */

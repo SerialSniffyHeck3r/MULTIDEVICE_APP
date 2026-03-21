@@ -24,6 +24,32 @@ typedef struct
 } vario_viewport_t;
 
 /* -------------------------------------------------------------------------- */
+/* Screen 1/2/3 공통 Flight UI page type                                      */
+/*                                                                            */
+/* SCREEN_1       : 원형 나침반 + to START / to WP + 하단 수치                 */
+/* SCREEN_2_TRAIL : 원형 나침반은 제거하고 breadcrumb trail 을 배경에 렌더      */
+/* SCREEN_3_STUB  : 실제 기능은 아직 비워 두되, 사이드 바/상단/하단 shell 유지 */
+/* -------------------------------------------------------------------------- */
+typedef enum
+{
+    VARIO_FLIGHT_PAGE_SCREEN_1 = 0u,
+    VARIO_FLIGHT_PAGE_SCREEN_2_TRAIL,
+    VARIO_FLIGHT_PAGE_SCREEN_3_STUB
+} vario_flight_page_mode_t;
+
+/* -------------------------------------------------------------------------- */
+/* 나침반 target mode                                                         */
+/*                                                                            */
+/* START : trail buffer 의 가장 오래된 점을 target 으로 사용                   */
+/* WP    : 수동 waypoint 좌표를 target 으로 사용                               */
+/* -------------------------------------------------------------------------- */
+typedef enum
+{
+    VARIO_NAV_TARGET_START = 0u,
+    VARIO_NAV_TARGET_WP
+} vario_nav_target_mode_t;
+
+/* -------------------------------------------------------------------------- */
 /* Viewport publish API                                                        */
 /*                                                                            */
 /* 이 API 는 "UI 엔진 bridge" 가 현재 프레임에서 VARIO renderer 가 사용할        */
@@ -68,6 +94,26 @@ void Vario_Display_DrawTextCentered(u8g2_t *u8g2,
                                     int16_t center_x,
                                     int16_t y_baseline,
                                     const char *text);
+
+/* -------------------------------------------------------------------------- */
+/* 공통 Flight UI renderer                                                     */
+/*                                                                            */
+/* Screen1/2/3 wrapper 는 이 함수를 호출한다.                                  */
+/* 실제 계기판 shell, 사이드 바, 숫자, 나침반, breadcrumb trail 은 이 함수가   */
+/* 한 곳에서 관리한다.                                                         */
+/* -------------------------------------------------------------------------- */
+void Vario_Display_RenderFlightPage(u8g2_t *u8g2, vario_flight_page_mode_t mode);
+
+/* -------------------------------------------------------------------------- */
+/* Dynamic UI control                                                          */
+/*                                                                            */
+/* - target mode 는 추후 버튼/설정에서 바꾸기 쉽도록 setter 를 노출한다.       */
+/* - manual WP 좌표도 display 계층 내부에서 바로 바꿀 수 있게 분리한다.        */
+/* -------------------------------------------------------------------------- */
+void Vario_Display_SetNavTargetMode(vario_nav_target_mode_t mode);
+vario_nav_target_mode_t Vario_Display_GetNavTargetMode(void);
+void Vario_Display_SetWaypointManual(int32_t lat_e7, int32_t lon_e7, bool valid);
+void Vario_Display_ResetDynamicMetrics(void);
 
 /* -------------------------------------------------------------------------- */
 /* 개발용 raw overlay                                                          */
