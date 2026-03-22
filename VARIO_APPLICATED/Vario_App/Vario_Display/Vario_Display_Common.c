@@ -1606,6 +1606,158 @@ static void vario_display_draw_decimal_value(u8g2_t *u8g2,
     u8g2_SetFontPosBaseline(u8g2);
 }
 
+/* -------------------------------------------------------------------------- */
+/* 현재 VARIO 큰 숫자 전용 fixed-slot renderer                                  */
+/*                                                                            */
+/* 사용자가 요구한 규칙                                                        */
+/* 1) 10의 자리 칸은 "항상 예약"해 둔다.                                       */
+/* 2) 값이 1.0 이어도 tens 칸은 남아 있고, 실제 숫자는 ones 칸에만 그린다.       */
+/* 3) 값이 0.x 일 때는 ones 칸에 반드시 '0' 을 그린다.                         */
+/* 4) 즉, "leading zero 제거"는 tens 자리만 숨기고, decimal 직전 0 은 숨기지   */
+/*    않는다.                                                                  */
+/*                                                                            */
+/* 이 helper 는 current VARIO 큰 숫자 블록에만 쓰고, 다른 숫자 UI 는 건드리지   */
+/* 않는다.                                                                     */
+/* -------------------------------------------------------------------------- */
+static void vario_display_draw_fixed_vario_current_value(u8g2_t *u8g2,
+                                                         int16_t box_x,
+                                                         int16_t box_y,
+                                                         int16_t box_w,
+                                                         int16_t box_h,
+                                                         const char *value_text)
+{
+    char    sign[4];
+    char    whole[16];
+    char    frac[4];
+    char    digit_ch[2];
+    size_t  whole_len;
+    int16_t digit_w;
+    int16_t frac_w;
+    int16_t main_h;
+    int16_t frac_h;
+    int16_t whole_top;
+    int16_t frac_top;
+    int16_t draw_x;
+    int16_t frac_x;
+
+    if ((u8g2 == NULL) || (value_text == NULL))
+    {
+        return;
+    }
+
+    memset(sign, 0, sizeof(sign));
+    memset(whole, 0, sizeof(whole));
+    memset(frac, 0, sizeof(frac));
+    memset(digit_ch, 0, sizeof(digit_ch));
+
+    vario_display_split_decimal_value(value_text,
+                                      sign,
+                                      sizeof(sign),
+                                      whole,
+                                      sizeof(whole),
+                                      frac,
+                                      sizeof(frac));
+
+    /* ---------------------------------------------------------------------- */
+    /* current VARIO block 는 absolute value 만 그리므로 sign 은 사용하지 않는다.*/
+    /* decimal 이 없거나 digits 가 box 설계보다 길면, 기존 generic renderer 로   */
+    /* 안전하게 되돌린다.                                                      */
+    /* ---------------------------------------------------------------------- */
+    if ((sign[0] != '\0') || (frac[0] == '\0'))
+    {
+        vario_display_draw_decimal_value(u8g2,
+                                         box_x,
+                                         box_y,
+                                         box_w,
+                                         box_h,
+                                         VARIO_UI_ALIGN_LEFT,
+                                         VARIO_UI_FONT_BOTTOM_MAIN,
+                                         VARIO_UI_FONT_BOTTOM_FRAC,
+                                         value_text);
+        return;
+    }
+
+    whole_len = strlen(whole);
+    if (whole_len == 0u)
+    {
+        snprintf(whole, sizeof(whole), "0");
+        whole_len = 1u;
+    }
+
+    if (whole_len > 2u)
+    {
+        vario_display_draw_decimal_value(u8g2,
+                                         box_x,
+                                         box_y,
+                                         box_w,
+                                         box_h,
+                                         VARIO_UI_ALIGN_LEFT,
+                                         VARIO_UI_FONT_BOTTOM_MAIN,
+                                         VARIO_UI_FONT_BOTTOM_FRAC,
+                                         value_text);
+        return;
+    }
+
+    digit_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_BOTTOM_MAIN, "0");
+    frac_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_BOTTOM_FRAC, frac);
+    if ((digit_w <= 0) || (frac_w <= 0))
+    {
+        vario_display_draw_decimal_value(u8g2,
+                                         box_x,
+                                         box_y,
+                                         box_w,
+                                         box_h,
+                                         VARIO_UI_ALIGN_LEFT,
+                                         VARIO_UI_FONT_BOTTOM_MAIN,
+                                         VARIO_UI_FONT_BOTTOM_FRAC,
+                                         value_text);
+        return;
+    }
+
+    draw_x = box_x;
+    main_h = vario_display_get_font_height(u8g2, VARIO_UI_FONT_BOTTOM_MAIN);
+    frac_h = vario_display_get_font_height(u8g2, VARIO_UI_FONT_BOTTOM_FRAC);
+    if (main_h <= 0)
+    {
+        main_h = box_h;
+    }
+    if (frac_h <= 0)
+    {
+        frac_h = box_h;
+    }
+
+    whole_top = box_y;
+    if (box_h > main_h)
+    {
+        whole_top = (int16_t)(box_y + ((box_h - main_h) / 2));
+    }
+    frac_top = (int16_t)(whole_top + VARIO_UI_DECIMAL_FRAC_TOP_BIAS_Y);
+    frac_x = (int16_t)(draw_x + (digit_w * 2) + VARIO_UI_DECIMAL_FRAC_GAP_X);
+
+    u8g2_SetFontPosTop(u8g2);
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_BOTTOM_MAIN);
+
+    /* tens slot: 10 이상일 때만 그림. 1.x / 0.x 에서는 빈칸만 예약해 둔다. */
+    if (whole_len >= 2u)
+    {
+        digit_ch[0] = whole[0];
+        digit_ch[1] = '\0';
+        u8g2_DrawStr(u8g2, draw_x, whole_top, digit_ch);
+    }
+
+    /* ones slot: 0.x 일 때도 반드시 '0' 을 보여야 하므로 항상 마지막 digit 을 그림. */
+    digit_ch[0] = whole[whole_len - 1u];
+    digit_ch[1] = '\0';
+    u8g2_DrawStr(u8g2, (int16_t)(draw_x + digit_w), whole_top, digit_ch);
+
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_BOTTOM_FRAC);
+    u8g2_DrawStr(u8g2, frac_x, frac_top, frac);
+    u8g2_SetFontPosBaseline(u8g2);
+
+    (void)box_w;
+}
+
+
 
 static void vario_display_draw_top_left_metrics(u8g2_t *u8g2,
                                                 const vario_viewport_t *v,
@@ -1613,6 +1765,7 @@ static void vario_display_draw_top_left_metrics(u8g2_t *u8g2,
 {
     char    glide_text[12];
     int16_t x;
+    int16_t top_y;
     int16_t suffix_x;
 
     if ((u8g2 == NULL) || (v == NULL) || (rt == NULL))
@@ -1621,25 +1774,26 @@ static void vario_display_draw_top_left_metrics(u8g2_t *u8g2,
     }
 
     x = (int16_t)(v->x + VARIO_UI_SIDE_BAR_W + VARIO_UI_TOP_LEFT_PAD_X);
+    top_y = v->y;
 
     /* ---------------------------------------------------------------------- */
     /* 좌상단 활공비                                                           */
-    /* - 기존 FLT TIME 자리는 비우고, GLD label 도 제거한다.                   */
-    /* - 값은 ALT2/ALT3 와 같은 글꼴, suffix 는 단위 글꼴을 사용한다.           */
+    /* - 다른 UI 는 그대로 두고, 활공비 블록만 "상단에 딱 붙는" top align 으로    */
+    /*   다시 그린다.                                                          */
+    /* - 값/":1" 둘 다 ALT2/ALT3 와 같은 계열 글꼴을 유지한다.                  */
+    /* - baseline draw 를 쓰면 글꼴 ascent 만큼 아래로 내려가 보이므로,           */
+    /*   여기서는 font position 을 top 으로 바꿔 정확히 화면 상단에 맞춘다.      */
     /* ---------------------------------------------------------------------- */
     vario_display_format_glide_ratio(glide_text, sizeof(glide_text), rt);
+
+    u8g2_SetFontPosTop(u8g2);
     u8g2_SetFont(u8g2, VARIO_UI_FONT_ALT2_VALUE);
-    u8g2_DrawStr(u8g2,
-                 x,
-                 (int16_t)(v->y + VARIO_UI_TOP_GLD_BASELINE_Y),
-                 glide_text);
+    u8g2_DrawStr(u8g2, x, top_y, glide_text);
 
     suffix_x = (int16_t)(x + u8g2_GetStrWidth(u8g2, glide_text) + 2);
     u8g2_SetFont(u8g2, VARIO_UI_FONT_ALT2_UNIT);
-    u8g2_DrawStr(u8g2,
-                 suffix_x,
-                 (int16_t)(v->y + VARIO_UI_TOP_GLD_BASELINE_Y),
-                 ":1");
+    u8g2_DrawStr(u8g2, suffix_x, top_y, ":1");
+    u8g2_SetFontPosBaseline(u8g2);
 }
 
 
@@ -1863,9 +2017,6 @@ static void vario_display_draw_vario_side_bar(u8g2_t *u8g2,
                                               float instant_vario_mps,
                                               float average_vario_mps)
 {
-    uint8_t first_level;
-    uint8_t count;
-    bool    positive;
     uint8_t level;
     int16_t slot_y;
     int16_t slot_h;
@@ -1874,6 +2025,14 @@ static void vario_display_draw_vario_side_bar(u8g2_t *u8g2,
     int16_t avg_x;
     int16_t tick_x;
     int16_t center_y;
+    int16_t zero_top_y;
+    int16_t zero_bottom_y;
+    int16_t up_extent_px;
+    int16_t down_extent_px;
+    int16_t instant_fill_px;
+    int16_t avg_fill_px;
+    float   clamped_instant;
+    float   clamped_average;
     uint8_t thick_i;
 
     if ((u8g2 == NULL) || (v == NULL))
@@ -1887,8 +2046,11 @@ static void vario_display_draw_vario_side_bar(u8g2_t *u8g2,
 
     /* ---------------------------------------------------------------------- */
     /* left VARIO scale                                                        */
-    /* - 작은/큰 눈금을 왼쪽 벽에 딱 붙인다.                                   */
-    /* - 0.5m/s minor, 1.0m/s major, center zero line 3px thickness.           */
+    /* - 눈금 모양/위치는 기존과 동일하게 유지한다.                             */
+    /* - fill 만 0.1m/s / 총 80단계(상하 각 40단계) 로 재계산한다.              */
+    /* - top = +4.0m/s, bottom = -4.0m/s 로 saturate 한다.                     */
+    /* - 숫자와는 다른 fast path source(rt->fast_vario_bar_mps 계열)를 이미     */
+    /*   상위에서 받아온 instant_vario_mps 에 사용한다.                        */
     /* ---------------------------------------------------------------------- */
     for (level = 0u; level < VARIO_UI_VARIO_HALFSTEP_COUNT; ++level)
     {
@@ -1905,33 +2067,92 @@ static void vario_display_draw_vario_side_bar(u8g2_t *u8g2,
     }
 
     center_y = (int16_t)(v->y + (v->h / 2));
+    zero_top_y = (int16_t)(center_y - (VARIO_UI_VARIO_ZERO_LINE_THICKNESS / 2));
+    zero_bottom_y = (int16_t)(zero_top_y + VARIO_UI_VARIO_ZERO_LINE_THICKNESS - 1);
+    up_extent_px = (int16_t)(zero_top_y - v->y);
+    down_extent_px = (int16_t)((v->y + v->h - 1) - zero_bottom_y);
+    if (up_extent_px < 0)
+    {
+        up_extent_px = 0;
+    }
+    if (down_extent_px < 0)
+    {
+        down_extent_px = 0;
+    }
+
+    clamped_instant = vario_display_clampf(instant_vario_mps, -4.0f, 4.0f);
+    clamped_average = vario_display_clampf(average_vario_mps, -4.0f, 4.0f);
+
+    instant_fill_px = (int16_t)lroundf((vario_display_absf(clamped_instant) * 10.0f) *
+                                       ((float)((clamped_instant >= 0.0f) ? up_extent_px : down_extent_px) / 40.0f));
+    avg_fill_px = (int16_t)lroundf((vario_display_absf(clamped_average) * 10.0f) *
+                                   ((float)((clamped_average >= 0.0f) ? up_extent_px : down_extent_px) / 40.0f));
+
+    if ((vario_display_absf(clamped_instant) > 0.0f) && (instant_fill_px <= 0))
+    {
+        instant_fill_px = 1;
+    }
+    if ((vario_display_absf(clamped_average) > 0.0f) && (avg_fill_px <= 0))
+    {
+        avg_fill_px = 1;
+    }
+
+    if (clamped_instant > 0.0f)
+    {
+        int16_t y = (int16_t)(zero_top_y - instant_fill_px);
+        if (y < v->y)
+        {
+            y = v->y;
+        }
+        if (instant_fill_px > 0)
+        {
+            u8g2_DrawBox(u8g2, instant_x, y, VARIO_UI_GAUGE_INSTANT_W, instant_fill_px);
+        }
+    }
+    else if (clamped_instant < 0.0f)
+    {
+        int16_t y = (int16_t)(zero_bottom_y + 1);
+        if ((y + instant_fill_px) > (v->y + v->h))
+        {
+            instant_fill_px = (int16_t)((v->y + v->h) - y);
+        }
+        if (instant_fill_px > 0)
+        {
+            u8g2_DrawBox(u8g2, instant_x, y, VARIO_UI_GAUGE_INSTANT_W, instant_fill_px);
+        }
+    }
+
+    if (clamped_average > 0.0f)
+    {
+        int16_t y = (int16_t)(zero_top_y - avg_fill_px);
+        if (y < v->y)
+        {
+            y = v->y;
+        }
+        if (avg_fill_px > 0)
+        {
+            u8g2_DrawBox(u8g2, avg_x, y, VARIO_UI_GAUGE_AVG_W, avg_fill_px);
+        }
+    }
+    else if (clamped_average < 0.0f)
+    {
+        int16_t y = (int16_t)(zero_bottom_y + 1);
+        if ((y + avg_fill_px) > (v->y + v->h))
+        {
+            avg_fill_px = (int16_t)((v->y + v->h) - y);
+        }
+        if (avg_fill_px > 0)
+        {
+            u8g2_DrawBox(u8g2, avg_x, y, VARIO_UI_GAUGE_AVG_W, avg_fill_px);
+        }
+    }
+
+    /* center zero line 은 fill 후에 다시 덮어 그려 기준선이 항상 살아 있게 한다. */
     for (thick_i = 0u; thick_i < VARIO_UI_VARIO_ZERO_LINE_THICKNESS; ++thick_i)
     {
         int16_t zero_y;
-        zero_y = (int16_t)(center_y - 1 + (int16_t)thick_i);
+        zero_y = (int16_t)(zero_top_y + (int16_t)thick_i);
         u8g2_DrawHLine(u8g2, left_bar_x, zero_y, VARIO_UI_VARIO_ZERO_LINE_W);
-    }
-
-    vario_display_compute_vario_fill(instant_vario_mps, &first_level, &count, &positive);
-    for (level = first_level; level < (uint8_t)(first_level + count); ++level)
-    {
-        vario_display_get_vario_slot_rect(v, positive, level, &slot_y, &slot_h);
-        u8g2_DrawBox(u8g2,
-                     instant_x,
-                     (slot_h > 1) ? (slot_y + 1) : slot_y,
-                     VARIO_UI_GAUGE_INSTANT_W,
-                     (slot_h > 1) ? (slot_h - 1) : slot_h);
-    }
-
-    vario_display_compute_vario_fill(average_vario_mps, &first_level, &count, &positive);
-    for (level = first_level; level < (uint8_t)(first_level + count); ++level)
-    {
-        vario_display_get_vario_slot_rect(v, positive, level, &slot_y, &slot_h);
-        u8g2_DrawBox(u8g2,
-                     avg_x,
-                     (slot_h > 1) ? (slot_y + 1) : slot_y,
-                     VARIO_UI_GAUGE_AVG_W,
-                     (slot_h > 1) ? (slot_h - 1) : slot_h);
     }
 }
 
@@ -1941,7 +2162,6 @@ static void vario_display_draw_gs_side_bar(u8g2_t *u8g2,
                                            float instant_speed_kmh,
                                            float average_speed_kmh)
 {
-    uint8_t fill_steps;
     uint8_t level;
     int16_t slot_y;
     int16_t slot_h;
@@ -1949,6 +2169,8 @@ static void vario_display_draw_gs_side_bar(u8g2_t *u8g2,
     int16_t instant_x;
     int16_t avg_x;
     int16_t arrow_y;
+    int16_t fill_h;
+    float   clamped_speed;
     float   clamped_avg_speed;
     float   ratio;
     uint8_t tick_w;
@@ -1965,8 +2187,9 @@ static void vario_display_draw_gs_side_bar(u8g2_t *u8g2,
 
     /* ---------------------------------------------------------------------- */
     /* GS right side scale                                                     */
-    /* - 작은/큰 눈금을 오른쪽 벽에 딱 붙인다.                                  */
-    /* - 10km/h bottom, 70km/h top, 5km/h minor, 10km/h major.                 */
+    /* - 눈금 모양/위치는 기존과 동일하게 유지한다.                             */
+    /* - fill 만 10~70km/h 전체 높이로 연속 스케일링한다.                       */
+    /* - source 는 숫자용 GS 와 분리된 fast GS path 값을 상위에서 받는다.       */
     /* ---------------------------------------------------------------------- */
     for (level = 0u; level < VARIO_UI_GS_STEP_COUNT; ++level)
     {
@@ -1976,15 +2199,30 @@ static void vario_display_draw_gs_side_bar(u8g2_t *u8g2,
         u8g2_DrawHLine(u8g2, tick_x, slot_y, tick_w);
     }
 
-    fill_steps = vario_display_compute_gs_fill_steps(instant_speed_kmh);
-    for (level = 0u; level < fill_steps; ++level)
+    clamped_speed = vario_display_clampf(instant_speed_kmh,
+                                         VARIO_UI_GS_MIN_VISIBLE_KMH,
+                                         VARIO_UI_GS_MAX_KMH);
+    if (instant_speed_kmh >= VARIO_UI_GS_MIN_VISIBLE_KMH)
     {
-        vario_display_get_gs_slot_rect(v, level, &slot_y, &slot_h);
-        u8g2_DrawBox(u8g2,
-                     instant_x,
-                     (slot_h > 1) ? (slot_y + 1) : slot_y,
-                     VARIO_UI_GAUGE_INSTANT_W,
-                     (slot_h > 1) ? (slot_h - 1) : slot_h);
+        ratio = (clamped_speed - VARIO_UI_GS_MIN_VISIBLE_KMH) /
+                (VARIO_UI_GS_MAX_KMH - VARIO_UI_GS_MIN_VISIBLE_KMH);
+        fill_h = (int16_t)lroundf(ratio * (float)v->h);
+        if ((ratio > 0.0f) && (fill_h <= 0))
+        {
+            fill_h = 1;
+        }
+        if (fill_h > v->h)
+        {
+            fill_h = v->h;
+        }
+        if (fill_h > 0)
+        {
+            u8g2_DrawBox(u8g2,
+                         instant_x,
+                         (int16_t)(v->y + v->h - fill_h),
+                         VARIO_UI_GAUGE_INSTANT_W,
+                         fill_h);
+        }
     }
 
     if (average_speed_kmh >= VARIO_UI_GS_MIN_VISIBLE_KMH)
@@ -2048,10 +2286,14 @@ static void vario_display_draw_vario_value_block(u8g2_t *u8g2,
     value_box_y = (int16_t)(v->y + ((v->h - value_box_h) / 2));
 
     vario_display_format_vario_value_abs(value_text, sizeof(value_text), rt->baro_vario_mps);
-    if (Vario_Settings_Get()->vspeed_unit != VARIO_VSPEED_UNIT_FPM)
-    {
-        vario_display_trim_leading_zero(value_text);
-    }
+
+    /* ---------------------------------------------------------------------- */
+    /* 현재 큰 VARIO 값은 leading zero 전체를 지우지 않는다.                    */
+    /* - 사용자가 원하는 건 ".5" 가 아니라 "[blank]0 5" 구조다.               */
+    /* - 즉, tens slot 만 빈칸으로 두고 decimal 직전 ones zero 는 살린다.       */
+    /* - 그래서 여기서는 trim helper 를 호출하지 않고, draw 단계에서            */
+    /*   fixed-slot renderer 가 tens slot 만 숨기게 한다.                      */
+    /* ---------------------------------------------------------------------- */
     vario_display_format_peak_vario(max_text, sizeof(max_text), rt->max_top_vario_mps);
 
     if ((settings == NULL) || (settings->show_max_vario != 0u))
@@ -2093,15 +2335,12 @@ static void vario_display_draw_vario_value_block(u8g2_t *u8g2,
         }
     }
 
-    vario_display_draw_decimal_value(u8g2,
-                                     value_box_x,
-                                     value_box_y,
-                                     VARIO_UI_BOTTOM_BOX_W,
-                                     value_box_h,
-                                     VARIO_UI_ALIGN_LEFT,
-                                     VARIO_UI_FONT_BOTTOM_MAIN,
-                                     VARIO_UI_FONT_BOTTOM_FRAC,
-                                     value_text);
+    vario_display_draw_fixed_vario_current_value(u8g2,
+                                                 value_box_x,
+                                                 value_box_y,
+                                                 VARIO_UI_BOTTOM_BOX_W,
+                                                 value_box_h,
+                                                 value_text);
 }
 
 
