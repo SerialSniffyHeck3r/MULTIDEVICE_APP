@@ -11,6 +11,33 @@
 #include <string.h>
 
 /* -------------------------------------------------------------------------- */
+/* 아이콘 fallback                                                              */
+/*                                                                            */
+/* 일부 로컬 프로젝트의 Vario_Icon_Resources.h 는 저장소 최신본보다 오래되어      */
+/* ALT1 / GS AVG 아이콘 심볼이 없을 수 있다.                                    */
+/*                                                                            */
+/* 사용자가 이 .c 파일 하나만 교체해도 빌드되게 하려고,                          */
+/* "관련 매크로가 없을 때만" 동일 비트맵을 여기서 fallback 으로 선언한다.         */
+/* 헤더가 최신이면 아래 블록은 전부 건너뛴다.                                   */
+/* -------------------------------------------------------------------------- */
+#ifndef VARIO_ICON_ALT1_WIDTH
+#define VARIO_ICON_ALT1_WIDTH  9
+#define VARIO_ICON_ALT1_HEIGHT 9
+static const unsigned char vario_icon_alt1_bits[] = {
+    0x10,0xfe,0x38,0xfe,0x6c,0xfe,0xc6,0xfe,0x00,0xfe,0x00,0xfe,
+    0xaa,0xfe,0xff,0xff,0xff,0xff
+};
+#endif
+
+#ifndef VARIO_ICON_GS_AVG_WIDTH
+#define VARIO_ICON_GS_AVG_WIDTH  5
+#define VARIO_ICON_GS_AVG_HEIGHT 5
+static const unsigned char vario_icon_gs_avg_bits[] = {
+    0xe7,0xee,0xfc,0xee,0xe7
+};
+#endif
+
+/* -------------------------------------------------------------------------- */
 /* 기본 viewport 규격                                                          */
 /*                                                                            */
 /* 이 값들은 "아직 UI 엔진 bridge 가 실제 viewport 를 주입하기 전" 의 fallback   */
@@ -54,7 +81,7 @@
 /* -------------------------------------------------------------------------- */
 #define VARIO_UI_SIDE_BAR_W                       14
 #define VARIO_UI_GAUGE_INSTANT_W                   8
-#define VARIO_UI_GAUGE_AVG_W                       5
+#define VARIO_UI_GAUGE_AVG_W                       4
 #define VARIO_UI_GAUGE_GAP_W                       1
 
 /* -------------------------------------------------------------------------- */
@@ -110,15 +137,22 @@
 /* - main number box 는 고정 폭/고정 높이이며 decimal 은 dot 없이 top-frac 로   */
 /*   그린다.                                                                   */
 /* -------------------------------------------------------------------------- */
-#define VARIO_UI_BOTTOM_BOX_W                     92
+#define VARIO_UI_BOTTOM_BOX_W                     64
 #define VARIO_UI_BOTTOM_BOX_H                     24
-#define VARIO_UI_BOTTOM_BOX_BOTTOM_PAD             0
+#define VARIO_UI_BOTTOM_BOX_BOTTOM_PAD             4
 #define VARIO_UI_BOTTOM_META_LABEL_BASELINE_Y     94
 #define VARIO_UI_BOTTOM_META_VALUE_BASELINE_Y    102
 #define VARIO_UI_BOTTOM_VALUE_BASELINE_DY         21
+#define VARIO_UI_BOTTOM_META_BOX_W                32
+#define VARIO_UI_BOTTOM_META_GAP_Y                 2
 #define VARIO_UI_BOTTOM_VARIO_X_PAD                4
 #define VARIO_UI_BOTTOM_GS_X_PAD                   4
 #define VARIO_UI_BOTTOM_ICON_GAP_Y                 1
+#define VARIO_UI_ALT_ROW_GAP_Y                     2
+#define VARIO_UI_ALT_GRAPH_W                      54
+#define VARIO_UI_ALT_GRAPH_H                      14
+#define VARIO_UI_ALT_GRAPH_RIGHT_PAD               2
+#define VARIO_UI_ALT_GRAPH_GAP_Y                   2
 
 /* -------------------------------------------------------------------------- */
 /* page 3 stub                                                                 */
@@ -140,7 +174,7 @@
 #define VARIO_UI_GS_STEP_COUNT                    10u
 #define VARIO_UI_GS_STEP_KMH                       5.0f
 #define VARIO_UI_GS_MIN_VISIBLE_KMH               10.0f
-#define VARIO_UI_GS_MAX_KMH                       60.0f
+#define VARIO_UI_GS_MAX_KMH                       70.0f
 #define VARIO_UI_SCALE_MAJOR_W                    14u
 #define VARIO_UI_SCALE_MINOR_W                     8u
 
@@ -151,6 +185,7 @@
 /* - gap/top bias 를 바꾸면 frac digit 의 떠 있는 느낌을 조절할 수 있다.       */
 /* -------------------------------------------------------------------------- */
 #define VARIO_UI_DECIMAL_FRAC_GAP_X                1
+#define VARIO_UI_DECIMAL_SIGN_GAP_X                1
 #define VARIO_UI_DECIMAL_FRAC_TOP_BIAS_Y           0
 
 /* -------------------------------------------------------------------------- */
@@ -177,24 +212,25 @@
 /* -------------------------------------------------------------------------- */
 #define VARIO_UI_FONT_TOP_FLT_VALUE               u8g2_font_9x15_mf
 #define VARIO_UI_FONT_TOP_GLD_LABEL               u8g2_font_6x12_mf
-#define VARIO_UI_FONT_TOP_GLD_VALUE               u8g2_font_9x15_mf
+#define VARIO_UI_FONT_TOP_GLD_VALUE               u8g2_font_helvB10_tf
 #define VARIO_UI_FONT_TOP_GLD_SUFFIX              u8g2_font_5x8_tr
 #define VARIO_UI_FONT_TOP_CLOCK                   u8g2_font_6x12_mf
 
-#define VARIO_UI_FONT_ALT1_VALUE                  u8g2_font_logisoso20_tf
-#define VARIO_UI_FONT_ALT1_UNIT                   u8g2_font_5x8_tr
-#define VARIO_UI_FONT_ALT2_VALUE                  u8g2_font_9x15_mf
-#define VARIO_UI_FONT_ALT2_UNIT                   u8g2_font_5x8_tr
-#define VARIO_UI_FONT_ALT3_VALUE                  u8g2_font_6x12_mf
-#define VARIO_UI_FONT_ALT3_UNIT                   u8g2_font_5x8_tr
+#define VARIO_UI_FONT_ALT1_VALUE                  u8g2_font_logisoso24_tn
+#define VARIO_UI_FONT_ALT1_UNIT                   u8g2_font_5x7_tf
+#define VARIO_UI_FONT_ALT2_VALUE                  u8g2_font_7x14B_tf
+#define VARIO_UI_FONT_ALT2_UNIT                   u8g2_font_5x7_tf
+#define VARIO_UI_FONT_ALT3_VALUE                  u8g2_font_7x14B_tf
+#define VARIO_UI_FONT_ALT3_UNIT                   u8g2_font_5x7_tf
 
 #define VARIO_UI_FONT_NAV_LINE                    u8g2_font_6x12_mf
 #define VARIO_UI_FONT_COMPASS_CARDINAL            u8g2_font_5x8_tr
 
-#define VARIO_UI_FONT_BOTTOM_MAIN                 u8g2_font_10x20_mf
-#define VARIO_UI_FONT_BOTTOM_FRAC                u8g2_font_5x8_tr
+#define VARIO_UI_FONT_BOTTOM_MAIN                 u8g2_font_logisoso24_tn
+#define VARIO_UI_FONT_BOTTOM_SIGN                 u8g2_font_7x14B_tf
+#define VARIO_UI_FONT_BOTTOM_FRAC                 u8g2_font_7x14B_tf
 #define VARIO_UI_FONT_BOTTOM_MAX_LABEL            u8g2_font_4x6_tf
-#define VARIO_UI_FONT_BOTTOM_MAX_VALUE            u8g2_font_5x8_tr
+#define VARIO_UI_FONT_BOTTOM_MAX_VALUE            u8g2_font_helvB08_tf
 
 #define VARIO_UI_FONT_STUB_TITLE                  u8g2_font_10x20_mf
 #define VARIO_UI_FONT_STUB_SUB                    u8g2_font_6x12_mf
@@ -215,7 +251,11 @@ typedef struct
     uint8_t  count;
     uint32_t last_publish_ms;
     uint32_t last_flight_start_ms;
+    uint32_t last_bar_update_ms;
     float    top_speed_kmh;
+    float    filtered_vario_bar_mps;
+    float    filtered_gs_bar_kmh;
+    bool     vario_bar_zero_latched;
     vario_nav_target_mode_t nav_mode;
     int32_t  wp_lat_e7;
     int32_t  wp_lon_e7;
@@ -393,6 +433,145 @@ static int16_t vario_display_measure_text(u8g2_t *u8g2, const uint8_t *font, con
 
     u8g2_SetFont(u8g2, font);
     return (int16_t)u8g2_GetStrWidth(u8g2, text);
+}
+
+static int16_t vario_display_get_font_height(u8g2_t *u8g2, const uint8_t *font)
+{
+    int16_t ascent;
+    int16_t descent;
+
+    if ((u8g2 == NULL) || (font == NULL))
+    {
+        return 0;
+    }
+
+    u8g2_SetFont(u8g2, font);
+    ascent = (int16_t)u8g2_GetAscent(u8g2);
+    descent = (int16_t)u8g2_GetDescent(u8g2);
+    return (int16_t)(ascent - descent);
+}
+
+static void vario_display_draw_text_box_top(u8g2_t *u8g2,
+                                            int16_t box_x,
+                                            int16_t top_y,
+                                            int16_t box_w,
+                                            vario_ui_align_t align,
+                                            const uint8_t *font,
+                                            const char *text)
+{
+    int16_t text_w;
+    int16_t draw_x;
+
+    if ((u8g2 == NULL) || (font == NULL) || (text == NULL))
+    {
+        return;
+    }
+
+    u8g2_SetFontPosTop(u8g2);
+    u8g2_SetFont(u8g2, font);
+    text_w = (int16_t)u8g2_GetStrWidth(u8g2, text);
+
+    switch (align)
+    {
+        case VARIO_UI_ALIGN_LEFT:
+            draw_x = box_x;
+            break;
+
+        case VARIO_UI_ALIGN_CENTER:
+            draw_x = (int16_t)(box_x + ((box_w - text_w) / 2));
+            break;
+
+        case VARIO_UI_ALIGN_RIGHT:
+        default:
+            draw_x = (int16_t)(box_x + box_w - text_w);
+            break;
+    }
+
+    if (draw_x < box_x)
+    {
+        draw_x = box_x;
+    }
+
+    u8g2_DrawStr(u8g2, draw_x, top_y, text);
+    u8g2_SetFontPosBaseline(u8g2);
+}
+
+static void vario_display_trim_leading_zero(char *text)
+{
+    if (text == NULL)
+    {
+        return;
+    }
+
+    if ((text[0] == '0') && (text[1] == '.'))
+    {
+        memmove(text, text + 1, strlen(text));
+    }
+    else if (((text[0] == '-') || (text[0] == '+')) &&
+             (text[1] == '0') &&
+             (text[2] == '.'))
+    {
+        memmove(text + 1, text + 2, strlen(text + 2) + 1u);
+    }
+}
+
+static void vario_display_split_decimal_value(const char *value_text,
+                                              char *sign_buf,
+                                              size_t sign_len,
+                                              char *whole_buf,
+                                              size_t whole_len,
+                                              char *frac_buf,
+                                              size_t frac_len)
+{
+    const char *digits;
+    const char *dot_pos;
+    size_t      whole_chars;
+
+    if ((value_text == NULL) ||
+        (sign_buf == NULL) || (sign_len == 0u) ||
+        (whole_buf == NULL) || (whole_len == 0u) ||
+        (frac_buf == NULL) || (frac_len == 0u))
+    {
+        return;
+    }
+
+    sign_buf[0] = '\0';
+    whole_buf[0] = '\0';
+    frac_buf[0] = '\0';
+
+    digits = value_text;
+    if ((*digits == '-') || (*digits == '+'))
+    {
+        sign_buf[0] = *digits;
+        if (sign_len > 1u)
+        {
+            sign_buf[1] = '\0';
+        }
+        ++digits;
+    }
+
+    dot_pos = strchr(digits, '.');
+    if (dot_pos == NULL)
+    {
+        snprintf(whole_buf, whole_len, "%s", digits);
+    }
+    else
+    {
+        whole_chars = (size_t)(dot_pos - digits);
+        if (whole_chars >= whole_len)
+        {
+            whole_chars = whole_len - 1u;
+        }
+        memcpy(whole_buf, digits, whole_chars);
+        whole_buf[whole_chars] = '\0';
+
+        if ((dot_pos[1] != '\0') && (frac_len > 1u))
+        {
+            frac_buf[0] = dot_pos[1];
+            frac_buf[1] = '\0';
+        }
+    }
+
 }
 
 static void vario_display_draw_xbm(u8g2_t *u8g2,
@@ -652,6 +831,43 @@ static void vario_display_format_vario_small_abs(char *buf, size_t buf_len, floa
     }
 }
 
+static void vario_display_format_peak_speed(char *buf, size_t buf_len, float speed_kmh)
+{
+    if ((buf == NULL) || (buf_len == 0u))
+    {
+        return;
+    }
+
+    if (speed_kmh <= 0.05f)
+    {
+        snprintf(buf, buf_len, "--.-");
+        return;
+    }
+
+    vario_display_format_speed_small(buf, buf_len, speed_kmh);
+    vario_display_trim_leading_zero(buf);
+}
+
+static void vario_display_format_peak_vario(char *buf, size_t buf_len, float vario_mps)
+{
+    if ((buf == NULL) || (buf_len == 0u))
+    {
+        return;
+    }
+
+    if (vario_display_absf(vario_mps) <= 0.05f)
+    {
+        snprintf(buf, buf_len, "--.-");
+        return;
+    }
+
+    vario_display_format_vario_small_abs(buf, buf_len, vario_mps);
+    if (Vario_Settings_Get()->vspeed_unit != VARIO_VSPEED_UNIT_FPM)
+    {
+        vario_display_trim_leading_zero(buf);
+    }
+}
+
 static void vario_display_format_glide_ratio(char *buf, size_t buf_len, const vario_runtime_t *rt)
 {
     float sink_mps;
@@ -871,6 +1087,117 @@ static void vario_display_get_average_values(const vario_runtime_t *rt,
                                  window_ms,
                                  rt->ground_speed_kmh,
                                  out_avg_speed_kmh);
+}
+
+
+static void vario_display_get_bar_display_values(const vario_runtime_t *rt,
+                                                 float average_vario_mps,
+                                                 float average_speed_kmh,
+                                                 float *out_vario_bar_mps,
+                                                 float *out_avg_vario_mps,
+                                                 float *out_gs_bar_kmh,
+                                                 float *out_avg_speed_kmh)
+{
+    float target_vario_mps;
+    float target_gs_kmh;
+    uint32_t now_ms;
+    float dt_s;
+    float innovation;
+    float tau_s;
+    float alpha;
+
+    if ((out_vario_bar_mps == NULL) || (out_avg_vario_mps == NULL) ||
+        (out_gs_bar_kmh == NULL) || (out_avg_speed_kmh == NULL))
+    {
+        return;
+    }
+
+    *out_vario_bar_mps = 0.0f;
+    *out_avg_vario_mps = average_vario_mps;
+    *out_gs_bar_kmh = 0.0f;
+    *out_avg_speed_kmh = average_speed_kmh;
+
+    if (rt == NULL)
+    {
+        return;
+    }
+
+    target_vario_mps = vario_display_clampf(rt->fast_vario_bar_mps, -8.0f, 8.0f);
+    target_gs_kmh = vario_display_clampf(rt->gs_bar_speed_kmh, 0.0f, 120.0f);
+    now_ms = (rt->last_task_ms != 0u) ? rt->last_task_ms : rt->last_publish_ms;
+
+    if ((s_vario_ui_dynamic.last_bar_update_ms == 0u) || (now_ms == 0u))
+    {
+        s_vario_ui_dynamic.filtered_vario_bar_mps = target_vario_mps;
+        s_vario_ui_dynamic.filtered_gs_bar_kmh = target_gs_kmh;
+        s_vario_ui_dynamic.vario_bar_zero_latched =
+            (vario_display_absf(target_vario_mps) < 0.08f) ? true : false;
+        s_vario_ui_dynamic.last_bar_update_ms = now_ms;
+    }
+    else if (now_ms != s_vario_ui_dynamic.last_bar_update_ms)
+    {
+        /* ------------------------------------------------------------------ */
+        /* side bar 는 숫자와 별도 경로                                        */
+        /* - 10 Hz 주기로만 갱신해서 프레임마다 덜 흔들리게 하고                */
+        /* - fast vario path 에 attack/release + zero hysteresis 를 추가한다.   */
+        /* ------------------------------------------------------------------ */
+        if ((now_ms - s_vario_ui_dynamic.last_bar_update_ms) >= 100u)
+        {
+            dt_s = ((float)(now_ms - s_vario_ui_dynamic.last_bar_update_ms)) * 0.001f;
+            dt_s = vario_display_clampf(dt_s, 0.010f, 0.250f);
+
+            innovation = target_vario_mps - s_vario_ui_dynamic.filtered_vario_bar_mps;
+            if (((target_vario_mps >= 0.0f) && (s_vario_ui_dynamic.filtered_vario_bar_mps >= 0.0f) &&
+                 (target_vario_mps > s_vario_ui_dynamic.filtered_vario_bar_mps)) ||
+                ((target_vario_mps <= 0.0f) && (s_vario_ui_dynamic.filtered_vario_bar_mps <= 0.0f) &&
+                 (target_vario_mps < s_vario_ui_dynamic.filtered_vario_bar_mps)))
+            {
+                tau_s = 0.045f;
+            }
+            else
+            {
+                tau_s = 0.110f;
+            }
+
+            alpha = dt_s / (tau_s + dt_s);
+            s_vario_ui_dynamic.filtered_vario_bar_mps += alpha * innovation;
+
+            if (s_vario_ui_dynamic.vario_bar_zero_latched != false)
+            {
+                if (vario_display_absf(target_vario_mps) > 0.18f)
+                {
+                    s_vario_ui_dynamic.vario_bar_zero_latched = false;
+                }
+                else
+                {
+                    s_vario_ui_dynamic.filtered_vario_bar_mps = 0.0f;
+                }
+            }
+            else if ((vario_display_absf(target_vario_mps) < 0.06f) &&
+                     (vario_display_absf(s_vario_ui_dynamic.filtered_vario_bar_mps) < 0.12f))
+            {
+                s_vario_ui_dynamic.vario_bar_zero_latched = true;
+                s_vario_ui_dynamic.filtered_vario_bar_mps = 0.0f;
+            }
+
+            dt_s = ((float)(now_ms - s_vario_ui_dynamic.last_bar_update_ms)) * 0.001f;
+            dt_s = vario_display_clampf(dt_s, 0.010f, 0.250f);
+            alpha = dt_s / (0.12f + dt_s);
+            s_vario_ui_dynamic.filtered_gs_bar_kmh += alpha *
+                (target_gs_kmh - s_vario_ui_dynamic.filtered_gs_bar_kmh);
+
+            s_vario_ui_dynamic.filtered_vario_bar_mps =
+                vario_display_clampf(s_vario_ui_dynamic.filtered_vario_bar_mps, -8.0f, 8.0f);
+            s_vario_ui_dynamic.filtered_gs_bar_kmh =
+                vario_display_clampf(s_vario_ui_dynamic.filtered_gs_bar_kmh, 0.0f, 120.0f);
+            s_vario_ui_dynamic.last_bar_update_ms = now_ms;
+        }
+    }
+
+    *out_vario_bar_mps = s_vario_ui_dynamic.filtered_vario_bar_mps;
+    *out_avg_vario_mps = average_vario_mps;
+    *out_gs_bar_kmh = s_vario_ui_dynamic.filtered_gs_bar_kmh;
+    *out_avg_speed_kmh = average_speed_kmh;
 }
 
 static bool vario_display_get_oldest_trail_point(const vario_runtime_t *rt,
@@ -1161,54 +1488,52 @@ static void vario_display_draw_decimal_value(u8g2_t *u8g2,
                                              const uint8_t *frac_font,
                                              const char *value_text)
 {
+    char    sign[4];
     char    whole[16];
     char    frac[4];
-    const char *dot_pos;
+    int16_t sign_w;
     int16_t whole_w;
     int16_t frac_w;
     int16_t total_w;
     int16_t draw_x;
-    int16_t bottom_y;
-    int16_t main_ascent;
-    int16_t frac_ascent;
-    int16_t whole_baseline;
-    int16_t frac_baseline;
+    int16_t main_h;
+    int16_t frac_h;
+    int16_t sign_top;
+    int16_t whole_top;
+    int16_t frac_top;
+    int16_t sign_x;
+    int16_t whole_x;
+    int16_t frac_x;
 
     if ((u8g2 == NULL) || (main_font == NULL) || (frac_font == NULL) || (value_text == NULL))
     {
         return;
     }
 
+    memset(sign, 0, sizeof(sign));
     memset(whole, 0, sizeof(whole));
     memset(frac, 0, sizeof(frac));
 
-    dot_pos = strchr(value_text, '.');
-    if (dot_pos == NULL)
-    {
-        snprintf(whole, sizeof(whole), "%s", value_text);
-    }
-    else
-    {
-        size_t whole_len;
+    vario_display_split_decimal_value(value_text,
+                                      sign,
+                                      sizeof(sign),
+                                      whole,
+                                      sizeof(whole),
+                                      frac,
+                                      sizeof(frac));
 
-        whole_len = (size_t)(dot_pos - value_text);
-        if (whole_len >= sizeof(whole))
-        {
-            whole_len = sizeof(whole) - 1u;
-        }
-        memcpy(whole, value_text, whole_len);
-        whole[whole_len] = '\0';
-
-        if (dot_pos[1] != '\0')
-        {
-            frac[0] = dot_pos[1];
-            frac[1] = '\0';
-        }
-    }
-
+    sign_w = (sign[0] != '\0') ? vario_display_measure_text(u8g2, VARIO_UI_FONT_BOTTOM_SIGN, sign) : 0;
     whole_w = vario_display_measure_text(u8g2, main_font, whole);
     frac_w = (frac[0] != '\0') ? vario_display_measure_text(u8g2, frac_font, frac) : 0;
-    total_w = (int16_t)(whole_w + ((frac[0] != '\0') ? (VARIO_UI_DECIMAL_FRAC_GAP_X + frac_w) : 0));
+    total_w = whole_w;
+    if (sign_w > 0)
+    {
+        total_w = (int16_t)(total_w + sign_w + VARIO_UI_DECIMAL_SIGN_GAP_X);
+    }
+    if (frac_w > 0)
+    {
+        total_w = (int16_t)(total_w + VARIO_UI_DECIMAL_FRAC_GAP_X + frac_w);
+    }
 
     switch (align)
     {
@@ -1231,23 +1556,51 @@ static void vario_display_draw_decimal_value(u8g2_t *u8g2,
         draw_x = box_x;
     }
 
-    bottom_y = (int16_t)(box_y + box_h - 1);
+    main_h = vario_display_get_font_height(u8g2, main_font);
+    frac_h = vario_display_get_font_height(u8g2, frac_font);
+    if (main_h <= 0)
+    {
+        main_h = box_h;
+    }
+    if (frac_h <= 0)
+    {
+        frac_h = box_h;
+    }
 
-    u8g2_SetFontPosBaseline(u8g2);
+    whole_top = box_y;
+    if (box_h > main_h)
+    {
+        whole_top = (int16_t)(box_y + ((box_h - main_h) / 2));
+    }
+    sign_top = box_y;
+    if (box_h > frac_h)
+    {
+        sign_top = (int16_t)(box_y + ((box_h - frac_h) / 2));
+    }
+    frac_top = (int16_t)(whole_top + VARIO_UI_DECIMAL_FRAC_TOP_BIAS_Y);
+
+    sign_x = draw_x;
+    whole_x = draw_x;
+    if (sign_w > 0)
+    {
+        whole_x = (int16_t)(draw_x + sign_w + VARIO_UI_DECIMAL_SIGN_GAP_X);
+    }
+    frac_x = (int16_t)(whole_x + whole_w + VARIO_UI_DECIMAL_FRAC_GAP_X);
+
+    u8g2_SetFontPosTop(u8g2);
+    if (sign_w > 0)
+    {
+        u8g2_SetFont(u8g2, VARIO_UI_FONT_BOTTOM_SIGN);
+        u8g2_DrawStr(u8g2, sign_x, sign_top, sign);
+    }
+
     u8g2_SetFont(u8g2, main_font);
-    main_ascent = (int16_t)u8g2_GetAscent(u8g2);
-    whole_baseline = bottom_y;
-    u8g2_DrawStr(u8g2, draw_x, whole_baseline, whole);
+    u8g2_DrawStr(u8g2, whole_x, whole_top, whole);
 
-    if (frac[0] != '\0')
+    if (frac_w > 0)
     {
         u8g2_SetFont(u8g2, frac_font);
-        frac_ascent = (int16_t)u8g2_GetAscent(u8g2);
-        frac_baseline = (int16_t)((whole_baseline - main_ascent) + frac_ascent + VARIO_UI_DECIMAL_FRAC_TOP_BIAS_Y);
-        u8g2_DrawStr(u8g2,
-                     (int16_t)(draw_x + whole_w + VARIO_UI_DECIMAL_FRAC_GAP_X),
-                     frac_baseline,
-                     frac);
+        u8g2_DrawStr(u8g2, frac_x, frac_top, frac);
     }
 
     u8g2_SetFontPosBaseline(u8g2);
@@ -1258,10 +1611,8 @@ static void vario_display_draw_top_left_metrics(u8g2_t *u8g2,
                                                 const vario_viewport_t *v,
                                                 const vario_runtime_t *rt)
 {
-    char flight_time[24];
-    char glide_text[12];
+    char    glide_text[12];
     int16_t x;
-    int16_t gld_value_x;
     int16_t suffix_x;
 
     if ((u8g2 == NULL) || (v == NULL) || (rt == NULL))
@@ -1272,37 +1623,19 @@ static void vario_display_draw_top_left_metrics(u8g2_t *u8g2,
     x = (int16_t)(v->x + VARIO_UI_SIDE_BAR_W + VARIO_UI_TOP_LEFT_PAD_X);
 
     /* ---------------------------------------------------------------------- */
-    /* 좌상단 FLT TIME                                                         */
-    /* - 기존보다 한 단계 크게 해서 한눈에 읽히게 한다.                         */
-    /* - baseline 조정은 VARIO_UI_TOP_FLT_BASELINE_Y 만 바꾸면 된다.            */
-    /* ---------------------------------------------------------------------- */
-    vario_display_format_flight_time(flight_time, sizeof(flight_time), rt);
-    u8g2_SetFont(u8g2, VARIO_UI_FONT_TOP_FLT_VALUE);
-    u8g2_DrawStr(u8g2,
-                 x,
-                 (int16_t)(v->y + VARIO_UI_TOP_FLT_BASELINE_Y),
-                 flight_time);
-
-    /* ---------------------------------------------------------------------- */
-    /* 좌상단 GLD                                                              */
-    /* - label/value 모두 살짝 키워 commercial 느낌을 맞춘다.                  */
+    /* 좌상단 활공비                                                           */
+    /* - 기존 FLT TIME 자리는 비우고, GLD label 도 제거한다.                   */
+    /* - 값은 ALT2/ALT3 와 같은 글꼴, suffix 는 단위 글꼴을 사용한다.           */
     /* ---------------------------------------------------------------------- */
     vario_display_format_glide_ratio(glide_text, sizeof(glide_text), rt);
-    u8g2_SetFont(u8g2, VARIO_UI_FONT_TOP_GLD_LABEL);
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_ALT2_VALUE);
     u8g2_DrawStr(u8g2,
                  x,
-                 (int16_t)(v->y + VARIO_UI_TOP_GLD_BASELINE_Y),
-                 "GLD");
-
-    gld_value_x = (int16_t)(x + 23);
-    u8g2_SetFont(u8g2, VARIO_UI_FONT_TOP_GLD_VALUE);
-    u8g2_DrawStr(u8g2,
-                 gld_value_x,
                  (int16_t)(v->y + VARIO_UI_TOP_GLD_BASELINE_Y),
                  glide_text);
 
-    suffix_x = (int16_t)(gld_value_x + u8g2_GetStrWidth(u8g2, glide_text) + 2);
-    u8g2_SetFont(u8g2, VARIO_UI_FONT_TOP_GLD_SUFFIX);
+    suffix_x = (int16_t)(x + u8g2_GetStrWidth(u8g2, glide_text) + 2);
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_ALT2_UNIT);
     u8g2_DrawStr(u8g2,
                  suffix_x,
                  (int16_t)(v->y + VARIO_UI_TOP_GLD_BASELINE_Y),
@@ -1335,6 +1668,39 @@ static void vario_display_draw_top_center_clock(u8g2_t *u8g2,
 }
 
 
+
+static void vario_display_draw_bottom_center_flight_time(u8g2_t *u8g2,
+                                                         const vario_viewport_t *v,
+                                                         const vario_runtime_t *rt)
+{
+    char    flight_time[24];
+    int16_t text_h;
+    int16_t top_y;
+    int16_t text_w;
+    int16_t draw_x;
+
+    if ((u8g2 == NULL) || (v == NULL) || (rt == NULL))
+    {
+        return;
+    }
+
+    vario_display_format_flight_time(flight_time, sizeof(flight_time), rt);
+
+    text_h = vario_display_get_font_height(u8g2, VARIO_UI_FONT_ALT2_VALUE);
+    if (text_h <= 0)
+    {
+        return;
+    }
+
+    top_y = (int16_t)(v->y + v->h - 2 - text_h);
+    u8g2_SetFontPosTop(u8g2);
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_ALT2_VALUE);
+    text_w = (int16_t)u8g2_GetStrWidth(u8g2, flight_time);
+    draw_x = (int16_t)(v->x + (v->w / 2) - (text_w / 2));
+    u8g2_DrawStr(u8g2, draw_x, top_y, flight_time);
+    u8g2_SetFontPosBaseline(u8g2);
+}
+
 static void vario_display_draw_top_right_altitudes(u8g2_t *u8g2,
                                                    const vario_viewport_t *v,
                                                    const vario_runtime_t *rt)
@@ -1347,12 +1713,20 @@ static void vario_display_draw_top_right_altitudes(u8g2_t *u8g2,
     const char *alt2_unit;
     const char *alt3_unit;
     int16_t right_limit_x;
-    int16_t value_w;
-    int16_t unit_w;
-    int16_t icon_x;
+    int16_t unit_box_w;
+    int16_t alt1_value_box_w;
+    int16_t alt23_value_box_w;
+    int16_t alt1_value_h;
+    int16_t alt23_value_h;
+    int16_t unit_h;
+    int16_t alt1_row_h;
+    int16_t alt23_row_h;
+    int16_t alt1_top_y;
+    int16_t alt2_top_y;
+    int16_t alt3_top_y;
     int16_t value_x;
     int16_t unit_x;
-    int16_t row_top_y;
+    int16_t icon_x;
 
     if ((u8g2 == NULL) || (v == NULL) || (rt == NULL))
     {
@@ -1374,86 +1748,113 @@ static void vario_display_draw_top_right_altitudes(u8g2_t *u8g2,
     alt2_unit = Vario_Settings_GetAltitudeUnitTextForUnit(settings->alt2_unit);
     alt3_unit = Vario_Settings_GetAltitudeUnitTextForUnit(settings->altitude_unit);
 
-    /* ---------------------------------------------------------------------- */
-    /* ALT1                                                                    */
-    /* - icon 1 + 큰 숫자 + unit 을 한 row 에서 right align 한다.              */
-    /* - value/unit/icon gap 은 매크로로 분리되어 있어 충돌 시 바로 수정 가능. */
-    /* ---------------------------------------------------------------------- */
-    u8g2_SetFontPosTop(u8g2);
-    u8g2_SetFont(u8g2, VARIO_UI_FONT_ALT1_VALUE);
-    value_w = (int16_t)u8g2_GetStrWidth(u8g2, alt1_text);
-    u8g2_SetFont(u8g2, VARIO_UI_FONT_ALT1_UNIT);
-    unit_w = (int16_t)u8g2_GetStrWidth(u8g2, alt1_unit);
+    unit_box_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_ALT1_UNIT, "ft");
+    {
+        int16_t meter_w;
+        meter_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_ALT1_UNIT, "m");
+        if (unit_box_w < meter_w)
+        {
+            unit_box_w = meter_w;
+        }
+    }
 
-    unit_x = (int16_t)(right_limit_x - unit_w);
-    value_x = (int16_t)(unit_x - VARIO_UI_TOP_ALT1_VALUE_UNIT_GAP - value_w);
-    icon_x = (int16_t)(value_x - VARIO_UI_TOP_ALT1_ICON_VALUE_GAP - VARIO_ICON_ALT1_WIDTH);
+    alt1_value_box_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_ALT1_VALUE, "88888");
+    alt23_value_box_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_ALT2_VALUE, "-8888");
+    {
+        int16_t unsigned_w;
+        unsigned_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_ALT2_VALUE, "88888");
+        if (alt23_value_box_w < unsigned_w)
+        {
+            alt23_value_box_w = unsigned_w;
+        }
+    }
 
-    vario_display_draw_alt_badge(u8g2,
-                                 icon_x,
-                                 (int16_t)(v->y + VARIO_UI_TOP_ALT1_TOP_Y + VARIO_UI_TOP_ALT1_ICON_TOP_DY),
-                                 '1');
+    alt1_value_h = vario_display_get_font_height(u8g2, VARIO_UI_FONT_ALT1_VALUE);
+    alt23_value_h = vario_display_get_font_height(u8g2, VARIO_UI_FONT_ALT2_VALUE);
+    unit_h = vario_display_get_font_height(u8g2, VARIO_UI_FONT_ALT1_UNIT);
 
-    u8g2_SetFont(u8g2, VARIO_UI_FONT_ALT1_VALUE);
-    u8g2_DrawStr(u8g2,
-                 value_x,
-                 (int16_t)(v->y + VARIO_UI_TOP_ALT1_TOP_Y),
-                 alt1_text);
+    alt1_row_h = alt1_value_h;
+    if (alt1_row_h < unit_h)
+    {
+        alt1_row_h = unit_h;
+    }
 
-    u8g2_SetFont(u8g2, VARIO_UI_FONT_ALT1_UNIT);
-    u8g2_DrawStr(u8g2,
-                 unit_x,
-                 (int16_t)(v->y + VARIO_UI_TOP_ALT1_TOP_Y + VARIO_UI_TOP_ALT1_UNIT_TOP_DY),
-                 alt1_unit);
+    alt23_row_h = alt23_value_h;
+    if (alt23_row_h < VARIO_ICON_ALT2_HEIGHT)
+    {
+        alt23_row_h = VARIO_ICON_ALT2_HEIGHT;
+    }
+    if (alt23_row_h < unit_h)
+    {
+        alt23_row_h = unit_h;
+    }
 
-    /* ---------------------------------------------------------------------- */
-    /* ALT2                                                                    */
-    /* - ALT1 바로 아래에 "중간 크기" row 로 배치한다.                          */
-    /* - ALT2 는 전용 unit(settings->alt2_unit)을 사용하므로                    */
-    /*   alt1/alt3 와 달라도 안전하게 표시된다.                                 */
-    /* ---------------------------------------------------------------------- */
-    row_top_y = (int16_t)(v->y + VARIO_UI_TOP_ALT2_TOP_Y);
-    u8g2_SetFont(u8g2, VARIO_UI_FONT_ALT2_VALUE);
-    value_w = (int16_t)u8g2_GetStrWidth(u8g2, alt2_text);
-    u8g2_SetFont(u8g2, VARIO_UI_FONT_ALT2_UNIT);
-    unit_w = (int16_t)u8g2_GetStrWidth(u8g2, alt2_unit);
+    alt1_top_y = (int16_t)(v->y + VARIO_UI_TOP_ALT1_TOP_Y);
+    alt2_top_y = (int16_t)(alt1_top_y + alt1_row_h + VARIO_UI_ALT_ROW_GAP_Y);
+    alt3_top_y = (int16_t)(alt2_top_y + alt23_row_h + VARIO_UI_ALT_ROW_GAP_Y);
 
-    unit_x = (int16_t)(right_limit_x - unit_w);
-    value_x = (int16_t)(unit_x - VARIO_UI_TOP_ALT_ROW_VALUE_UNIT_GAP - value_w);
+    unit_x = (int16_t)(right_limit_x - unit_box_w);
+    value_x = (int16_t)(unit_x - VARIO_UI_TOP_ALT1_VALUE_UNIT_GAP - alt1_value_box_w);
+    vario_display_draw_text_box_top(u8g2,
+                                    value_x,
+                                    (int16_t)(alt1_top_y + ((alt1_row_h - alt1_value_h) / 2)),
+                                    alt1_value_box_w,
+                                    VARIO_UI_ALIGN_RIGHT,
+                                    VARIO_UI_FONT_ALT1_VALUE,
+                                    alt1_text);
+    vario_display_draw_text_box_top(u8g2,
+                                    unit_x,
+                                    (int16_t)(alt1_top_y + ((alt1_row_h - unit_h) / 2)),
+                                    unit_box_w,
+                                    VARIO_UI_ALIGN_LEFT,
+                                    VARIO_UI_FONT_ALT1_UNIT,
+                                    alt1_unit);
+
+    unit_x = (int16_t)(right_limit_x - unit_box_w);
+    value_x = (int16_t)(unit_x - VARIO_UI_TOP_ALT_ROW_VALUE_UNIT_GAP - alt23_value_box_w);
     icon_x = (int16_t)(value_x - VARIO_UI_TOP_ALT_ROW_ICON_GAP - VARIO_ICON_ALT2_WIDTH);
 
     vario_display_draw_alt_badge(u8g2,
                                  icon_x,
-                                 (int16_t)(row_top_y + VARIO_UI_TOP_ALT2_ICON_TOP_DY),
+                                 (int16_t)(alt2_top_y + ((alt23_row_h - VARIO_ICON_ALT2_HEIGHT) / 2)),
                                  '2');
-    u8g2_SetFont(u8g2, VARIO_UI_FONT_ALT2_VALUE);
-    u8g2_DrawStr(u8g2, value_x, row_top_y, alt2_text);
-    u8g2_SetFont(u8g2, VARIO_UI_FONT_ALT2_UNIT);
-    u8g2_DrawStr(u8g2, unit_x, (int16_t)(row_top_y + 4), alt2_unit);
+    vario_display_draw_text_box_top(u8g2,
+                                    value_x,
+                                    (int16_t)(alt2_top_y + ((alt23_row_h - alt23_value_h) / 2)),
+                                    alt23_value_box_w,
+                                    VARIO_UI_ALIGN_RIGHT,
+                                    VARIO_UI_FONT_ALT2_VALUE,
+                                    alt2_text);
+    vario_display_draw_text_box_top(u8g2,
+                                    unit_x,
+                                    (int16_t)(alt2_top_y + ((alt23_row_h - unit_h) / 2)),
+                                    unit_box_w,
+                                    VARIO_UI_ALIGN_LEFT,
+                                    VARIO_UI_FONT_ALT2_UNIT,
+                                    alt2_unit);
 
-    /* ---------------------------------------------------------------------- */
-    /* ALT3                                                                    */
-    /* ---------------------------------------------------------------------- */
-    row_top_y = (int16_t)(v->y + VARIO_UI_TOP_ALT3_TOP_Y);
-    u8g2_SetFont(u8g2, VARIO_UI_FONT_ALT3_VALUE);
-    value_w = (int16_t)u8g2_GetStrWidth(u8g2, alt3_text);
-    u8g2_SetFont(u8g2, VARIO_UI_FONT_ALT3_UNIT);
-    unit_w = (int16_t)u8g2_GetStrWidth(u8g2, alt3_unit);
-
-    unit_x = (int16_t)(right_limit_x - unit_w);
-    value_x = (int16_t)(unit_x - VARIO_UI_TOP_ALT_ROW_VALUE_UNIT_GAP - value_w);
+    unit_x = (int16_t)(right_limit_x - unit_box_w);
+    value_x = (int16_t)(unit_x - VARIO_UI_TOP_ALT_ROW_VALUE_UNIT_GAP - alt23_value_box_w);
     icon_x = (int16_t)(value_x - VARIO_UI_TOP_ALT_ROW_ICON_GAP - VARIO_ICON_ALT3_WIDTH);
 
     vario_display_draw_alt_badge(u8g2,
                                  icon_x,
-                                 (int16_t)(row_top_y + VARIO_UI_TOP_ALT3_ICON_TOP_DY),
+                                 (int16_t)(alt3_top_y + ((alt23_row_h - VARIO_ICON_ALT3_HEIGHT) / 2)),
                                  '3');
-    u8g2_SetFont(u8g2, VARIO_UI_FONT_ALT3_VALUE);
-    u8g2_DrawStr(u8g2, value_x, row_top_y, alt3_text);
-    u8g2_SetFont(u8g2, VARIO_UI_FONT_ALT3_UNIT);
-    u8g2_DrawStr(u8g2, unit_x, (int16_t)(row_top_y + 2), alt3_unit);
-
-    u8g2_SetFontPosBaseline(u8g2);
+    vario_display_draw_text_box_top(u8g2,
+                                    value_x,
+                                    (int16_t)(alt3_top_y + ((alt23_row_h - alt23_value_h) / 2)),
+                                    alt23_value_box_w,
+                                    VARIO_UI_ALIGN_RIGHT,
+                                    VARIO_UI_FONT_ALT3_VALUE,
+                                    alt3_text);
+    vario_display_draw_text_box_top(u8g2,
+                                    unit_x,
+                                    (int16_t)(alt3_top_y + ((alt23_row_h - unit_h) / 2)),
+                                    unit_box_w,
+                                    VARIO_UI_ALIGN_LEFT,
+                                    VARIO_UI_FONT_ALT3_UNIT,
+                                    alt3_unit);
 }
 
 
@@ -1481,20 +1882,20 @@ static void vario_display_draw_vario_side_bar(u8g2_t *u8g2,
     }
 
     left_bar_x = v->x;
-    instant_x = left_bar_x;
-    avg_x = (int16_t)(left_bar_x + VARIO_UI_GAUGE_INSTANT_W + VARIO_UI_GAUGE_GAP_W);
+    instant_x = (int16_t)(left_bar_x + 1);   /* 2nd~9th pixel from outer-left edge */
+    avg_x = (int16_t)(left_bar_x + 10);      /* 11th~14th pixel band */
 
     /* ---------------------------------------------------------------------- */
     /* left VARIO scale                                                        */
-    /* - tick 는 inside edge(우측 edge)에 맞춰 붙인다.                          */
-    /* - 짧은 눈금도 우측 wall 기준으로 밀어 넣는다.                            */
+    /* - 작은/큰 눈금을 왼쪽 벽에 딱 붙인다.                                   */
+    /* - 0.5m/s minor, 1.0m/s major, center zero line 3px thickness.           */
     /* ---------------------------------------------------------------------- */
     for (level = 0u; level < VARIO_UI_VARIO_HALFSTEP_COUNT; ++level)
     {
         uint8_t tick_w;
 
         tick_w = ((level % 2u) != 0u) ? VARIO_UI_SCALE_MAJOR_W : VARIO_UI_SCALE_MINOR_W;
-        tick_x = (int16_t)(left_bar_x + VARIO_UI_SIDE_BAR_W - tick_w);
+        tick_x = left_bar_x;
 
         vario_display_get_vario_slot_rect(v, true, level, &slot_y, &slot_h);
         u8g2_DrawHLine(u8g2, tick_x, slot_y, tick_w);
@@ -1503,19 +1904,12 @@ static void vario_display_draw_vario_side_bar(u8g2_t *u8g2,
         u8g2_DrawHLine(u8g2, tick_x, slot_y, tick_w);
     }
 
-    /* ---------------------------------------------------------------------- */
-    /* 0.0 center emphasis                                                     */
-    /* - 3px 두께 + 최장 tick                                                  */
-    /* ---------------------------------------------------------------------- */
     center_y = (int16_t)(v->y + (v->h / 2));
     for (thick_i = 0u; thick_i < VARIO_UI_VARIO_ZERO_LINE_THICKNESS; ++thick_i)
     {
         int16_t zero_y;
         zero_y = (int16_t)(center_y - 1 + (int16_t)thick_i);
-        u8g2_DrawHLine(u8g2,
-                       (int16_t)(left_bar_x + VARIO_UI_SIDE_BAR_W - VARIO_UI_VARIO_ZERO_LINE_W),
-                       zero_y,
-                       VARIO_UI_VARIO_ZERO_LINE_W);
+        u8g2_DrawHLine(u8g2, left_bar_x, zero_y, VARIO_UI_VARIO_ZERO_LINE_W);
     }
 
     vario_display_compute_vario_fill(instant_vario_mps, &first_level, &count, &positive);
@@ -1557,6 +1951,8 @@ static void vario_display_draw_gs_side_bar(u8g2_t *u8g2,
     int16_t arrow_y;
     float   clamped_avg_speed;
     float   ratio;
+    uint8_t tick_w;
+    int16_t tick_x;
 
     if ((u8g2 == NULL) || (v == NULL))
     {
@@ -1564,21 +1960,20 @@ static void vario_display_draw_gs_side_bar(u8g2_t *u8g2,
     }
 
     right_bar_x = (int16_t)(v->x + v->w - VARIO_UI_SIDE_BAR_W);
-    avg_x = right_bar_x;
-    instant_x = (int16_t)(right_bar_x + VARIO_UI_GAUGE_AVG_W + VARIO_UI_GAUGE_GAP_W);
+    instant_x = (int16_t)(right_bar_x + 5);  /* 2nd~9th pixel from outer-right edge */
+    avg_x = (int16_t)(right_bar_x + 9);      /* marker center lands in 11th~14th band */
 
     /* ---------------------------------------------------------------------- */
     /* GS right side scale                                                     */
-    /* - tick 는 inside edge(좌측 edge) 에 붙인다.                              */
-    /* - 짧은 tick 도 left wall 기준으로 밀어 넣는다.                           */
+    /* - 작은/큰 눈금을 오른쪽 벽에 딱 붙인다.                                  */
+    /* - 10km/h bottom, 70km/h top, 5km/h minor, 10km/h major.                 */
     /* ---------------------------------------------------------------------- */
     for (level = 0u; level < VARIO_UI_GS_STEP_COUNT; ++level)
     {
-        uint8_t tick_w;
-
         tick_w = ((level % 2u) == 0u) ? VARIO_UI_SCALE_MAJOR_W : VARIO_UI_SCALE_MINOR_W;
+        tick_x = (int16_t)(right_bar_x + VARIO_UI_SIDE_BAR_W - tick_w);
         vario_display_get_gs_slot_rect(v, level, &slot_y, &slot_h);
-        u8g2_DrawHLine(u8g2, right_bar_x, slot_y, tick_w);
+        u8g2_DrawHLine(u8g2, tick_x, slot_y, tick_w);
     }
 
     fill_steps = vario_display_compute_gs_fill_steps(instant_speed_kmh);
@@ -1599,22 +1994,24 @@ static void vario_display_draw_gs_side_bar(u8g2_t *u8g2,
                                                  VARIO_UI_GS_MAX_KMH);
         ratio = (clamped_avg_speed - VARIO_UI_GS_MIN_VISIBLE_KMH) /
                 (VARIO_UI_GS_MAX_KMH - VARIO_UI_GS_MIN_VISIBLE_KMH);
-        arrow_y = (int16_t)(v->y + v->h - 1 - lroundf(ratio * (float)(v->h - VARIO_ICON_GS_AVG_HEIGHT)) - (VARIO_ICON_GS_AVG_HEIGHT / 2));
+        arrow_y = (int16_t)(v->y + v->h - 1 -
+                            lroundf(ratio * (float)(v->h - VARIO_ICON_BAR_MARK_RIGHT_HEIGHT)) -
+                            (VARIO_ICON_BAR_MARK_RIGHT_HEIGHT / 2));
         if (arrow_y < v->y)
         {
             arrow_y = v->y;
         }
-        if ((arrow_y + VARIO_ICON_GS_AVG_HEIGHT) > (v->y + v->h))
+        if ((arrow_y + VARIO_ICON_BAR_MARK_RIGHT_HEIGHT) > (v->y + v->h))
         {
-            arrow_y = (int16_t)(v->y + v->h - VARIO_ICON_GS_AVG_HEIGHT);
+            arrow_y = (int16_t)(v->y + v->h - VARIO_ICON_BAR_MARK_RIGHT_HEIGHT);
         }
 
         vario_display_draw_xbm(u8g2,
                                avg_x,
                                arrow_y,
-                               VARIO_ICON_GS_AVG_WIDTH,
-                               VARIO_ICON_GS_AVG_HEIGHT,
-                               vario_icon_gs_avg_bits);
+                               VARIO_ICON_BAR_MARK_RIGHT_WIDTH,
+                               VARIO_ICON_BAR_MARK_RIGHT_HEIGHT,
+                               vario_icon_bar_mark_right_bits);
     }
 }
 
@@ -1626,10 +2023,14 @@ static void vario_display_draw_vario_value_block(u8g2_t *u8g2,
     const vario_settings_t *settings;
     char    value_text[20];
     char    max_text[20];
-    int16_t box_x;
-    int16_t box_y;
-    int16_t icon_x;
-    int16_t icon_y;
+    int16_t value_box_x;
+    int16_t value_box_y;
+    int16_t value_box_h;
+    int16_t max_box_x;
+    int16_t max_box_y;
+    int16_t max_box_h;
+    int16_t arrow_x;
+    int16_t arrow_y;
 
     if ((u8g2 == NULL) || (v == NULL) || (rt == NULL))
     {
@@ -1637,67 +2038,66 @@ static void vario_display_draw_vario_value_block(u8g2_t *u8g2,
     }
 
     settings = Vario_Settings_Get();
-    box_x = (int16_t)(v->x + VARIO_UI_SIDE_BAR_W + VARIO_UI_BOTTOM_VARIO_X_PAD);
-    box_y = (int16_t)(v->y + v->h - VARIO_UI_BOTTOM_BOX_H - VARIO_UI_BOTTOM_BOX_BOTTOM_PAD);
 
-    vario_display_format_vario_value_signed(value_text, sizeof(value_text), rt->baro_vario_mps);
-    vario_display_format_vario_small_abs(max_text, sizeof(max_text), rt->max_top_vario_mps);
+    value_box_x = (int16_t)(v->x + VARIO_UI_SIDE_BAR_W + VARIO_UI_BOTTOM_VARIO_X_PAD);
+    value_box_h = vario_display_get_font_height(u8g2, VARIO_UI_FONT_BOTTOM_MAIN);
+    if (value_box_h <= 0)
+    {
+        value_box_h = VARIO_UI_BOTTOM_BOX_H;
+    }
+    value_box_y = (int16_t)(v->y + ((v->h - value_box_h) / 2));
 
-    /* ---------------------------------------------------------------------- */
-    /* MAX meta                                                                 */
-    /* - 사용자가 지적한 Top Vario 문구를 제거하고 MAX + 값 두 줄로 단순화한다. */
-    /* ---------------------------------------------------------------------- */
+    vario_display_format_vario_value_abs(value_text, sizeof(value_text), rt->baro_vario_mps);
+    if (Vario_Settings_Get()->vspeed_unit != VARIO_VSPEED_UNIT_FPM)
+    {
+        vario_display_trim_leading_zero(value_text);
+    }
+    vario_display_format_peak_vario(max_text, sizeof(max_text), rt->max_top_vario_mps);
+
     if ((settings == NULL) || (settings->show_max_vario != 0u))
     {
-        u8g2_SetFont(u8g2, VARIO_UI_FONT_BOTTOM_MAX_LABEL);
-        u8g2_DrawStr(u8g2,
-                     box_x,
-                     (int16_t)(v->y + VARIO_UI_BOTTOM_META_LABEL_BASELINE_Y),
-                     "MAX");
+        max_box_h = vario_display_get_font_height(u8g2, VARIO_UI_FONT_BOTTOM_MAX_VALUE);
+        if (max_box_h <= 0)
+        {
+            max_box_h = 8;
+        }
+        max_box_x = (int16_t)(v->x + VARIO_UI_SIDE_BAR_W + 2);
+        max_box_y = (int16_t)(value_box_y - max_box_h - VARIO_UI_BOTTOM_META_GAP_Y);
+        vario_display_draw_text_box_top(u8g2,
+                                        max_box_x,
+                                        max_box_y,
+                                        VARIO_UI_BOTTOM_META_BOX_W,
+                                        VARIO_UI_ALIGN_LEFT,
+                                        VARIO_UI_FONT_BOTTOM_MAX_VALUE,
+                                        max_text);
 
-        u8g2_SetFont(u8g2, VARIO_UI_FONT_BOTTOM_MAX_VALUE);
-        u8g2_DrawStr(u8g2,
-                     box_x,
-                     (int16_t)(v->y + VARIO_UI_BOTTOM_META_VALUE_BASELINE_Y),
-                     max_text);
+        arrow_x = (int16_t)(max_box_x + VARIO_UI_BOTTOM_META_BOX_W + 3);
+        arrow_y = (int16_t)(max_box_y + ((max_box_h - VARIO_ICON_TREND_UP_HEIGHT) / 2));
+        if (rt->baro_vario_mps > 0.05f)
+        {
+            vario_display_draw_xbm(u8g2,
+                                   arrow_x,
+                                   arrow_y,
+                                   VARIO_ICON_TREND_UP_WIDTH,
+                                   VARIO_ICON_TREND_UP_HEIGHT,
+                                   vario_icon_trend_up_bits);
+        }
+        else if (rt->baro_vario_mps < -0.05f)
+        {
+            vario_display_draw_xbm(u8g2,
+                                   arrow_x,
+                                   arrow_y,
+                                   VARIO_ICON_TREND_DOWN_WIDTH,
+                                   VARIO_ICON_TREND_DOWN_HEIGHT,
+                                   vario_icon_trend_down_bits);
+        }
     }
 
-    /* ---------------------------------------------------------------------- */
-    /* current vario direction icon                                             */
-    /* - main value box 의 상단 중앙에 얹어 숫자와 분리한다.                    */
-    /* ---------------------------------------------------------------------- */
-    icon_x = (int16_t)(box_x + ((VARIO_UI_BOTTOM_BOX_W - VARIO_ICON_VARIO_UP_WIDTH) / 2));
-    icon_y = (int16_t)(box_y + VARIO_UI_BOTTOM_ICON_GAP_Y);
-
-    if (rt->baro_vario_mps > 0.05f)
-    {
-        vario_display_draw_xbm(u8g2,
-                               icon_x,
-                               icon_y,
-                               VARIO_ICON_VARIO_UP_WIDTH,
-                               VARIO_ICON_VARIO_UP_HEIGHT,
-                               vario_icon_vario_up_bits);
-    }
-    else if (rt->baro_vario_mps < -0.05f)
-    {
-        vario_display_draw_xbm(u8g2,
-                               icon_x,
-                               icon_y,
-                               VARIO_ICON_VARIO_DOWN_WIDTH,
-                               VARIO_ICON_VARIO_DOWN_HEIGHT,
-                               vario_icon_vario_down_bits);
-    }
-
-    /* ---------------------------------------------------------------------- */
-    /* 좌하단 VARIO main value                                                 */
-    /* - 고정 폭 box 안에서 left align                                          */
-    /* - decimal 은 '.' 없이 상단 소수 digit 으로 분리된다.                     */
-    /* ---------------------------------------------------------------------- */
     vario_display_draw_decimal_value(u8g2,
-                                     box_x,
-                                     box_y,
+                                     value_box_x,
+                                     value_box_y,
                                      VARIO_UI_BOTTOM_BOX_W,
-                                     VARIO_UI_BOTTOM_BOX_H,
+                                     value_box_h,
                                      VARIO_UI_ALIGN_LEFT,
                                      VARIO_UI_FONT_BOTTOM_MAIN,
                                      VARIO_UI_FONT_BOTTOM_FRAC,
@@ -1711,46 +2111,179 @@ static void vario_display_draw_speed_value_block(u8g2_t *u8g2,
 {
     char    value_text[20];
     char    max_text[20];
-    int16_t box_x;
-    int16_t box_y;
+    int16_t value_box_x;
+    int16_t value_box_y;
+    int16_t value_box_h;
+    int16_t max_box_x;
+    int16_t max_box_y;
+    int16_t max_box_h;
 
     if ((u8g2 == NULL) || (v == NULL) || (rt == NULL))
     {
         return;
     }
 
-    box_x = (int16_t)(v->x + v->w - VARIO_UI_SIDE_BAR_W - VARIO_UI_BOTTOM_GS_X_PAD - VARIO_UI_BOTTOM_BOX_W);
-    box_y = (int16_t)(v->y + v->h - VARIO_UI_BOTTOM_BOX_H - VARIO_UI_BOTTOM_BOX_BOTTOM_PAD);
+    value_box_h = vario_display_get_font_height(u8g2, VARIO_UI_FONT_BOTTOM_MAIN);
+    if (value_box_h <= 0)
+    {
+        value_box_h = VARIO_UI_BOTTOM_BOX_H;
+    }
+
+    value_box_x = (int16_t)(v->x + v->w - VARIO_UI_SIDE_BAR_W - VARIO_UI_BOTTOM_GS_X_PAD - VARIO_UI_BOTTOM_BOX_W);
+    value_box_y = (int16_t)(v->y + v->h - VARIO_UI_BOTTOM_BOX_BOTTOM_PAD - value_box_h);
 
     vario_display_format_speed_value(value_text, sizeof(value_text), rt->ground_speed_kmh);
-    vario_display_format_speed_small(max_text, sizeof(max_text), s_vario_ui_dynamic.top_speed_kmh);
+    vario_display_format_peak_speed(max_text, sizeof(max_text), s_vario_ui_dynamic.top_speed_kmh);
 
-    u8g2_SetFont(u8g2, VARIO_UI_FONT_BOTTOM_MAX_LABEL);
-    Vario_Display_DrawTextRight(u8g2,
-                                (int16_t)(box_x + VARIO_UI_BOTTOM_BOX_W),
-                                (int16_t)(v->y + VARIO_UI_BOTTOM_META_LABEL_BASELINE_Y),
-                                "MAX");
+    max_box_h = vario_display_get_font_height(u8g2, VARIO_UI_FONT_BOTTOM_MAX_VALUE);
+    if (max_box_h <= 0)
+    {
+        max_box_h = 8;
+    }
+    max_box_x = (int16_t)(v->x + v->w - VARIO_UI_SIDE_BAR_W - 2 - VARIO_UI_BOTTOM_META_BOX_W);
+    max_box_y = (int16_t)(value_box_y - max_box_h - VARIO_UI_BOTTOM_META_GAP_Y);
+    vario_display_draw_text_box_top(u8g2,
+                                    max_box_x,
+                                    max_box_y,
+                                    VARIO_UI_BOTTOM_META_BOX_W,
+                                    VARIO_UI_ALIGN_RIGHT,
+                                    VARIO_UI_FONT_BOTTOM_MAX_VALUE,
+                                    max_text);
 
-    u8g2_SetFont(u8g2, VARIO_UI_FONT_BOTTOM_MAX_VALUE);
-    Vario_Display_DrawTextRight(u8g2,
-                                (int16_t)(box_x + VARIO_UI_BOTTOM_BOX_W),
-                                (int16_t)(v->y + VARIO_UI_BOTTOM_META_VALUE_BASELINE_Y),
-                                max_text);
-
-    /* ---------------------------------------------------------------------- */
-    /* 우하단 GS main value                                                    */
-    /* - right aligned fixed box                                               */
-    /* - decimal 은 '.' 없이 상단 소수 digit 으로 분리된다.                     */
-    /* ---------------------------------------------------------------------- */
     vario_display_draw_decimal_value(u8g2,
-                                     box_x,
-                                     box_y,
+                                     value_box_x,
+                                     value_box_y,
                                      VARIO_UI_BOTTOM_BOX_W,
-                                     VARIO_UI_BOTTOM_BOX_H,
+                                     value_box_h,
                                      VARIO_UI_ALIGN_RIGHT,
                                      VARIO_UI_FONT_BOTTOM_MAIN,
                                      VARIO_UI_FONT_BOTTOM_FRAC,
                                      value_text);
+}
+
+
+static void vario_display_draw_altitude_sparkline(u8g2_t *u8g2,
+                                                  const vario_viewport_t *v,
+                                                  const vario_runtime_t *rt)
+{
+    uint16_t sample_count;
+    uint16_t history_cap;
+    uint16_t start_index;
+    uint16_t i;
+    uint16_t hist_index;
+    int16_t  graph_x;
+    int16_t  graph_y;
+    int16_t  graph_top_limit;
+    int16_t  current_value_h;
+    int16_t  max_value_h;
+    int16_t  prev_x;
+    int16_t  prev_y;
+    bool     have_prev;
+    float    min_alt;
+    float    max_alt;
+    float    range_alt;
+
+    if ((u8g2 == NULL) || (v == NULL) || (rt == NULL))
+    {
+        return;
+    }
+
+    sample_count = rt->history_count;
+    history_cap = (uint16_t)(sizeof(rt->history_altitude_m) / sizeof(rt->history_altitude_m[0]));
+    if (history_cap == 0u)
+    {
+        return;
+    }
+    if (sample_count < 2u)
+    {
+        return;
+    }
+    if (sample_count > history_cap)
+    {
+        sample_count = history_cap;
+    }
+
+    current_value_h = vario_display_get_font_height(u8g2, VARIO_UI_FONT_BOTTOM_MAIN);
+    if (current_value_h <= 0)
+    {
+        current_value_h = VARIO_UI_BOTTOM_BOX_H;
+    }
+    max_value_h = vario_display_get_font_height(u8g2, VARIO_UI_FONT_BOTTOM_MAX_VALUE);
+    if (max_value_h <= 0)
+    {
+        max_value_h = 8;
+    }
+
+    graph_x = (int16_t)(v->x + v->w - VARIO_UI_SIDE_BAR_W - VARIO_UI_ALT_GRAPH_RIGHT_PAD - VARIO_UI_ALT_GRAPH_W);
+    graph_y = (int16_t)(v->y + v->h - VARIO_UI_BOTTOM_BOX_BOTTOM_PAD - current_value_h -
+                        max_value_h - VARIO_UI_BOTTOM_META_GAP_Y - VARIO_UI_ALT_GRAPH_H - VARIO_UI_ALT_GRAPH_GAP_Y);
+    graph_top_limit = (int16_t)(v->y + 60);
+    if (graph_y < graph_top_limit)
+    {
+        graph_y = graph_top_limit;
+    }
+
+    start_index = (uint16_t)((rt->history_head + history_cap - sample_count) % history_cap);
+    min_alt = rt->history_altitude_m[start_index];
+    max_alt = min_alt;
+    for (i = 0u; i < sample_count; ++i)
+    {
+        float sample_alt;
+
+        hist_index = (uint16_t)((start_index + i) % history_cap);
+        sample_alt = rt->history_altitude_m[hist_index];
+        if (sample_alt < min_alt)
+        {
+            min_alt = sample_alt;
+        }
+        if (sample_alt > max_alt)
+        {
+            max_alt = sample_alt;
+        }
+    }
+
+    range_alt = max_alt - min_alt;
+    if (range_alt < 0.5f)
+    {
+        min_alt -= 0.25f;
+        max_alt += 0.25f;
+        range_alt = max_alt - min_alt;
+    }
+
+    have_prev = false;
+    for (i = 0u; i < (uint16_t)VARIO_UI_ALT_GRAPH_W; ++i)
+    {
+        uint16_t sample_pos;
+        float    sample_alt;
+        float    ratio;
+        int16_t  draw_x;
+        int16_t  draw_y;
+
+        if (VARIO_UI_ALT_GRAPH_W <= 1)
+        {
+            sample_pos = 0u;
+        }
+        else
+        {
+            sample_pos = (uint16_t)(((uint32_t)i * (uint32_t)(sample_count - 1u)) / (uint32_t)(VARIO_UI_ALT_GRAPH_W - 1));
+        }
+
+        hist_index = (uint16_t)((start_index + sample_pos) % history_cap);
+        sample_alt = rt->history_altitude_m[hist_index];
+        ratio = (sample_alt - min_alt) / range_alt;
+        ratio = vario_display_clampf(ratio, 0.0f, 1.0f);
+
+        draw_x = (int16_t)(graph_x + (int16_t)i);
+        draw_y = (int16_t)(graph_y + VARIO_UI_ALT_GRAPH_H - 1 - lroundf(ratio * (float)(VARIO_UI_ALT_GRAPH_H - 1)));
+
+        if (have_prev != false)
+        {
+            u8g2_DrawLine(u8g2, prev_x, prev_y, draw_x, draw_y);
+        }
+        prev_x = draw_x;
+        prev_y = draw_y;
+        have_prev = true;
+    }
 }
 
 
@@ -1888,7 +2421,10 @@ static void vario_display_draw_compass(u8g2_t *u8g2,
     center_x = (int16_t)(v->x + (v->w / 2));
     label_baseline_y = (int16_t)(v->y + VARIO_UI_NAV_LABEL_BASELINE_Y);
     top_limit_y = (int16_t)(label_baseline_y + VARIO_UI_NAV_LABEL_TO_COMPASS_GAP);
-    bottom_limit_y = (int16_t)(v->y + v->h - VARIO_UI_BOTTOM_BOX_H - VARIO_UI_BOTTOM_BOX_BOTTOM_PAD - VARIO_UI_COMPASS_BOTTOM_GAP);
+    bottom_limit_y = (int16_t)(v->y + v->h -
+                               vario_display_get_font_height(u8g2, VARIO_UI_FONT_BOTTOM_MAIN) -
+                               VARIO_UI_BOTTOM_BOX_BOTTOM_PAD -
+                               VARIO_UI_COMPASS_BOTTOM_GAP);
     usable_half_w = (int16_t)(((content_right_x - content_left_x + 1) / 2) - VARIO_UI_COMPASS_SIDE_MARGIN);
     radius = usable_half_w;
 
@@ -2274,6 +2810,10 @@ void Vario_Display_RenderFlightPage(u8g2_t *u8g2, vario_flight_page_mode_t mode)
     vario_display_page_cfg_t cfg;
     float avg_vario_mps;
     float avg_speed_kmh;
+    float bar_vario_mps;
+    float bar_avg_vario_mps;
+    float bar_speed_kmh;
+    float bar_avg_speed_kmh;
     vario_display_nav_solution_t nav;
     vario_viewport_t trail_v;
 
@@ -2310,8 +2850,17 @@ void Vario_Display_RenderFlightPage(u8g2_t *u8g2, vario_flight_page_mode_t mode)
             break;
     }
 
+    u8g2_SetFontMode(u8g2, 1);
+
     vario_display_update_dynamic_metrics(rt, settings);
     vario_display_get_average_values(rt, settings, &avg_vario_mps, &avg_speed_kmh);
+    vario_display_get_bar_display_values(rt,
+                                         avg_vario_mps,
+                                         avg_speed_kmh,
+                                         &bar_vario_mps,
+                                         &bar_avg_vario_mps,
+                                         &bar_speed_kmh,
+                                         &bar_avg_speed_kmh);
     vario_display_compute_nav_solution(rt, &nav);
 
     if (cfg.show_trail_background != false)
@@ -2323,8 +2872,8 @@ void Vario_Display_RenderFlightPage(u8g2_t *u8g2, vario_flight_page_mode_t mode)
         vario_display_draw_trail_background(u8g2, &trail_v, rt, settings);
     }
 
-    vario_display_draw_vario_side_bar(u8g2, v, rt->baro_vario_mps, avg_vario_mps);
-    vario_display_draw_gs_side_bar(u8g2, v, rt->ground_speed_kmh, avg_speed_kmh);
+    vario_display_draw_vario_side_bar(u8g2, v, bar_vario_mps, bar_avg_vario_mps);
+    vario_display_draw_gs_side_bar(u8g2, v, bar_speed_kmh, bar_avg_speed_kmh);
 
     vario_display_draw_top_left_metrics(u8g2, v, rt);
     vario_display_draw_top_center_clock(u8g2, v, rt, settings);
@@ -2334,6 +2883,8 @@ void Vario_Display_RenderFlightPage(u8g2_t *u8g2, vario_flight_page_mode_t mode)
     {
         vario_display_draw_compass(u8g2, v, rt, &nav);
     }
+
+    vario_display_draw_altitude_sparkline(u8g2, v, rt);
 
     if (cfg.show_stub_overlay != false)
     {
@@ -2345,6 +2896,7 @@ void Vario_Display_RenderFlightPage(u8g2_t *u8g2, vario_flight_page_mode_t mode)
 
     vario_display_draw_vario_value_block(u8g2, v, rt);
     vario_display_draw_speed_value_block(u8g2, v, rt);
+    vario_display_draw_bottom_center_flight_time(u8g2, v, rt);
 
     Vario_Display_DrawRawOverlay(u8g2, v);
 }

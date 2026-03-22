@@ -55,18 +55,18 @@ typedef enum
 #endif
 
 /* -------------------------------------------------------------------------- */
-/*  renderer read contract                                                     */
+/*  renderer read contract                                                    */
 /*                                                                            */
-/*  Screen1/Screen2 같은 renderer 는 아래 규칙을 반드시 따른다.                 */
+/*  Screen1/Screen2/Screen3 renderer 는 아래 규칙을 반드시 따른다.             */
 /*                                                                            */
 /*  1) APP_STATE 를 직접 읽지 않는다.                                         */
 /*  2) const vario_runtime_t *rt = Vario_State_GetRuntime(); 만 사용한다.      */
 /*  3) 필요한 표시값이 없으면 APP_STATE 필드를 화면 코드에서 끌어오지 말고,      */
 /*     이 구조체에 field 를 추가하고 Vario_State.c 에서 계산해서 넣는다.        */
-/*  4) 즉, renderer 는 read-only / draw-only 계층이다.                         */
+/*  4) renderer 는 draw-only/read-only 계층이다.                               */
 /*                                                                            */
 /*  이 규칙을 지켜야                                                           */
-/*  - CubeMX/IOC 재생성에 강하고                                               */
+/*  - CubeMX/IOC 재생성 영향이 하위 계층 경계에서 끊기고                      */
 /*  - APP_STATE 구조 변경이 화면 코드 전체로 번지지 않으며                      */
 /*  - 필터링/단위변환/유효성판정을 한 곳(Vario_State.c)에 집중시킬 수 있다.     */
 /* -------------------------------------------------------------------------- */
@@ -76,7 +76,7 @@ typedef struct
 
     /* ---------------------------------------------------------------------- */
     /*  APP_STATE snapshot 복사본                                              */
-    /*                                                                            */
+    /*                                                                          */
     /*  애플리케이션 레이어의 경계 규칙을 지키기 위해                           */
     /*  저수준 드라이버를 직접 읽지 않고, APP_STATE snapshot 만 복사해서 쓴다.   */
     /* ---------------------------------------------------------------------- */
@@ -88,7 +88,7 @@ typedef struct
     app_clock_state_t    clock;
 
     /* ---------------------------------------------------------------------- */
-    /*  validity latch                                                          */
+    /*  validity latch                                                         */
     /* ---------------------------------------------------------------------- */
     bool     baro_valid;
     bool     gps_valid;
@@ -96,6 +96,7 @@ typedef struct
     bool     altitude_valid;
     bool     heading_valid;
     bool     clock_valid;
+    bool     gps_time_valid;
     bool     derived_valid;
     bool     flight_active;
     bool     trail_valid;
@@ -113,25 +114,47 @@ typedef struct
 
     /* ---------------------------------------------------------------------- */
     /*  페이지/렌더러가 직접 참조하는 공개 표시값                               */
-    /*                                                                            */
+    /*                                                                          */
     /*  baro_altitude_m / baro_vario_mps                                        */
     /*  - 화면에 실제로 뿌리는 5Hz publish 값                                   */
     /*  - 고도는 1m, vario 는 0.1m/s resolution 으로 양자화한다.               */
-    /*                                                                            */
+    /*                                                                          */
+    /*  ground_speed_kmh                                                        */
+    /*  - 화면에 실제로 뿌리는 5Hz publish speed                                */
+    /*  - 좌/우 큰 숫자 블록은 이 값을 사용한다.                                */
+    /*                                                                          */
+    /*  gs_bar_speed_kmh                                                        */
+    /*  - 우측 14px GS bar 전용 고속 경로                                       */
+    /*  - GPS raw gSpeed 를 km/h 로 바꾼 값이며, 숫자 표시보다 더 빠르게 갱신된다.*/
+    /*                                                                          */
+    /*  fast_vario_bar_mps                                                      */
+    /*  - 좌측 14px VARIO bar 전용 고속 경로                                     */
+    /*  - APP_STATE fast vario path를 사용하고, 숫자 표시용 바리오와는 별도 필터  */
+    /*    를 거친다.                                                            */
+    /*                                                                          */
+    /*  average_vario_mps                                                       */
+    /*  - Flytec 스타일 integrating / average vario 용 최근 평균 상승률         */
+    /*                                                                          */
+    /*  glide_ratio                                                             */
+    /*  - 최근 평균 sink 와 최근 평균 GS 로 계산한 활공비                        */
+    /*                                                                          */
     /*  alt1_absolute_m                                                         */
-    /*  - Flytec ALT1 개념: sea-level / absolute altitude                       */
-    /*                                                                            */
+    /*  - Flytec ALT1 개념: absolute altitude                                   */
+    /*                                                                          */
     /*  alt2_relative_m                                                         */
     /*  - Flytec ALT2 개념: 사용자가 캡처한 기준고도 대비 상대고도               */
-    /*                                                                            */
+    /*                                                                          */
     /*  alt3_accum_gain_m                                                       */
     /*  - Flytec ALT3 개념: 누적 상승고도                                       */
     /* ---------------------------------------------------------------------- */
     float    baro_altitude_m;
     float    baro_vario_mps;
     float    ground_speed_kmh;
+    float    gs_bar_speed_kmh;
+    float    fast_vario_bar_mps;
     float    heading_deg;
     float    max_top_vario_mps;
+    float    max_speed_kmh;
     float    average_vario_mps;
     float    glide_ratio;
     float    alt1_absolute_m;
@@ -150,6 +173,8 @@ typedef struct
     float    last_measured_altitude_m;
     float    last_accum_altitude_m;
     float    last_heading_deg;
+    float    last_published_ground_speed_kmh;
+    int8_t   speed_trend;
 
     /* ---------------------------------------------------------------------- */
     /*  timestamp / publish / flight timer                                      */
@@ -157,6 +182,9 @@ typedef struct
     uint8_t  local_hour;
     uint8_t  local_min;
     uint8_t  local_sec;
+    uint8_t  gps_hour;
+    uint8_t  gps_min;
+    uint8_t  gps_sec;
     uint8_t  heading_source;
 
     uint32_t last_baro_sample_count;
@@ -170,24 +198,26 @@ typedef struct
     uint32_t flight_time_s;
 
     /* ---------------------------------------------------------------------- */
-    /*  5Hz publish history                                                    */
-    /*                                                                            */
-    /*  history_altitude_m                                                     */
-    /*  - PAGE 1 altitude trend graph의 sparkline 데이터                        */
-    /*                                                                            */
-    /*  history_vario_mps                                                      */
-    /*  - average/integrated vario 계산용 최근 publish history                  */
-    /*  - digital_vario_average_seconds 설정값이 이 배열 길이보다 길어져도       */
-    /*    가용 샘플 수까지만 평균낸다.                                          */
+    /*  5Hz publish history                                                     */
+    /*                                                                          */
+    /*  history_altitude_m                                                      */
+    /*  - altitude sparkline / trend 용 이력                                    */
+    /*                                                                          */
+    /*  history_vario_mps                                                       */
+    /*  - integrated / average vario 계산용 최근 publish history               */
+    /*                                                                          */
+    /*  history_speed_kmh                                                       */
+    /*  - glide ratio 계산용 최근 publish speed history                        */
     /* ---------------------------------------------------------------------- */
     uint16_t history_head;
     uint16_t history_count;
     float    history_altitude_m[VARIO_HISTORY_MAX_SAMPLES];
     float    history_vario_mps[VARIO_HISTORY_MAX_SAMPLES];
+    float    history_speed_kmh[VARIO_HISTORY_MAX_SAMPLES];
 
     /* ---------------------------------------------------------------------- */
-    /*  breadcrumb trail ring buffer                                           */
-    /*                                                                            */
+    /*  breadcrumb trail ring buffer                                            */
+    /*                                                                          */
     /*  page 2 는 north-up trail 이므로,                                        */
     /*  각 점의 절대 lat/lon 을 저장해 두고 화면 그릴 때 현재 위치 기준         */
     /*  ENU 근사로 dx/dy 로 바꿔 사용한다.                                      */
