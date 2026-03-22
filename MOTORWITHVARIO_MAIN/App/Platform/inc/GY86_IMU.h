@@ -28,18 +28,72 @@ extern "C" {
 #endif
 
 /* -------------------------------------------------------------------------- */
+/*  secondary bus handle / pin mapping                                          */
+/*                                                                            */
+/*  USE_DOUBLE_BAROSENSOR = 2 모드에서만 실제로 사용한다.                      */
+/*  현재 MOTORWITHVARIO_MAIN 의 CubeMX 출력은                                  */
+/*  - I2C1 : PB6/PB7                                                            */
+/*  - I2C2 : PB10/PB11                                                          */
+/*  이므로, 기본값도 그 배치를 그대로 반영한다.                                 */
+/*                                                                            */
+/*  나중에 CubeMX에서 I2C2 핀을 바꿔도 ioc 재생성을 건드릴 필요 없이            */
+/*  이 헤더의 override만 바꾸면 되게 만든다.                                   */
+/* -------------------------------------------------------------------------- */
+#ifndef GY86_IMU_I2C2_HANDLE
+#define GY86_IMU_I2C2_HANDLE hi2c2
+#endif
+
+#ifndef GY86_IMU_I2C1_SCL_GPIO_PORT
+#define GY86_IMU_I2C1_SCL_GPIO_PORT I2C_SCL_GY_GPIO_Port
+#endif
+
+#ifndef GY86_IMU_I2C1_SCL_PIN
+#define GY86_IMU_I2C1_SCL_PIN I2C_SCL_GY_Pin
+#endif
+
+#ifndef GY86_IMU_I2C1_SDA_GPIO_PORT
+#define GY86_IMU_I2C1_SDA_GPIO_PORT I2C_SDA_GY_GPIO_Port
+#endif
+
+#ifndef GY86_IMU_I2C1_SDA_PIN
+#define GY86_IMU_I2C1_SDA_PIN I2C_SDA_GY_Pin
+#endif
+
+#ifndef GY86_IMU_I2C2_SCL_GPIO_PORT
+#define GY86_IMU_I2C2_SCL_GPIO_PORT GPIOB
+#endif
+
+#ifndef GY86_IMU_I2C2_SCL_PIN
+#define GY86_IMU_I2C2_SCL_PIN GPIO_PIN_10
+#endif
+
+#ifndef GY86_IMU_I2C2_SDA_GPIO_PORT
+#define GY86_IMU_I2C2_SDA_GPIO_PORT GPIOB
+#endif
+
+#ifndef GY86_IMU_I2C2_SDA_PIN
+#define GY86_IMU_I2C2_SDA_PIN GPIO_PIN_11
+#endif
+
+/* -------------------------------------------------------------------------- */
 /*  dual MS5611 compile-time switch                                            */
 /*                                                                            */
 /*  USE_DOUBLE_BAROSENSOR = 0                                                 */
 /*  - 기존 GY-86 onboard MS5611 한 개(기본 0x77)만 사용한다.                  */
 /*                                                                            */
 /*  USE_DOUBLE_BAROSENSOR = 1                                                 */
-/*  - 같은 I2C bus 에 MS5611 두 개(0x77 + 0x76)를 둔다.                      */
+/*  - 같은 I2C1 bus 에 MS5611 두 개(0x77 + 0x76)를 둔다.                      */
 /*  - driver 내부에서 pressure/temperature 를 평균 fuse 해서                   */
 /*    APP_STATE에는 "하나의 가상 baro" 처럼 publish 한다.                     */
+/*                                                                            */
+/*  USE_DOUBLE_BAROSENSOR = 2                                                 */
+/*  - I2C1 과 I2C2 에 각각 MS5611 하나씩 둔다.                                 */
+/*  - 두 센서는 기본적으로 같은 주소를 써도 된다.                              */
+/*  - 즉 "기존 onboard MS5611 +히 동일하고, 단지 source  I2C2 외부 MS5611" 구성을 겨냥한다.           */
+/*  - fuse 방식은 mode 1과 완전bus만 하나 더 생긴다.   */
 /* -------------------------------------------------------------------------- */
 #ifndef USE_DOUBLE_BAROSENSOR
-#define USE_DOUBLE_BAROSENSOR 0u
+#define USE_DOUBLE_BAROSENSOR 2u
 #endif
 
 #ifndef GY86_MS5611_ADDR_PRIMARY
@@ -48,6 +102,10 @@ extern "C" {
 
 #ifndef GY86_MS5611_ADDR_SECONDARY
 #define GY86_MS5611_ADDR_SECONDARY (0x76u << 1)
+#endif
+
+#ifndef GY86_MS5611_ADDR_I2C2
+#define GY86_MS5611_ADDR_I2C2 GY86_MS5611_ADDR_PRIMARY
 #endif
 
 #if USE_DOUBLE_BAROSENSOR

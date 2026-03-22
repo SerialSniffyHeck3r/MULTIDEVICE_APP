@@ -12,6 +12,9 @@
 /* -------------------------------------------------------------------------- */
 
 extern I2C_HandleTypeDef GY86_IMU_I2C_HANDLE;
+#if (USE_DOUBLE_BAROSENSOR == 2u)
+extern I2C_HandleTypeDef GY86_IMU_I2C2_HANDLE;
+#endif
 
 /* -------------------------------------------------------------------------- */
 /*  GY-86 내부 칩 주소                                                         */
@@ -99,19 +102,69 @@ typedef struct
 } gy86_backend_ops_t;
 
 /* -------------------------------------------------------------------------- */
+/*  I2C bus descriptor                                                         */
+/*                                                                            */
+/*  이번 버전의 핵심은 "MS5611 source를 하나 더 추가하되, 상위 파이프라인은      */
+/*  그대로 두는 것" 이다.                                                     */
+/*                                                                            */
+/*  그래서 MS5611 device state에는 "주소(addr)" 뿐 아니라                     */
+/*  "어느 HAL I2C handle / 어느 핀쌍" 을 쓰는지까지 같이 묶어 둔다.             */
+/*                                                                            */
+/*  mode 0 : bus1 + addr_primary                                               */
+/*  mode 1 : bus1 + addr_primary / bus1 + addr_secondary                       */
+/*  mode 2 : bus1 + addr_primary / bus2 + addr_i2c2                            */
+/*                                                                            */
+/*  fuse logic은 세 모드 모두 동일하고, 단지 각 sensor가 접근하는 physical bus만   */
+/*  달라진다.                                                                  */
+/* -------------------------------------------------------------------------- */
+typedef struct
+{
+    I2C_HandleTypeDef *handle;
+    GPIO_TypeDef      *scl_port;
+    uint16_t           scl_pin;
+    GPIO_TypeDef      *sda_port;
+    uint16_t           sda_pin;
+    uint8_t            bus_id;
+} gy86_i2c_bus_desc_t;
+
+static const gy86_i2c_bus_desc_t s_gy86_i2c_bus1 =
+{
+    &GY86_IMU_I2C_HANDLE,
+    GY86_IMU_I2C1_SCL_GPIO_PORT,
+    GY86_IMU_I2C1_SCL_PIN,
+    GY86_IMU_I2C1_SDA_GPIO_PORT,
+    GY86_IMU_I2C1_SDA_PIN,
+    1u
+};
+
+#if (USE_DOUBLE_BAROSENSOR == 2u)
+static const gy86_i2c_bus_desc_t s_gy86_i2c_bus2 =
+{
+    &GY86_IMU_I2C2_HANDLE,
+    GY86_IMU_I2C2_SCL_GPIO_PORT,
+    GY86_IMU_I2C2_SCL_PIN,
+    GY86_IMU_I2C2_SDA_GPIO_PORT,
+    GY86_IMU_I2C2_SDA_PIN,
+    2u
+};
+#endif
+
+/* -------------------------------------------------------------------------- */
 /*  드라이버 내부 런타임 상태                                                   */
 /* -------------------------------------------------------------------------- */
 
 typedef struct
 {
     /* ---------------------------------------------------------------------- */
-    /*  dual MS5611을 같은 I2C bus에서 운용하기 위한 내부 per-device state      */
+    /*  dual MS5611 per-device state                                           */
     /*                                                                        */
-    /*  addr         : 0x77 / 0x76 중 실제 장착 주소                           */
+    /*  bus          : 어떤 I2C peripheral / 어떤 핀쌍을 쓰는가                */
+    /*  addr         : 그 bus에서 접근할 실제 7-bit<<1 주소                    */
     /*  online       : 해당 센서 하나가 현재 살아 있는가                       */
     /*  error_streak : runtime 연속 실패 streak                                */
     /*  phase        : 0:D1 start, 1:D1 read+D2 start, 2:D2 read               */
     /* ---------------------------------------------------------------------- */
+    const gy86_i2c_bus_desc_t *bus;
     uint8_t  addr;
     uint8_t  online;
     uint8_t  error_streak;
@@ -181,7 +234,9 @@ void GY86_RecordRuntimeErrorAndMaybeOffline(uint8_t device_mask,
                                             app_gy86_state_t *imu);
 
 
-static void GY86_Ms5611_DeviceRuntimeInit(gy86_ms5611_device_t *dev, uint8_t addr)
+static void GY86_Ms5611_DeviceRuntimeInit(gy86_ms5611_device_t *dev,
+                                          const gy86_i2c_bus_desc_t *bus,
+                                          uint8_t addr)
 {
     if (dev == 0)
     {
@@ -189,15 +244,36 @@ static void GY86_Ms5611_DeviceRuntimeInit(gy86_ms5611_device_t *dev, uint8_t add
     }
 
     memset(dev, 0, sizeof(*dev));
+    dev->bus = bus;
     dev->addr = addr;
 }
 
 static void GY86_Ms5611_RuntimeInit(void)
 {
-    GY86_Ms5611_DeviceRuntimeInit(&s_gy86_rt.ms5611_dev[0], GY86_MS5611_ADDR_PRIMARY);
+    /* ------------------------------------------------------------------ */
+    /*  device[0]은 항상 "기존 onboard GY-86 MS5611" 역할을 맡긴다.      */
+    /* ------------------------------------------------------------------ */
+    GY86_Ms5611_DeviceRuntimeInit(&s_gy86_rt.ms5611_dev[0],
+                                  &s_gy86_i2c_bus1,
+                                  GY86_MS5611_ADDR_PRIMARY);
 
-#if USE_DOUBLE_BAROSENSOR
-    GY86_Ms5611_DeviceRuntimeInit(&s_gy86_rt.ms5611_dev[1], GY86_MS5611_ADDR_SECONDARY);
+#if (USE_DOUBLE_BAROSENSOR == 1u)
+    /* ------------------------------------------------------------------ */
+    /*  mode 1                                                             */
+    /*  - I2C1 bus 안에서 0x77 + 0x76 두 주소를 사용한다.                  */
+    /* ------------------------------------------------------------------ */
+    GY86_Ms5611_DeviceRuntimeInit(&s_gy86_rt.ms5611_dev[1],
+                                  &s_gy86_i2c_bus1,
+                                  GY86_MS5611_ADDR_SECONDARY);
+#elif (USE_DOUBLE_BAROSENSOR == 2u)
+    /* ------------------------------------------------------------------ */
+    /*  mode 2                                                             */
+    /*  - I2C2에 외부 MS5611 하나를 더 단다.                               */
+    /*  - bus가 다르므로 주소는 onboard와 같아도 된다.                     */
+    /* ------------------------------------------------------------------ */
+    GY86_Ms5611_DeviceRuntimeInit(&s_gy86_rt.ms5611_dev[1],
+                                  &s_gy86_i2c_bus2,
+                                  GY86_MS5611_ADDR_I2C2);
 #endif
 }
 
@@ -325,34 +401,136 @@ static void GY86_I2C_ShortDelay(void)
     }
 }
 
-static void GY86_I2C_ForceBusPinsToGpioOdPullup(void)
+static void GY86_I2C_EnableGpioClock(GPIO_TypeDef *port)
+{
+    if (port == GPIOA)
+    {
+        __HAL_RCC_GPIOA_CLK_ENABLE();
+    }
+    else if (port == GPIOB)
+    {
+        __HAL_RCC_GPIOB_CLK_ENABLE();
+    }
+#ifdef GPIOC
+    else if (port == GPIOC)
+    {
+        __HAL_RCC_GPIOC_CLK_ENABLE();
+    }
+#endif
+#ifdef GPIOD
+    else if (port == GPIOD)
+    {
+        __HAL_RCC_GPIOD_CLK_ENABLE();
+    }
+#endif
+#ifdef GPIOE
+    else if (port == GPIOE)
+    {
+        __HAL_RCC_GPIOE_CLK_ENABLE();
+    }
+#endif
+#ifdef GPIOF
+    else if (port == GPIOF)
+    {
+        __HAL_RCC_GPIOF_CLK_ENABLE();
+    }
+#endif
+#ifdef GPIOG
+    else if (port == GPIOG)
+    {
+        __HAL_RCC_GPIOG_CLK_ENABLE();
+    }
+#endif
+#ifdef GPIOH
+    else if (port == GPIOH)
+    {
+        __HAL_RCC_GPIOH_CLK_ENABLE();
+    }
+#endif
+}
+
+static void GY86_I2C_EnablePeripheralClock(const gy86_i2c_bus_desc_t *bus)
+{
+    if ((bus == 0) || (bus->handle == 0) || (bus->handle->Instance == 0))
+    {
+        return;
+    }
+
+    if (bus->handle->Instance == I2C1)
+    {
+        __HAL_RCC_I2C1_CLK_ENABLE();
+    }
+#ifdef I2C2
+    else if (bus->handle->Instance == I2C2)
+    {
+        __HAL_RCC_I2C2_CLK_ENABLE();
+    }
+#endif
+#ifdef I2C3
+    else if (bus->handle->Instance == I2C3)
+    {
+        __HAL_RCC_I2C3_CLK_ENABLE();
+    }
+#endif
+}
+
+static void GY86_I2C_ForceBusPinsToGpioOdPullup(const gy86_i2c_bus_desc_t *bus)
 {
     GPIO_InitTypeDef gpio_init;
 
+    if ((bus == 0) ||
+        (bus->scl_port == 0) ||
+        (bus->sda_port == 0) ||
+        (bus->scl_pin == 0u) ||
+        (bus->sda_pin == 0u))
+    {
+        return;
+    }
+
     /* ---------------------------------------------------------------------- */
-    /*  현재 프로젝트의 GY I2C1 핀은 PB6/PB7 이다.                              */
     /*  bus recovery 동안은 AF 대신 GPIO open-drain 으로 잠깐 되돌린다.        */
+    /*  mode 2에서는 I2C2(PB10/PB11)도 이 경로를 같은 로직으로 처리한다.      */
     /* ---------------------------------------------------------------------- */
-    __HAL_RCC_GPIOB_CLK_ENABLE();
+    GY86_I2C_EnableGpioClock(bus->scl_port);
+    if (bus->sda_port != bus->scl_port)
+    {
+        GY86_I2C_EnableGpioClock(bus->sda_port);
+    }
 
     memset(&gpio_init, 0, sizeof(gpio_init));
-    gpio_init.Pin   = I2C_SCL_GY_Pin | I2C_SDA_GY_Pin;
     gpio_init.Mode  = GPIO_MODE_OUTPUT_OD;
     gpio_init.Pull  = GPIO_PULLUP;
     gpio_init.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-    HAL_GPIO_Init(GPIOB, &gpio_init);
+
+    if (bus->scl_port == bus->sda_port)
+    {
+        gpio_init.Pin = bus->scl_pin | bus->sda_pin;
+        HAL_GPIO_Init(bus->scl_port, &gpio_init);
+    }
+    else
+    {
+        gpio_init.Pin = bus->scl_pin;
+        HAL_GPIO_Init(bus->scl_port, &gpio_init);
+        gpio_init.Pin = bus->sda_pin;
+        HAL_GPIO_Init(bus->sda_port, &gpio_init);
+    }
 
     /* bus idle-high 상태 */
-    HAL_GPIO_WritePin(I2C_SCL_GY_GPIO_Port, I2C_SCL_GY_Pin, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(I2C_SDA_GY_GPIO_Port, I2C_SDA_GY_Pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(bus->scl_port, bus->scl_pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(bus->sda_port, bus->sda_pin, GPIO_PIN_SET);
     GY86_I2C_ShortDelay();
 }
 
-static void GY86_I2C_BusUnwedge(void)
+static void GY86_I2C_BusUnwedge(const gy86_i2c_bus_desc_t *bus)
 {
     uint8_t pulse_index;
 
-    GY86_I2C_ForceBusPinsToGpioOdPullup();
+    if (bus == 0)
+    {
+        return;
+    }
+
+    GY86_I2C_ForceBusPinsToGpioOdPullup(bus);
 
     /* ---------------------------------------------------------------------- */
     /*  slave가 SDA를 low로 붙잡고 있으면 SCL을 몇 번 흔들어서                  */
@@ -360,45 +538,50 @@ static void GY86_I2C_BusUnwedge(void)
     /* ---------------------------------------------------------------------- */
     for (pulse_index = 0u; pulse_index < 9u; pulse_index++)
     {
-        if (HAL_GPIO_ReadPin(I2C_SDA_GY_GPIO_Port, I2C_SDA_GY_Pin) == GPIO_PIN_SET)
+        if (HAL_GPIO_ReadPin(bus->sda_port, bus->sda_pin) == GPIO_PIN_SET)
         {
             break;
         }
 
-        HAL_GPIO_WritePin(I2C_SCL_GY_GPIO_Port, I2C_SCL_GY_Pin, GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(bus->scl_port, bus->scl_pin, GPIO_PIN_RESET);
         GY86_I2C_ShortDelay();
 
-        HAL_GPIO_WritePin(I2C_SCL_GY_GPIO_Port, I2C_SCL_GY_Pin, GPIO_PIN_SET);
+        HAL_GPIO_WritePin(bus->scl_port, bus->scl_pin, GPIO_PIN_SET);
         GY86_I2C_ShortDelay();
     }
 
     /* ---------------------------------------------------------------------- */
     /*  STOP 모양을 한 번 만들어서 bus를 idle 상태로 복귀시킨다.               */
     /* ---------------------------------------------------------------------- */
-    HAL_GPIO_WritePin(I2C_SDA_GY_GPIO_Port, I2C_SDA_GY_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(bus->sda_port, bus->sda_pin, GPIO_PIN_RESET);
     GY86_I2C_ShortDelay();
 
-    HAL_GPIO_WritePin(I2C_SCL_GY_GPIO_Port, I2C_SCL_GY_Pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(bus->scl_port, bus->scl_pin, GPIO_PIN_SET);
     GY86_I2C_ShortDelay();
 
-    HAL_GPIO_WritePin(I2C_SDA_GY_GPIO_Port, I2C_SDA_GY_Pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(bus->sda_port, bus->sda_pin, GPIO_PIN_SET);
     GY86_I2C_ShortDelay();
 }
 
-static void GY86_I2C_PeripheralSoftReset(void)
+static void GY86_I2C_PeripheralSoftReset(const gy86_i2c_bus_desc_t *bus)
 {
+    if ((bus == 0) || (bus->handle == 0) || (bus->handle->Instance == 0))
+    {
+        return;
+    }
+
     /* ---------------------------------------------------------------------- */
     /*  STM32F4 I2C errata workaround 쪽에서 자주 쓰는 SWRST 경로              */
     /* ---------------------------------------------------------------------- */
-    __HAL_RCC_I2C1_CLK_ENABLE();
+    GY86_I2C_EnablePeripheralClock(bus);
 
-    SET_BIT(GY86_IMU_I2C_HANDLE.Instance->CR1, I2C_CR1_SWRST);
+    SET_BIT(bus->handle->Instance->CR1, I2C_CR1_SWRST);
     GY86_I2C_ShortDelay();
-    CLEAR_BIT(GY86_IMU_I2C_HANDLE.Instance->CR1, I2C_CR1_SWRST);
+    CLEAR_BIT(bus->handle->Instance->CR1, I2C_CR1_SWRST);
     GY86_I2C_ShortDelay();
 }
 
-static void GY86_I2C_ApplySafeClockIfNeeded(void)
+static void GY86_I2C_ApplySafeClockIfNeededOne(const gy86_i2c_bus_desc_t *bus)
 {
 #if (GY86_IMU_FORCE_SAFE_STANDARD_MODE_ON_100K != 0u)
     /* ---------------------------------------------------------------------- */
@@ -409,18 +592,43 @@ static void GY86_I2C_ApplySafeClockIfNeeded(void)
     /*  CubeMX가 100000으로 다시 생성해도                                     */
     /*  driver init 시점에 80000으로 한 번 더 덮어써서 민감 구간을 피한다.     */
     /* ---------------------------------------------------------------------- */
-    if ((GY86_IMU_I2C_HANDLE.Init.ClockSpeed >= 88000u) &&
-        (GY86_IMU_I2C_HANDLE.Init.ClockSpeed <= 100000u))
+    if ((bus == 0) || (bus->handle == 0))
     {
-        (void)HAL_I2C_DeInit(&GY86_IMU_I2C_HANDLE);
-        GY86_IMU_I2C_HANDLE.Init.ClockSpeed = GY86_IMU_SAFE_STANDARD_MODE_HZ;
-        (void)HAL_I2C_Init(&GY86_IMU_I2C_HANDLE);
+        return;
     }
+
+    if ((bus->handle->Init.ClockSpeed >= 88000u) &&
+        (bus->handle->Init.ClockSpeed <= 100000u))
+    {
+        (void)HAL_I2C_DeInit(bus->handle);
+        bus->handle->Init.ClockSpeed = GY86_IMU_SAFE_STANDARD_MODE_HZ;
+        (void)HAL_I2C_Init(bus->handle);
+    }
+#else
+    (void)bus;
 #endif
 }
 
-static void GY86_I2C_RecoverBus(void)
+static void GY86_I2C_ApplySafeClockIfNeeded(void)
 {
+    /* ---------------------------------------------------------------------- */
+    /*  MPU/HMC/MS5611 onboard가 붙는 primary bus는 항상 검사한다.             */
+    /*  mode 2에서는 외부 baro가 붙는 secondary bus도 같은 규칙을 적용한다.   */
+    /* ---------------------------------------------------------------------- */
+    GY86_I2C_ApplySafeClockIfNeededOne(&s_gy86_i2c_bus1);
+
+#if (USE_DOUBLE_BAROSENSOR == 2u)
+    GY86_I2C_ApplySafeClockIfNeededOne(&s_gy86_i2c_bus2);
+#endif
+}
+
+static void GY86_I2C_RecoverBus(const gy86_i2c_bus_desc_t *bus)
+{
+    if ((bus == 0) || (bus->handle == 0))
+    {
+        return;
+    }
+
     /* ---------------------------------------------------------------------- */
     /*  recovery debug 카운터                                                  */
     /* ---------------------------------------------------------------------- */
@@ -430,29 +638,37 @@ static void GY86_I2C_RecoverBus(void)
     /* ---------------------------------------------------------------------- */
     /*  1) peripheral SWRST                                                    */
     /* ---------------------------------------------------------------------- */
-    GY86_I2C_PeripheralSoftReset();
+    GY86_I2C_PeripheralSoftReset(bus);
 
     /* ---------------------------------------------------------------------- */
     /*  2) HAL handle / peripheral deinit                                      */
     /* ---------------------------------------------------------------------- */
-    (void)HAL_I2C_DeInit(&GY86_IMU_I2C_HANDLE);
+    (void)HAL_I2C_DeInit(bus->handle);
 
     /* ---------------------------------------------------------------------- */
     /*  3) GPIO mode에서 bus-unwedge                                           */
     /* ---------------------------------------------------------------------- */
-    GY86_I2C_BusUnwedge();
+    GY86_I2C_BusUnwedge(bus);
 
     /* ---------------------------------------------------------------------- */
     /*  4) HAL init로 peripheral 복구                                          */
     /* ---------------------------------------------------------------------- */
-    (void)HAL_I2C_Init(&GY86_IMU_I2C_HANDLE);
+    (void)HAL_I2C_Init(bus->handle);
 }
 
-static HAL_StatusTypeDef GY86_I2C_WriteU8(uint8_t dev_addr, uint8_t reg_addr, uint8_t value)
+static HAL_StatusTypeDef GY86_I2C_WriteU8_Bus(const gy86_i2c_bus_desc_t *bus,
+                                              uint8_t dev_addr,
+                                              uint8_t reg_addr,
+                                              uint8_t value)
 {
     HAL_StatusTypeDef st;
 
-    st = HAL_I2C_Mem_Write(&GY86_IMU_I2C_HANDLE,
+    if ((bus == 0) || (bus->handle == 0))
+    {
+        return HAL_ERROR;
+    }
+
+    st = HAL_I2C_Mem_Write(bus->handle,
                            dev_addr,
                            reg_addr,
                            I2C_MEMADD_SIZE_8BIT,
@@ -462,9 +678,9 @@ static HAL_StatusTypeDef GY86_I2C_WriteU8(uint8_t dev_addr, uint8_t reg_addr, ui
 
     if (st != HAL_OK)
     {
-        GY86_I2C_RecoverBus();
+        GY86_I2C_RecoverBus(bus);
 
-        st = HAL_I2C_Mem_Write(&GY86_IMU_I2C_HANDLE,
+        st = HAL_I2C_Mem_Write(bus->handle,
                                dev_addr,
                                reg_addr,
                                I2C_MEMADD_SIZE_8BIT,
@@ -476,14 +692,20 @@ static HAL_StatusTypeDef GY86_I2C_WriteU8(uint8_t dev_addr, uint8_t reg_addr, ui
     return st;
 }
 
-static HAL_StatusTypeDef GY86_I2C_Read(uint8_t dev_addr,
-                                       uint8_t reg_addr,
-                                       uint8_t *buffer,
-                                       uint16_t length)
+static HAL_StatusTypeDef GY86_I2C_Read_Bus(const gy86_i2c_bus_desc_t *bus,
+                                           uint8_t dev_addr,
+                                           uint8_t reg_addr,
+                                           uint8_t *buffer,
+                                           uint16_t length)
 {
     HAL_StatusTypeDef st;
 
-    st = HAL_I2C_Mem_Read(&GY86_IMU_I2C_HANDLE,
+    if ((bus == 0) || (bus->handle == 0))
+    {
+        return HAL_ERROR;
+    }
+
+    st = HAL_I2C_Mem_Read(bus->handle,
                           dev_addr,
                           reg_addr,
                           I2C_MEMADD_SIZE_8BIT,
@@ -493,9 +715,9 @@ static HAL_StatusTypeDef GY86_I2C_Read(uint8_t dev_addr,
 
     if (st != HAL_OK)
     {
-        GY86_I2C_RecoverBus();
+        GY86_I2C_RecoverBus(bus);
 
-        st = HAL_I2C_Mem_Read(&GY86_IMU_I2C_HANDLE,
+        st = HAL_I2C_Mem_Read(bus->handle,
                               dev_addr,
                               reg_addr,
                               I2C_MEMADD_SIZE_8BIT,
@@ -507,11 +729,18 @@ static HAL_StatusTypeDef GY86_I2C_Read(uint8_t dev_addr,
     return st;
 }
 
-static HAL_StatusTypeDef GY86_I2C_CommandOnly(uint8_t dev_addr, uint8_t command)
+static HAL_StatusTypeDef GY86_I2C_CommandOnly_Bus(const gy86_i2c_bus_desc_t *bus,
+                                                  uint8_t dev_addr,
+                                                  uint8_t command)
 {
     HAL_StatusTypeDef st;
 
-    st = HAL_I2C_Master_Transmit(&GY86_IMU_I2C_HANDLE,
+    if ((bus == 0) || (bus->handle == 0))
+    {
+        return HAL_ERROR;
+    }
+
+    st = HAL_I2C_Master_Transmit(bus->handle,
                                  dev_addr,
                                  &command,
                                  1u,
@@ -519,9 +748,9 @@ static HAL_StatusTypeDef GY86_I2C_CommandOnly(uint8_t dev_addr, uint8_t command)
 
     if (st != HAL_OK)
     {
-        GY86_I2C_RecoverBus();
+        GY86_I2C_RecoverBus(bus);
 
-        st = HAL_I2C_Master_Transmit(&GY86_IMU_I2C_HANDLE,
+        st = HAL_I2C_Master_Transmit(bus->handle,
                                      dev_addr,
                                      &command,
                                      1u,
@@ -531,13 +760,19 @@ static HAL_StatusTypeDef GY86_I2C_CommandOnly(uint8_t dev_addr, uint8_t command)
     return st;
 }
 
-static HAL_StatusTypeDef GY86_I2C_ReadDirect(uint8_t dev_addr,
-                                             uint8_t *buffer,
-                                             uint16_t length)
+static HAL_StatusTypeDef GY86_I2C_ReadDirect_Bus(const gy86_i2c_bus_desc_t *bus,
+                                                 uint8_t dev_addr,
+                                                 uint8_t *buffer,
+                                                 uint16_t length)
 {
     HAL_StatusTypeDef st;
 
-    st = HAL_I2C_Master_Receive(&GY86_IMU_I2C_HANDLE,
+    if ((bus == 0) || (bus->handle == 0))
+    {
+        return HAL_ERROR;
+    }
+
+    st = HAL_I2C_Master_Receive(bus->handle,
                                 dev_addr,
                                 buffer,
                                 length,
@@ -545,9 +780,9 @@ static HAL_StatusTypeDef GY86_I2C_ReadDirect(uint8_t dev_addr,
 
     if (st != HAL_OK)
     {
-        GY86_I2C_RecoverBus();
+        GY86_I2C_RecoverBus(bus);
 
-        st = HAL_I2C_Master_Receive(&GY86_IMU_I2C_HANDLE,
+        st = HAL_I2C_Master_Receive(bus->handle,
                                     dev_addr,
                                     buffer,
                                     length,
@@ -555,6 +790,35 @@ static HAL_StatusTypeDef GY86_I2C_ReadDirect(uint8_t dev_addr,
     }
 
     return st;
+}
+
+/* ---------------------------------------------------------------------- */
+/*  기존 MPU/HMC 경로는 여전히 primary bus(I2C1)를 쓴다.                    */
+/*  상위 코드는 바뀌지 않도록 thin wrapper를 남겨 둔다.                     */
+/* ---------------------------------------------------------------------- */
+static HAL_StatusTypeDef GY86_I2C_WriteU8(uint8_t dev_addr, uint8_t reg_addr, uint8_t value)
+{
+    return GY86_I2C_WriteU8_Bus(&s_gy86_i2c_bus1, dev_addr, reg_addr, value);
+}
+
+static HAL_StatusTypeDef GY86_I2C_Read(uint8_t dev_addr,
+                                       uint8_t reg_addr,
+                                       uint8_t *buffer,
+                                       uint16_t length)
+{
+    return GY86_I2C_Read_Bus(&s_gy86_i2c_bus1, dev_addr, reg_addr, buffer, length);
+}
+
+static HAL_StatusTypeDef GY86_I2C_CommandOnly(uint8_t dev_addr, uint8_t command)
+{
+    return GY86_I2C_CommandOnly_Bus(&s_gy86_i2c_bus1, dev_addr, command);
+}
+
+static HAL_StatusTypeDef GY86_I2C_ReadDirect(uint8_t dev_addr,
+                                             uint8_t *buffer,
+                                             uint16_t length)
+{
+    return GY86_I2C_ReadDirect_Bus(&s_gy86_i2c_bus1, dev_addr, buffer, length);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -577,7 +841,7 @@ static uint16_t GY86_SelectMpuPeriodMs(void)
 {
     uint32_t i2c_hz;
 
-    i2c_hz = GY86_IMU_I2C_HANDLE.Init.ClockSpeed;
+    i2c_hz = s_gy86_i2c_bus1.handle->Init.ClockSpeed;
 
     /* ---------------------------------------------------------------------- */
     /*  현재 MPU 설정은 DLPF=3 이라 accel/gyro 대역폭이 약 42~44Hz다.          */
@@ -877,35 +1141,37 @@ static HAL_StatusTypeDef GY86_Hmc5883l_Poll(uint32_t now_ms,
 /*                                                                            */
 /*  설계 포인트                                                               */
 /*  - USE_DOUBLE_BAROSENSOR=0 : 기존과 동일하게 단일 MS5611만 사용            */
-/*  - USE_DOUBLE_BAROSENSOR=1 : 같은 I2C bus 에 0x77 + 0x76 두 개를 둔다.    */
-/*  - driver 내부에서 두 센서의 compensated pressure/temperature 를 평균 fuse  */
-/*    해서 APP_STATE에는 기존과 동일한 단일 baro slice만 publish 한다.        */
+/*  - USE_DOUBLE_BAROSENSOR=1 : 같은 I2C1 bus 에 0x77 + 0x76 두 개를 둔다.   */
+/*  - USE_DOUBLE_BAROSENSOR=2 : I2C1 + I2C2 에 각각 하나씩 둔다.              */
+/*  - 세 모드 모두 driver 내부에서 compensated pressure/temperature 를 평균   */
+/*    fuse 해서 APP_STATE에는 기존과 동일한 단일 baro slice만 publish 한다.   */
 /*                                                                            */
 /*  즉 상위 APP_ALTITUDE / vario_app 은                                       */
 /*  "barometer가 1개인지 2개인지" 를 몰라도 된다.                             */
 /* -------------------------------------------------------------------------- */
 
-static HAL_StatusTypeDef GY86_Ms5611_ReadAdcFromAddress(uint8_t addr,
+static HAL_StatusTypeDef GY86_Ms5611_ReadAdcFromAddress(const gy86_i2c_bus_desc_t *bus,
+                                                        uint8_t addr,
                                                         uint32_t *raw_adc)
 {
     HAL_StatusTypeDef st;
     uint8_t read_command;
     uint8_t buffer[3];
 
-    if (raw_adc == 0)
+    if ((bus == 0) || (raw_adc == 0))
     {
         return HAL_ERROR;
     }
 
     read_command = MS5611_CMD_ADC_READ;
 
-    st = GY86_I2C_CommandOnly(addr, read_command);
+    st = GY86_I2C_CommandOnly_Bus(bus, addr, read_command);
     if (st != HAL_OK)
     {
         return st;
     }
 
-    st = GY86_I2C_ReadDirect(addr, buffer, sizeof(buffer));
+    st = GY86_I2C_ReadDirect_Bus(bus, addr, buffer, sizeof(buffer));
     if (st != HAL_OK)
     {
         return st;
@@ -918,7 +1184,8 @@ static HAL_StatusTypeDef GY86_Ms5611_ReadAdcFromAddress(uint8_t addr,
     return HAL_OK;
 }
 
-static HAL_StatusTypeDef GY86_Ms5611_ReadPromFromAddress(uint8_t addr,
+static HAL_StatusTypeDef GY86_Ms5611_ReadPromFromAddress(const gy86_i2c_bus_desc_t *bus,
+                                                         uint8_t addr,
                                                          uint16_t prom_c[7])
 {
     HAL_StatusTypeDef st;
@@ -926,7 +1193,7 @@ static HAL_StatusTypeDef GY86_Ms5611_ReadPromFromAddress(uint8_t addr,
     uint8_t buffer[2];
     uint8_t prom_index;
 
-    if (prom_c == 0)
+    if ((bus == 0) || (prom_c == 0))
     {
         return HAL_ERROR;
     }
@@ -937,13 +1204,13 @@ static HAL_StatusTypeDef GY86_Ms5611_ReadPromFromAddress(uint8_t addr,
     {
         command = (uint8_t)(MS5611_CMD_PROM_READ_BASE + (prom_index * 2u));
 
-        st = GY86_I2C_CommandOnly(addr, command);
+        st = GY86_I2C_CommandOnly_Bus(bus, addr, command);
         if (st != HAL_OK)
         {
             return st;
         }
 
-        st = GY86_I2C_ReadDirect(addr, buffer, sizeof(buffer));
+        st = GY86_I2C_ReadDirect_Bus(bus, addr, buffer, sizeof(buffer));
         if (st != HAL_OK)
         {
             return st;
@@ -976,13 +1243,13 @@ static HAL_StatusTypeDef GY86_Ms5611_InitOne(app_gy86_state_t *imu,
         return HAL_ERROR;
     }
 
-    if (dev->addr == 0u)
+    if ((dev->bus == 0) || (dev->addr == 0u))
     {
         return HAL_ERROR;
     }
 
     command = MS5611_CMD_RESET;
-    st = GY86_I2C_CommandOnly(dev->addr, command);
+    st = GY86_I2C_CommandOnly_Bus(dev->bus, dev->addr, command);
     imu->debug.last_hal_status_baro = (uint8_t)st;
     if (st != HAL_OK)
     {
@@ -991,7 +1258,7 @@ static HAL_StatusTypeDef GY86_Ms5611_InitOne(app_gy86_state_t *imu,
 
     HAL_Delay(3u);
 
-    st = GY86_Ms5611_ReadPromFromAddress(dev->addr, dev->prom_c);
+    st = GY86_Ms5611_ReadPromFromAddress(dev->bus, dev->addr, dev->prom_c);
     imu->debug.last_hal_status_baro = (uint8_t)st;
     if (st != HAL_OK)
     {
@@ -1132,7 +1399,8 @@ static void GY86_Ms5611_StoreCompensatedSample(gy86_ms5611_device_t *dev,
     dev->temp_cdeg = temp_cdeg;
     dev->pressure_hpa_x100 = (int32_t)(((((int64_t)dev->d1_raw * sens) /
                                           2097152LL) - off) / 32768LL);
-    dev->pressure_pa = dev->pressure_hpa_x100 * 100;
+    /* pressure_hpa_x100 은 hPa*100 이므로 수치적으로 이미 Pa 와 같다. */
+    dev->pressure_pa = dev->pressure_hpa_x100;
     dev->timestamp_ms = now_ms;
     dev->sample_count++;
     dev->valid = 1u;
@@ -1196,7 +1464,8 @@ static void GY86_Ms5611_PublishFusedSample(app_gy86_state_t *imu,
     imu->baro.d2_raw            = primary_dev->d2_raw;
     imu->baro.temp_cdeg         = (int32_t)(temp_sum / (int64_t)fused_count);
     imu->baro.pressure_hpa_x100 = (int32_t)(pressure_sum / (int64_t)fused_count);
-    imu->baro.pressure_pa       = imu->baro.pressure_hpa_x100 * 100;
+    /* fused pressure도 동일하게 hPa*100 == Pa 이다. */
+    imu->baro.pressure_pa       = imu->baro.pressure_hpa_x100;
 
     GY86_Ms5611_CopyPromToAppState(imu);
 
@@ -1224,7 +1493,7 @@ static HAL_StatusTypeDef GY86_Ms5611_PollOne(uint32_t now_ms,
         *device_updated = 0u;
     }
 
-    if ((imu == 0) || (dev == 0) || (dev->online == 0u))
+    if ((imu == 0) || (dev == 0) || (dev->bus == 0) || (dev->online == 0u))
     {
         return HAL_ERROR;
     }
@@ -1233,7 +1502,7 @@ static HAL_StatusTypeDef GY86_Ms5611_PollOne(uint32_t now_ms,
     {
         case 0u:
             command = MS5611_CMD_CONV_D1_OSR4096;
-            st = GY86_I2C_CommandOnly(dev->addr, command);
+            st = GY86_I2C_CommandOnly_Bus(dev->bus, dev->addr, command);
             imu->debug.last_hal_status_baro = (uint8_t)st;
             if (st != HAL_OK)
             {
@@ -1257,7 +1526,7 @@ static HAL_StatusTypeDef GY86_Ms5611_PollOne(uint32_t now_ms,
                 break;
             }
 
-            st = GY86_Ms5611_ReadAdcFromAddress(dev->addr, &dev->d1_raw);
+            st = GY86_Ms5611_ReadAdcFromAddress(dev->bus, dev->addr, &dev->d1_raw);
             imu->debug.last_hal_status_baro = (uint8_t)st;
             if (st != HAL_OK)
             {
@@ -1274,7 +1543,7 @@ static HAL_StatusTypeDef GY86_Ms5611_PollOne(uint32_t now_ms,
             }
 
             command = MS5611_CMD_CONV_D2_OSR4096;
-            st = GY86_I2C_CommandOnly(dev->addr, command);
+            st = GY86_I2C_CommandOnly_Bus(dev->bus, dev->addr, command);
             imu->debug.last_hal_status_baro = (uint8_t)st;
             if (st != HAL_OK)
             {
@@ -1300,7 +1569,7 @@ static HAL_StatusTypeDef GY86_Ms5611_PollOne(uint32_t now_ms,
                 break;
             }
 
-            st = GY86_Ms5611_ReadAdcFromAddress(dev->addr, &dev->d2_raw);
+            st = GY86_Ms5611_ReadAdcFromAddress(dev->bus, dev->addr, &dev->d2_raw);
             imu->debug.last_hal_status_baro = (uint8_t)st;
             if (st != HAL_OK)
             {
