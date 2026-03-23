@@ -139,7 +139,7 @@
 /*  - 1 : Motor_App                                                           */
 /*  - 0 : Vario_App                                                           */
 /* -------------------------------------------------------------------------- */
-static uint8_t g_use_motor_app = 1u;
+static uint8_t g_use_motor_app = 0u;
 
 /* USER CODE END PD */
 
@@ -153,19 +153,7 @@ static uint8_t g_use_motor_app = 1u;
 /* USER CODE BEGIN PV */
 
 
-/* -------------------------------------------------------------------------- */
-/*  delayed boot confirm 상태 저장 변수                                        */
-/*                                                                            */
-/*  s_app_boot_confirm_arm_ms                                                  */
-/*  - "이 시각부터 안정화 시간을 재자" 는 기준 tick을 담는다.                 */
-/*                                                                            */
-/*  s_app_boot_confirm_done                                                    */
-/*  - FW_AppGuard_ConfirmBootOk()를 딱 한 번만 호출하도록 막는 latch다.       */
-/*                                                                            */
-/*  둘 다 main.c의 USER CODE 영역에 두어 CubeMX 재생성으로 사라지지 않게 한다. */
-/* -------------------------------------------------------------------------- */
-static uint32_t s_app_boot_confirm_arm_ms = 0u;
-static uint8_t  s_app_boot_confirm_done   = 0u;
+
 
 
 /* USER CODE END PV */
@@ -465,8 +453,17 @@ int main(void)
   /*  - 여기서는 엔진의 내부 상태/하단바/토스트/팝업/legacy debug state를      */
   /*    초기화만 하고, 실제 LCD draw는 아직 하지 않는다.                       */
   /* ------------------------------------------------------------------------ */
-  UI_Engine_Init();
-
+  /* ------------------------------------------------------------------------ */
+  /*  상위 앱에 따라 UI 상단 계층 초기화를 분기한다.                           */
+  /*                                                                          */
+  /*  - Motor_App 는 자체 UI 렌더러를 사용하므로 shared UI_Engine을 올리지     */
+  /*    않는다.                                                                */
+  /*  - Vario_App 는 기존 shared UI_Engine 위에서 계속 동작한다.               */
+  /* ------------------------------------------------------------------------ */
+  if (g_use_motor_app == 0u)
+  {
+    UI_Engine_Init();
+  }
 
   /* ------------------------------------------------------------------------ */
   /*  CubeMX가 MSP init에서 priority를 다시 생성하더라도                       */
@@ -521,7 +518,14 @@ int main(void)
   /*  이후 나머지 센서/통신/스토리지 init가 진행되는 동안                     */
   /*  마지막으로 그려진 이 부트 로고가 화면에 남아 있게 된다.                 */
   /* ---------------------------------------------------------------------- */
-  UI_Engine_EarlyBootDraw();
+  if (g_use_motor_app != 0u)
+  {
+    Motor_App_EarlyBootDraw();
+  }
+  else
+  {
+    UI_Engine_EarlyBootDraw();
+  }
 
   /* ---------------------------------------------------------------------- */
   /* Soft Power 부팅 확인 게이트 진입                                        */
@@ -685,12 +689,15 @@ int main(void)
    /*    2) APP_BOOT_CONFIRM_DELAY_MS 만큼 시간이 흐른 뒤                      */
    /*  FW_AppGuard_ConfirmBootOk()를 딱 한 번 호출한다.                       */
    /* -------------------------------------------------------------------- */
-   s_app_boot_confirm_arm_ms = HAL_GetTick();
-   s_app_boot_confirm_done = 0u;
 
-
-   Vario_App_Init();
-
+   if (g_use_motor_app != 0u)
+   {
+     Motor_App_Init();
+   }
+   else
+   {
+     Vario_App_Init();
+   }
 
 
 
@@ -705,7 +712,14 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
-	  Vario_App_Task();
+	    if (g_use_motor_app != 0u)
+	    {
+	      Motor_App_Task();
+	    }
+	    else
+	    {
+	      Vario_App_Task();
+	    }
 
   }
 

@@ -102,6 +102,10 @@ void Error_Handler(void);
 #define BUTTON6_Pin GPIO_PIN_15
 #define BUTTON6_GPIO_Port GPIOE
 #define BUTTON6_EXTI_IRQn EXTI15_10_IRQn
+#define I2C_SCL_I2C2_Pin GPIO_PIN_10
+#define I2C_SCL_I2C2_GPIO_Port GPIOB
+#define I2C_SDA_I2C2_Pin GPIO_PIN_11
+#define I2C_SDA_I2C2_GPIO_Port GPIOB
 #define LCD_CS_Pin GPIO_PIN_12
 #define LCD_CS_GPIO_Port GPIOB
 #define LCD_SCK_Pin GPIO_PIN_13
