@@ -646,26 +646,50 @@ static void vario_display_draw_alt_badge(u8g2_t *u8g2, int16_t x, int16_t y_top,
 }
 
 
-static void vario_display_format_clock(char *buf, size_t buf_len, const vario_runtime_t *rt)
+static void vario_display_format_clock(char *buf,
+                                       size_t buf_len,
+                                       const vario_runtime_t *rt,
+                                       const vario_settings_t *settings)
 {
+    uint8_t hour;
+    char    suffix;
+
     if ((buf == NULL) || (buf_len == 0u))
     {
         return;
     }
 
-    if ((rt != NULL) && (rt->clock_valid != false))
-    {
-        snprintf(buf,
-                 buf_len,
-                 "%02u:%02u:%02u",
-                 (unsigned)rt->local_hour,
-                 (unsigned)rt->local_min,
-                 (unsigned)rt->local_sec);
-    }
-    else
+    if ((rt == NULL) || (rt->clock_valid == false))
     {
         snprintf(buf, buf_len, "--:--:--");
+        return;
     }
+
+    if ((settings != NULL) && (settings->time_format == VARIO_TIME_FORMAT_12H))
+    {
+        hour = (uint8_t)(rt->local_hour % 12u);
+        if (hour == 0u)
+        {
+            hour = 12u;
+        }
+
+        suffix = (rt->local_hour < 12u) ? 'A' : 'P';
+        snprintf(buf,
+                 buf_len,
+                 "%02u:%02u:%02u%c",
+                 (unsigned)hour,
+                 (unsigned)rt->local_min,
+                 (unsigned)rt->local_sec,
+                 suffix);
+        return;
+    }
+
+    snprintf(buf,
+             buf_len,
+             "%02u:%02u:%02u",
+             (unsigned)rt->local_hour,
+             (unsigned)rt->local_min,
+             (unsigned)rt->local_sec);
 }
 
 static void vario_display_format_flight_time(char *buf, size_t buf_len, const vario_runtime_t *rt)
@@ -1813,7 +1837,7 @@ static void vario_display_draw_top_center_clock(u8g2_t *u8g2,
     /* 상단 중앙 현재 시각                                                     */
     /* - 사용자 요구대로 기존보다 한 단계 작은 폰트를 사용한다.                 */
     /* ---------------------------------------------------------------------- */
-    vario_display_format_clock(clock_text, sizeof(clock_text), rt);
+    vario_display_format_clock(clock_text, sizeof(clock_text), rt, settings);
     u8g2_SetFont(u8g2, VARIO_UI_FONT_TOP_CLOCK);
     Vario_Display_DrawTextCentered(u8g2,
                                    (int16_t)(v->x + (v->w / 2)),
@@ -1855,6 +1879,84 @@ static void vario_display_draw_bottom_center_flight_time(u8g2_t *u8g2,
     u8g2_SetFontPosBaseline(u8g2);
 }
 
+static void vario_display_format_alt2_text(char *value_buf,
+                                           size_t value_len,
+                                           char *unit_buf,
+                                           size_t unit_len,
+                                           const vario_runtime_t *rt,
+                                           const vario_settings_t *settings)
+{
+    long fl_value;
+
+    if ((value_buf == NULL) || (value_len == 0u) || (unit_buf == NULL) || (unit_len == 0u) ||
+        (rt == NULL) || (settings == NULL))
+    {
+        return;
+    }
+
+    switch (settings->alt2_mode)
+    {
+        case VARIO_ALT2_MODE_ABSOLUTE:
+            vario_display_format_altitude_with_unit(value_buf,
+                                                    value_len,
+                                                    rt->alt1_absolute_m,
+                                                    settings->alt2_unit);
+            snprintf(unit_buf,
+                     unit_len,
+                     "%s",
+                     Vario_Settings_GetAltitudeUnitTextForUnit(settings->alt2_unit));
+            break;
+
+        case VARIO_ALT2_MODE_GPS:
+            if (rt->gps_valid != false)
+            {
+                vario_display_format_altitude_with_unit(value_buf,
+                                                        value_len,
+                                                        rt->gps_altitude_m,
+                                                        settings->alt2_unit);
+            }
+            else
+            {
+                snprintf(value_buf, value_len, "-----");
+            }
+            snprintf(unit_buf,
+                     unit_len,
+                     "%s",
+                     Vario_Settings_GetAltitudeUnitTextForUnit(settings->alt2_unit));
+            break;
+
+        case VARIO_ALT2_MODE_FLIGHT_LEVEL:
+            if (rt->baro_valid != false)
+            {
+                fl_value = lroundf((rt->pressure_altitude_std_m * 3.2808399f) / 100.0f);
+                if (fl_value < 0)
+                {
+                    fl_value = 0;
+                }
+                snprintf(value_buf, value_len, "%03ld", fl_value);
+            }
+            else
+            {
+                snprintf(value_buf, value_len, "---");
+            }
+            snprintf(unit_buf, unit_len, "FL");
+            break;
+
+        case VARIO_ALT2_MODE_RELATIVE:
+        case VARIO_ALT2_MODE_COUNT:
+        default:
+            vario_display_format_altitude_with_unit(value_buf,
+                                                    value_len,
+                                                    rt->alt2_relative_m,
+                                                    settings->alt2_unit);
+            snprintf(unit_buf,
+                     unit_len,
+                     "%s",
+                     Vario_Settings_GetAltitudeUnitTextForUnit(settings->alt2_unit));
+            break;
+    }
+}
+
 static void vario_display_draw_top_right_altitudes(u8g2_t *u8g2,
                                                    const vario_viewport_t *v,
                                                    const vario_runtime_t *rt)
@@ -1863,6 +1965,7 @@ static void vario_display_draw_top_right_altitudes(u8g2_t *u8g2,
     char    alt1_text[24];
     char    alt2_text[24];
     char    alt3_text[24];
+    char    alt2_unit_buf[8];
     const char *alt1_unit;
     const char *alt2_unit;
     const char *alt3_unit;
@@ -1896,19 +1999,25 @@ static void vario_display_draw_top_right_altitudes(u8g2_t *u8g2,
     right_limit_x = (int16_t)(v->x + v->w - VARIO_UI_SIDE_BAR_W - VARIO_UI_TOP_RIGHT_PAD_X);
 
     vario_display_format_altitude_with_unit(alt1_text, sizeof(alt1_text), rt->alt1_absolute_m, settings->altitude_unit);
-    vario_display_format_altitude_with_unit(alt2_text, sizeof(alt2_text), rt->alt2_relative_m, settings->alt2_unit);
+    vario_display_format_alt2_text(alt2_text, sizeof(alt2_text), alt2_unit_buf, sizeof(alt2_unit_buf), rt, settings);
     vario_display_format_altitude_with_unit(alt3_text, sizeof(alt3_text), rt->alt3_accum_gain_m, settings->altitude_unit);
     alt1_unit = Vario_Settings_GetAltitudeUnitTextForUnit(settings->altitude_unit);
-    alt2_unit = Vario_Settings_GetAltitudeUnitTextForUnit(settings->alt2_unit);
+    alt2_unit = alt2_unit_buf;
     alt3_unit = Vario_Settings_GetAltitudeUnitTextForUnit(settings->altitude_unit);
 
     unit_box_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_ALT1_UNIT, "ft");
     {
         int16_t meter_w;
+        int16_t fl_w;
         meter_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_ALT1_UNIT, "m");
+        fl_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_ALT1_UNIT, "FL");
         if (unit_box_w < meter_w)
         {
             unit_box_w = meter_w;
+        }
+        if (unit_box_w < fl_w)
+        {
+            unit_box_w = fl_w;
         }
     }
 
@@ -1916,10 +2025,16 @@ static void vario_display_draw_top_right_altitudes(u8g2_t *u8g2,
     alt23_value_box_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_ALT2_VALUE, "-8888");
     {
         int16_t unsigned_w;
+        int16_t fl_w;
         unsigned_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_ALT2_VALUE, "88888");
+        fl_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_ALT2_VALUE, "000");
         if (alt23_value_box_w < unsigned_w)
         {
             alt23_value_box_w = unsigned_w;
+        }
+        if (alt23_value_box_w < fl_w)
+        {
+            alt23_value_box_w = fl_w;
         }
     }
 
@@ -2010,7 +2125,6 @@ static void vario_display_draw_top_right_altitudes(u8g2_t *u8g2,
                                     VARIO_UI_FONT_ALT3_UNIT,
                                     alt3_unit);
 }
-
 
 static void vario_display_draw_vario_side_bar(u8g2_t *u8g2,
                                               const vario_viewport_t *v,
@@ -2926,23 +3040,23 @@ void Vario_Display_DrawPageTitle(u8g2_t *u8g2,
         return;
     }
 
-    title_baseline = (int16_t)(v->y + 10);
-    rule_y = (int16_t)(v->y + 12);
+    title_baseline = (int16_t)(v->y + 12);
+    rule_y = (int16_t)(v->y + 15);
 
-    u8g2_SetFont(u8g2, u8g2_font_6x12_mf);
+    u8g2_SetFont(u8g2, u8g2_font_helvB10_tf);
     u8g2_SetDrawColor(u8g2, 1);
-    u8g2_DrawStr(u8g2, (uint8_t)(v->x + 2), (uint8_t)title_baseline, title);
+    u8g2_DrawStr(u8g2, (uint8_t)(v->x + 3), (uint8_t)title_baseline, title);
 
-    if ((subtitle != NULL) && (subtitle[0] != '\0'))
+    if ((subtitle != NULL) && (subtitle[0] != 0))
     {
-        u8g2_SetFont(u8g2, u8g2_font_5x8_tr);
+        u8g2_SetFont(u8g2, u8g2_font_6x10_mf);
         Vario_Display_DrawTextRight(u8g2,
-                                    (int16_t)(v->x + v->w - 2),
-                                    (int16_t)(v->y + 9),
+                                    (int16_t)(v->x + v->w - 3),
+                                    (int16_t)(v->y + 11),
                                     subtitle);
     }
 
-    u8g2_DrawHLine(u8g2, (uint8_t)v->x, (uint8_t)rule_y, (uint8_t)v->w);
+    u8g2_DrawHLine(u8g2, (uint8_t)(v->x + 1), (uint8_t)rule_y, (uint8_t)(v->w - 2));
 }
 
 void Vario_Display_DrawKeyValueRow(u8g2_t *u8g2,
@@ -2981,38 +3095,104 @@ void Vario_Display_DrawMenuRow(u8g2_t *u8g2,
         return;
     }
 
-    row_height = 12;
-    row_top_y = (int16_t)(y_baseline - 9);
+    row_height = 15;
+    row_top_y = (int16_t)(y_baseline - 11);
 
+    u8g2_SetDrawColor(u8g2, 1);
     if (selected)
     {
-        u8g2_SetDrawColor(u8g2, 1);
+        u8g2_DrawFrame(u8g2,
+                       (uint8_t)(v->x + 2),
+                       (uint8_t)row_top_y,
+                       (uint8_t)(v->w - 4),
+                       (uint8_t)row_height);
         u8g2_DrawBox(u8g2,
-                     (uint8_t)(v->x + 1),
-                     (uint8_t)row_top_y,
-                     (uint8_t)(v->w - 2),
-                     (uint8_t)row_height);
-        u8g2_SetDrawColor(u8g2, 0);
-    }
-    else
-    {
-        u8g2_SetDrawColor(u8g2, 1);
+                     (uint8_t)(v->x + 4),
+                     (uint8_t)(row_top_y + 3),
+                     3u,
+                     (uint8_t)(row_height - 6));
     }
 
-    u8g2_SetFont(u8g2, u8g2_font_5x8_tr);
+    u8g2_SetFont(u8g2, u8g2_font_6x12_mf);
     u8g2_DrawStr(u8g2,
-                 (uint8_t)(v->x + 3),
-                 (uint8_t)y_baseline,
-                 selected ? ">" : " ");
-    u8g2_DrawStr(u8g2,
-                 (uint8_t)(v->x + 12),
+                 (uint8_t)(v->x + (selected ? 12 : 8)),
                  (uint8_t)y_baseline,
                  label);
     Vario_Display_DrawTextRight(u8g2,
-                                (int16_t)(v->x + v->w - 5),
+                                (int16_t)(v->x + v->w - 8),
                                 y_baseline,
                                 value);
+}
+
+void Vario_Display_DrawBarRow(u8g2_t *u8g2,
+                              const vario_viewport_t *v,
+                              int16_t y_top,
+                              bool selected,
+                              const char *label,
+                              const char *value,
+                              uint8_t percent)
+{
+    int16_t row_h;
+    int16_t bar_x;
+    int16_t bar_y;
+    int16_t bar_w;
+    int16_t fill_w;
+
+    if ((u8g2 == NULL) || (v == NULL) || (label == NULL) || (value == NULL))
+    {
+        return;
+    }
+
+    if (percent > 100u)
+    {
+        percent = 100u;
+    }
+
+    row_h = 18;
+    bar_x = (int16_t)(v->x + 12);
+    bar_y = (int16_t)(y_top + 10);
+    bar_w = (int16_t)(v->w - 24);
+    fill_w = (int16_t)(((int32_t)(bar_w - 2) * (int32_t)percent) / 100);
+
     u8g2_SetDrawColor(u8g2, 1);
+    if (selected)
+    {
+        u8g2_DrawFrame(u8g2,
+                       (uint8_t)(v->x + 2),
+                       (uint8_t)y_top,
+                       (uint8_t)(v->w - 4),
+                       (uint8_t)row_h);
+        u8g2_DrawBox(u8g2,
+                     (uint8_t)(v->x + 4),
+                     (uint8_t)(y_top + 4),
+                     3u,
+                     (uint8_t)(row_h - 8));
+    }
+
+    u8g2_SetFont(u8g2, u8g2_font_6x12_mf);
+    u8g2_DrawStr(u8g2,
+                 (uint8_t)(v->x + (selected ? 12 : 8)),
+                 (uint8_t)(y_top + 10),
+                 label);
+    Vario_Display_DrawTextRight(u8g2,
+                                (int16_t)(v->x + v->w - 8),
+                                (int16_t)(y_top + 10),
+                                value);
+
+    u8g2_DrawFrame(u8g2,
+                   (uint8_t)bar_x,
+                   (uint8_t)bar_y,
+                   (uint8_t)bar_w,
+                   6u);
+
+    if (fill_w > 0)
+    {
+        u8g2_DrawBox(u8g2,
+                     (uint8_t)(bar_x + 1),
+                     (uint8_t)(bar_y + 1),
+                     (uint8_t)fill_w,
+                     4u);
+    }
 }
 
 /* -------------------------------------------------------------------------- */

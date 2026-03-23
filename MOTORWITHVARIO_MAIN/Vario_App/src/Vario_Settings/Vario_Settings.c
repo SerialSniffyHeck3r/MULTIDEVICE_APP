@@ -1,10 +1,10 @@
 #include "Vario_Settings.h"
 
-#include "Vario_State.h"
-#include "APP_STATE.h"
+#include "../Vario_State/Vario_State.h"
 
 #include <math.h>
 #include <stddef.h>
+#include <stdio.h>
 
 static vario_settings_t s_vario_settings;
 
@@ -63,48 +63,38 @@ static void vario_settings_toggle_u8(uint8_t *value)
     *value = (*value == 0u) ? 1u : 0u;
 }
 
-static void vario_settings_cycle_alt_unit(int8_t direction)
+static void vario_settings_cycle_alt_unit_field(vario_alt_unit_t *value, int8_t direction)
 {
-    if (direction > 0)
+    if ((value == NULL) || (direction == 0))
     {
-        s_vario_settings.altitude_unit =
-            (s_vario_settings.altitude_unit == VARIO_ALT_UNIT_METER) ?
-                VARIO_ALT_UNIT_FEET : VARIO_ALT_UNIT_METER;
+        return;
     }
-    else if (direction < 0)
-    {
-        s_vario_settings.altitude_unit =
-            (s_vario_settings.altitude_unit == VARIO_ALT_UNIT_FEET) ?
-                VARIO_ALT_UNIT_METER : VARIO_ALT_UNIT_FEET;
-    }
+
+    *value = (*value == VARIO_ALT_UNIT_METER) ? VARIO_ALT_UNIT_FEET : VARIO_ALT_UNIT_METER;
 }
 
 static void vario_settings_cycle_vspeed_unit(int8_t direction)
 {
-    if (direction > 0)
+    if (direction == 0)
     {
-        s_vario_settings.vspeed_unit =
-            (s_vario_settings.vspeed_unit == VARIO_VSPEED_UNIT_MPS) ?
-                VARIO_VSPEED_UNIT_FPM : VARIO_VSPEED_UNIT_MPS;
+        return;
     }
-    else if (direction < 0)
-    {
-        s_vario_settings.vspeed_unit =
-            (s_vario_settings.vspeed_unit == VARIO_VSPEED_UNIT_FPM) ?
-                VARIO_VSPEED_UNIT_MPS : VARIO_VSPEED_UNIT_FPM;
-    }
+
+    s_vario_settings.vspeed_unit =
+        (s_vario_settings.vspeed_unit == VARIO_VSPEED_UNIT_MPS) ?
+            VARIO_VSPEED_UNIT_FPM : VARIO_VSPEED_UNIT_MPS;
 }
 
 static void vario_settings_cycle_speed_unit(int8_t direction)
 {
     int32_t next;
 
-    next = (int32_t)s_vario_settings.speed_unit + ((direction > 0) ? 1 : -1);
-
     if (direction == 0)
     {
         return;
     }
+
+    next = (int32_t)s_vario_settings.speed_unit + ((direction > 0) ? 1 : -1);
 
     if (next < 0)
     {
@@ -118,16 +108,126 @@ static void vario_settings_cycle_speed_unit(int8_t direction)
     s_vario_settings.speed_unit = (vario_speed_unit_t)next;
 }
 
-static void vario_settings_cycle_alt_source(int8_t direction)
+static void vario_settings_cycle_pressure_unit(int8_t direction)
 {
     int32_t next;
-
-    next = (int32_t)s_vario_settings.altitude_source + ((direction > 0) ? 1 : -1);
 
     if (direction == 0)
     {
         return;
     }
+
+    next = (int32_t)s_vario_settings.pressure_unit + ((direction > 0) ? 1 : -1);
+    if (next < 0)
+    {
+        next = (int32_t)VARIO_PRESSURE_UNIT_COUNT - 1;
+    }
+    else if (next >= (int32_t)VARIO_PRESSURE_UNIT_COUNT)
+    {
+        next = 0;
+    }
+
+    s_vario_settings.pressure_unit = (vario_pressure_unit_t)next;
+}
+
+static void vario_settings_cycle_temperature_unit(int8_t direction)
+{
+    int32_t next;
+
+    if (direction == 0)
+    {
+        return;
+    }
+
+    next = (int32_t)s_vario_settings.temperature_unit + ((direction > 0) ? 1 : -1);
+    if (next < 0)
+    {
+        next = (int32_t)VARIO_TEMPERATURE_UNIT_COUNT - 1;
+    }
+    else if (next >= (int32_t)VARIO_TEMPERATURE_UNIT_COUNT)
+    {
+        next = 0;
+    }
+
+    s_vario_settings.temperature_unit = (vario_temperature_unit_t)next;
+}
+
+static void vario_settings_cycle_time_format(int8_t direction)
+{
+    int32_t next;
+
+    if (direction == 0)
+    {
+        return;
+    }
+
+    next = (int32_t)s_vario_settings.time_format + ((direction > 0) ? 1 : -1);
+    if (next < 0)
+    {
+        next = (int32_t)VARIO_TIME_FORMAT_COUNT - 1;
+    }
+    else if (next >= (int32_t)VARIO_TIME_FORMAT_COUNT)
+    {
+        next = 0;
+    }
+
+    s_vario_settings.time_format = (vario_time_format_t)next;
+}
+
+static void vario_settings_cycle_coord_format(int8_t direction)
+{
+    int32_t next;
+
+    if (direction == 0)
+    {
+        return;
+    }
+
+    next = (int32_t)s_vario_settings.coord_format + ((direction > 0) ? 1 : -1);
+    if (next < 0)
+    {
+        next = (int32_t)VARIO_COORD_FORMAT_COUNT - 1;
+    }
+    else if (next >= (int32_t)VARIO_COORD_FORMAT_COUNT)
+    {
+        next = 0;
+    }
+
+    s_vario_settings.coord_format = (vario_coord_format_t)next;
+}
+
+static void vario_settings_cycle_alt2_mode(int8_t direction)
+{
+    int32_t next;
+
+    if (direction == 0)
+    {
+        return;
+    }
+
+    next = (int32_t)s_vario_settings.alt2_mode + ((direction > 0) ? 1 : -1);
+    if (next < 0)
+    {
+        next = (int32_t)VARIO_ALT2_MODE_COUNT - 1;
+    }
+    else if (next >= (int32_t)VARIO_ALT2_MODE_COUNT)
+    {
+        next = 0;
+    }
+
+    s_vario_settings.alt2_mode = (vario_alt2_mode_t)next;
+}
+
+static void vario_settings_cycle_alt_source(int8_t direction)
+{
+    int32_t next;
+
+    if (direction == 0)
+    {
+        return;
+    }
+
+    next = (int32_t)s_vario_settings.altitude_source + ((direction > 0) ? 1 : -1);
 
     if (next < 0)
     {
@@ -145,12 +245,12 @@ static void vario_settings_cycle_heading_source(int8_t direction)
 {
     int32_t next;
 
-    next = (int32_t)s_vario_settings.heading_source + ((direction > 0) ? 1 : -1);
-
     if (direction == 0)
     {
         return;
     }
+
+    next = (int32_t)s_vario_settings.heading_source + ((direction > 0) ? 1 : -1);
 
     if (next < 0)
     {
@@ -202,54 +302,40 @@ static void vario_settings_cycle_compass_span(int8_t direction)
 
 void Vario_Settings_Init(void)
 {
-    app_settings_t app_settings_snapshot;
-
-    /* ---------------------------------------------------------------------- */
-    /*  기본값                                                                 */
-    /*                                                                          */
-    /*  Flytec / 상용 variometer 감각을 기본값에 반영한다.                      */
-    /*  - ALT source     : 수동 QNH barometric altitude                        */
-    /*  - avg seconds    : 5s integrated vario                                 */
-    /*  - compass span   : 120 deg tape                                        */
-    /*  - vario range    : ±5.0 m/s                                            */
-    /* ---------------------------------------------------------------------- */
-    APP_STATE_CopySettingsSnapshot(&app_settings_snapshot);
-
-    if (app_settings_snapshot.altitude.manual_qnh_hpa_x100 > 0)
-    {
-        s_vario_settings.qnh_hpa_x100 =
-            app_settings_snapshot.altitude.manual_qnh_hpa_x100;
-    }
-    else
-    {
-        s_vario_settings.qnh_hpa_x100 = 101325;
-    }
-    s_vario_settings.alt2_reference_cm           = 0;
-    s_vario_settings.altitude_unit               = VARIO_ALT_UNIT_METER;
-    s_vario_settings.alt2_unit                   = VARIO_ALT_UNIT_FEET;
-    s_vario_settings.vspeed_unit                 = VARIO_VSPEED_UNIT_MPS;
-    s_vario_settings.speed_unit                  = VARIO_SPEED_UNIT_KMH;
-    s_vario_settings.altitude_source             = VARIO_ALT_SOURCE_QNH_MANUAL;
-    s_vario_settings.heading_source              = VARIO_HEADING_SOURCE_AUTO;
-    s_vario_settings.audio_enabled               = 1u;
-    s_vario_settings.audio_volume_percent        = 75u;
-    s_vario_settings.vario_damping_level         = 5u;
+    s_vario_settings.qnh_hpa_x100                  = 101325;
+    s_vario_settings.alt2_reference_cm             = 0;
+    s_vario_settings.altitude_unit                 = VARIO_ALT_UNIT_METER;
+    s_vario_settings.alt2_unit                     = VARIO_ALT_UNIT_FEET;
+    s_vario_settings.vspeed_unit                   = VARIO_VSPEED_UNIT_MPS;
+    s_vario_settings.speed_unit                    = VARIO_SPEED_UNIT_KMH;
+    s_vario_settings.pressure_unit                 = VARIO_PRESSURE_UNIT_HPA;
+    s_vario_settings.temperature_unit              = VARIO_TEMPERATURE_UNIT_C;
+    s_vario_settings.time_format                   = VARIO_TIME_FORMAT_24H;
+    s_vario_settings.coord_format                  = VARIO_COORD_FORMAT_DDMM_MMM;
+    s_vario_settings.alt2_mode                     = VARIO_ALT2_MODE_RELATIVE;
+    s_vario_settings.altitude_source               = VARIO_ALT_SOURCE_QNH_MANUAL;
+    s_vario_settings.heading_source                = VARIO_HEADING_SOURCE_AUTO;
+    s_vario_settings.audio_enabled                 = 1u;
+    s_vario_settings.audio_volume_percent          = 75u;
+    s_vario_settings.beep_only_when_flying         = 1u;
+    s_vario_settings.display_brightness_percent    = 70u;
+    s_vario_settings.vario_damping_level           = 5u;
     s_vario_settings.digital_vario_average_seconds = 5u;
-    s_vario_settings.climb_tone_threshold_cms    = 20;
-    s_vario_settings.sink_tone_threshold_cms     = -150;
-    s_vario_settings.flight_start_speed_kmh_x10  = 50u;
-    s_vario_settings.compass_span_deg            = 120u;
-    s_vario_settings.compass_box_height_px       = 16u;
-    s_vario_settings.vario_range_mps_x10         = 100u;
-    s_vario_settings.gs_range_kmh                = 80u;
-    s_vario_settings.trail_range_m               = 250u;
-    s_vario_settings.trail_spacing_m             = 15u;
-    s_vario_settings.trail_dot_size_px           = 2u;
-    s_vario_settings.arrow_size_px               = 9u;
-    s_vario_settings.show_current_time           = 1u;
-    s_vario_settings.show_flight_time            = 1u;
-    s_vario_settings.show_max_vario              = 1u;
-    s_vario_settings.show_gs_bar                 = 1u;
+    s_vario_settings.climb_tone_threshold_cms      = 20;
+    s_vario_settings.sink_tone_threshold_cms       = -150;
+    s_vario_settings.flight_start_speed_kmh_x10    = 50u;
+    s_vario_settings.compass_span_deg              = 120u;
+    s_vario_settings.compass_box_height_px         = 16u;
+    s_vario_settings.vario_range_mps_x10           = 100u;
+    s_vario_settings.gs_range_kmh                  = 80u;
+    s_vario_settings.trail_range_m                 = 250u;
+    s_vario_settings.trail_spacing_m               = 15u;
+    s_vario_settings.trail_dot_size_px             = 2u;
+    s_vario_settings.arrow_size_px                 = 9u;
+    s_vario_settings.show_current_time             = 1u;
+    s_vario_settings.show_flight_time              = 1u;
+    s_vario_settings.show_max_vario                = 1u;
+    s_vario_settings.show_gs_bar                   = 1u;
 }
 
 const vario_settings_t *Vario_Settings_Get(void)
@@ -260,23 +346,30 @@ const vario_settings_t *Vario_Settings_Get(void)
 void Vario_Settings_AdjustQuickSet(vario_quickset_item_t item, int8_t direction)
 {
     const vario_runtime_t *rt;
+    int32_t                qnh_step_x100;
 
     rt = Vario_State_GetRuntime();
+    qnh_step_x100 = (s_vario_settings.pressure_unit == VARIO_PRESSURE_UNIT_INHG) ? 34 : 10;
 
     switch (item)
     {
         case VARIO_QUICKSET_ITEM_QNH:
-            /* -------------------------------------------------------------- */
-            /* quickset 에서는 0.10 hPa step                                  */
-            /* -------------------------------------------------------------- */
             s_vario_settings.qnh_hpa_x100 =
-                vario_settings_clamp_s32(s_vario_settings.qnh_hpa_x100 + ((int32_t)direction * 10),
+                vario_settings_clamp_s32(s_vario_settings.qnh_hpa_x100 + ((int32_t)direction * qnh_step_x100),
                                          95000,
                                          105500);
             break;
 
         case VARIO_QUICKSET_ITEM_ALT_UNIT:
-            vario_settings_cycle_alt_unit(direction);
+            vario_settings_cycle_alt_unit_field(&s_vario_settings.altitude_unit, direction);
+            break;
+
+        case VARIO_QUICKSET_ITEM_ALT2_MODE:
+            vario_settings_cycle_alt2_mode(direction);
+            break;
+
+        case VARIO_QUICKSET_ITEM_ALT2_UNIT:
+            vario_settings_cycle_alt_unit_field(&s_vario_settings.alt2_unit, direction);
             break;
 
         case VARIO_QUICKSET_ITEM_VSPEED_UNIT:
@@ -285,6 +378,22 @@ void Vario_Settings_AdjustQuickSet(vario_quickset_item_t item, int8_t direction)
 
         case VARIO_QUICKSET_ITEM_SPEED_UNIT:
             vario_settings_cycle_speed_unit(direction);
+            break;
+
+        case VARIO_QUICKSET_ITEM_PRESSURE_UNIT:
+            vario_settings_cycle_pressure_unit(direction);
+            break;
+
+        case VARIO_QUICKSET_ITEM_TEMPERATURE_UNIT:
+            vario_settings_cycle_temperature_unit(direction);
+            break;
+
+        case VARIO_QUICKSET_ITEM_TIME_FORMAT:
+            vario_settings_cycle_time_format(direction);
+            break;
+
+        case VARIO_QUICKSET_ITEM_COORD_FORMAT:
+            vario_settings_cycle_coord_format(direction);
             break;
 
         case VARIO_QUICKSET_ITEM_ALT_SOURCE:
@@ -335,6 +444,13 @@ void Vario_Settings_AdjustQuickSet(vario_quickset_item_t item, int8_t direction)
                                          250u);
             break;
 
+        case VARIO_QUICKSET_ITEM_BEEP_ONLY_WHEN_FLYING:
+            if (direction != 0)
+            {
+                vario_settings_toggle_u8(&s_vario_settings.beep_only_when_flying);
+            }
+            break;
+
         case VARIO_QUICKSET_ITEM_AUDIO_ENABLE:
             if (direction != 0)
             {
@@ -381,6 +497,14 @@ void Vario_Settings_AdjustValue(vario_value_item_t item, int8_t direction)
 {
     switch (item)
     {
+        case VARIO_VALUE_ITEM_BRIGHTNESS:
+            s_vario_settings.display_brightness_percent =
+                vario_settings_clamp_u8((uint8_t)((int32_t)s_vario_settings.display_brightness_percent +
+                                                  ((int32_t)direction * 5)),
+                                        5u,
+                                        100u);
+            break;
+
         case VARIO_VALUE_ITEM_COMPASS_SPAN:
             vario_settings_cycle_compass_span(direction);
             break;
@@ -475,19 +599,71 @@ void Vario_Settings_AdjustValue(vario_value_item_t item, int8_t direction)
     }
 }
 
+float Vario_Settings_PressureHpaToDisplayFloat(float pressure_hpa)
+{
+    if (s_vario_settings.pressure_unit == VARIO_PRESSURE_UNIT_INHG)
+    {
+        return pressure_hpa * 0.0295299831f;
+    }
+
+    return pressure_hpa;
+}
+
+float Vario_Settings_TemperatureCToDisplayFloat(float temperature_c)
+{
+    if (s_vario_settings.temperature_unit == VARIO_TEMPERATURE_UNIT_F)
+    {
+        return (temperature_c * 1.8f) + 32.0f;
+    }
+
+    return temperature_c;
+}
+
+float Vario_Settings_GetQnhDisplayFloat(void)
+{
+    return Vario_Settings_PressureHpaToDisplayFloat(((float)s_vario_settings.qnh_hpa_x100) * 0.01f);
+}
+
+void Vario_Settings_FormatQnhText(char *buf, size_t buf_len)
+{
+    if ((buf == NULL) || (buf_len == 0u))
+    {
+        return;
+    }
+
+    snprintf(buf,
+             buf_len,
+             "%.2f %s",
+             (double)Vario_Settings_GetQnhDisplayFloat(),
+             Vario_Settings_GetPressureUnitText());
+}
+
 int32_t Vario_Settings_GetQnhDisplayWhole(void)
 {
-    return s_vario_settings.qnh_hpa_x100 / 100;
+    float display;
+
+    display = Vario_Settings_GetQnhDisplayFloat();
+    return (int32_t)display;
 }
 
 int32_t Vario_Settings_GetQnhDisplayFrac2(void)
 {
+    float   display;
+    int32_t whole;
     int32_t frac;
 
-    frac = s_vario_settings.qnh_hpa_x100 % 100;
+    display = Vario_Settings_GetQnhDisplayFloat();
+    whole = (int32_t)display;
+    frac = (int32_t)lroundf((display - (float)whole) * 100.0f);
+
     if (frac < 0)
     {
         frac = -frac;
+    }
+
+    if (frac >= 100)
+    {
+        frac = 99;
     }
 
     return frac;
@@ -574,17 +750,6 @@ float Vario_Settings_VSpeedMpsToDisplayFloat(float vspd_mps)
 
 float Vario_Settings_NavDistanceMetersToDisplayFloat(float distance_m)
 {
-    /* ---------------------------------------------------------------------- */
-    /*  START/WPT 거리 표시는 사용자의 요청대로 km 또는 mi 둘 중 하나만 쓴다.   */
-    /*                                                                          */
-    /*  정책                                                                    */
-    /*  - speed_unit == MPH  : miles                                            */
-    /*  - 그 외(KMH / KNOT) : kilometers                                        */
-    /*                                                                          */
-    /*  KNOT 사용 중에도 km 를 쓰는 이유는                                      */
-    /*  이번 요구사항이 "km / mi 중 택1" 이고, nautical mile 단위는            */
-    /*  명시적으로 원하지 않았기 때문이다.                                      */
-    /* ---------------------------------------------------------------------- */
     if (s_vario_settings.speed_unit == VARIO_SPEED_UNIT_MPH)
     {
         return distance_m * 0.0006213712f;
@@ -660,7 +825,7 @@ const char *Vario_Settings_GetAltitudeSourceText(void)
             return "QNH";
 
         case VARIO_ALT_SOURCE_FUSED_NOIMU:
-            return "NOIMU";
+            return "NO-IMU";
 
         case VARIO_ALT_SOURCE_FUSED_IMU:
             return "IMU";
@@ -689,4 +854,81 @@ const char *Vario_Settings_GetHeadingSourceText(void)
         default:
             return "AUTO";
     }
+}
+
+const char *Vario_Settings_GetAlt2ModeText(void)
+{
+    return Vario_Settings_GetAlt2ModeTextForMode(s_vario_settings.alt2_mode);
+}
+
+const char *Vario_Settings_GetAlt2ModeTextForMode(vario_alt2_mode_t mode)
+{
+    switch (mode)
+    {
+        case VARIO_ALT2_MODE_ABSOLUTE:
+            return "ABS";
+
+        case VARIO_ALT2_MODE_GPS:
+            return "GPS";
+
+        case VARIO_ALT2_MODE_FLIGHT_LEVEL:
+            return "FL";
+
+        case VARIO_ALT2_MODE_RELATIVE:
+        case VARIO_ALT2_MODE_COUNT:
+        default:
+            return "REL";
+    }
+}
+
+const char *Vario_Settings_GetPressureUnitText(void)
+{
+    if (s_vario_settings.pressure_unit == VARIO_PRESSURE_UNIT_INHG)
+    {
+        return "inHg";
+    }
+
+    return "hPa";
+}
+
+const char *Vario_Settings_GetTemperatureUnitText(void)
+{
+    if (s_vario_settings.temperature_unit == VARIO_TEMPERATURE_UNIT_F)
+    {
+        return "F";
+    }
+
+    return "C";
+}
+
+const char *Vario_Settings_GetTimeFormatText(void)
+{
+    if (s_vario_settings.time_format == VARIO_TIME_FORMAT_12H)
+    {
+        return "12H";
+    }
+
+    return "24H";
+}
+
+const char *Vario_Settings_GetCoordFormatText(void)
+{
+    switch (s_vario_settings.coord_format)
+    {
+        case VARIO_COORD_FORMAT_DECIMAL:
+            return "DEC";
+
+        case VARIO_COORD_FORMAT_DMS:
+            return "DMS";
+
+        case VARIO_COORD_FORMAT_DDMM_MMM:
+        case VARIO_COORD_FORMAT_COUNT:
+        default:
+            return "DDMM";
+    }
+}
+
+const char *Vario_Settings_GetBeepModeText(void)
+{
+    return (s_vario_settings.beep_only_when_flying != 0u) ? "FLY" : "ALWAYS";
 }

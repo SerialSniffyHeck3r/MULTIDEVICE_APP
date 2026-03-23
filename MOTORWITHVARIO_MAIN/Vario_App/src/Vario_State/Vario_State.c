@@ -841,11 +841,8 @@ static void vario_state_update_display_filter(uint32_t now_ms)
     float vel_tau_s;
     float alt_alpha;
     float vel_alpha;
-    float altitude_error_m;
-    float altitude_step_m;
-    float max_follow_rate_mps;
-    float max_follow_step_m;
-    float abs_vario_mps;
+    float predicted_altitude_m;
+    float residual_m;
     bool fast_present_due;
     bool slow_present_due;
 
@@ -902,67 +899,25 @@ static void vario_state_update_display_filter(uint32_t now_ms)
     damping_norm = ((float)(settings->vario_damping_level - 1u)) / 9.0f;
     damping_norm = vario_state_clampf(damping_norm, 0.0f, 1.0f);
 
-    /* ---------------------------------------------------------------------- */
-    /*  altitude follower                                                      */
-    /*                                                                        */
-    /*  이전 구현은                                                            */
-    /*  - predicted altitude = altitude + observer_velocity * dt              */
-    /*  - residual / dt 를 다시 velocity 에 강하게 되먹임하는 구조였다.         */
-    /*                                                                        */
-    /*  그런데 altitude source 자체(APP_ALTITUDE)는 이미 안정화되어 있고,      */
-    /*  여기서 한 번 더 aggressive observer를 올리면                           */
-    /*  ascent 중 residual이 누적될 때 velocity state가 과하게 커지며          */
-    /*  표시 altitude가 runaway 할 수 있다.                                    */
-    /*                                                                        */
-    /*  따라서 여기서는                                                         */
-    /*  1) altitude 는 bounded follower 로만 천천히 추종하고                   */
-    /*  2) velocity 는 residual/dt 적분 없이 measured vario 쪽으로만 LPF 한다. */
-    /*                                                                        */
-    /*  즉, altitude display는 절대 크게 튀지 않게 하고,                       */
-    /*  vario 숫자/바 응답은 아래 전용 filter가 담당하게 분리한다.             */
-    /* ---------------------------------------------------------------------- */
-    alt_tau_s = 0.14f + (damping_norm * 0.55f);
-    vel_tau_s = 0.08f + (damping_norm * 0.18f);
+    alt_tau_s = 0.18f + (damping_norm * 1.00f);
+    vel_tau_s = 0.12f + (damping_norm * 0.60f);
+
+    predicted_altitude_m = s_vario_state.runtime.filtered_altitude_m +
+                           (s_vario_state.runtime.observer_velocity_mps * dt_s);
+
+    residual_m = measured_altitude_m - predicted_altitude_m;
+    residual_m = vario_state_clampf(residual_m,
+                                    -VARIO_STATE_ALTITUDE_JUMP_LIMIT_M,
+                                    +VARIO_STATE_ALTITUDE_JUMP_LIMIT_M);
+
     alt_alpha = vario_state_lpf_alpha(dt_s, alt_tau_s);
     vel_alpha = vario_state_lpf_alpha(dt_s, vel_tau_s);
 
-    altitude_error_m = measured_altitude_m - s_vario_state.runtime.filtered_altitude_m;
-    altitude_error_m = vario_state_clampf(altitude_error_m,
-                                          -VARIO_STATE_ALTITUDE_JUMP_LIMIT_M,
-                                          +VARIO_STATE_ALTITUDE_JUMP_LIMIT_M);
-
-    abs_vario_mps = measured_vario_mps;
-    if (abs_vario_mps < 0.0f)
-    {
-        abs_vario_mps = -abs_vario_mps;
-    }
-
-    /* ---------------------------------------------------------------------- */
-    /*  max follow rate                                                        */
-    /*  - 정지 근처에서도 천천히 따라가되                                       */
-    /*  - 실제 climb/sink 가 커질수록 follow speed를 올린다.                   */
-    /*  - 하지만 measured altitude가 순간적으로 잘못 들어와도                  */
-    /*    한 샘플에 움직일 수 있는 거리에는 상한을 둔다.                       */
-    /* ---------------------------------------------------------------------- */
-    max_follow_rate_mps = 1.8f +
-                          ((1.0f - damping_norm) * 1.2f) +
-                          (abs_vario_mps * (1.6f + ((1.0f - damping_norm) * 0.4f)));
-    max_follow_rate_mps = vario_state_clampf(max_follow_rate_mps, 1.2f, 8.0f);
-    max_follow_step_m = max_follow_rate_mps * dt_s;
-
-    altitude_step_m = alt_alpha * altitude_error_m;
-    altitude_step_m = vario_state_clampf(altitude_step_m,
-                                         -max_follow_step_m,
-                                         +max_follow_step_m);
-
-    if ((altitude_error_m > -0.03f) && (altitude_error_m < 0.03f))
-    {
-        altitude_step_m = altitude_error_m;
-    }
-
-    s_vario_state.runtime.filtered_altitude_m += altitude_step_m;
+    s_vario_state.runtime.filtered_altitude_m = predicted_altitude_m + (alt_alpha * residual_m);
+    s_vario_state.runtime.observer_velocity_mps += (alt_alpha * 0.75f) * (residual_m / dt_s);
     s_vario_state.runtime.observer_velocity_mps +=
         vel_alpha * (measured_vario_mps - s_vario_state.runtime.observer_velocity_mps);
+
     s_vario_state.runtime.observer_velocity_mps =
         vario_state_clampf(s_vario_state.runtime.observer_velocity_mps,
                            -VARIO_STATE_MAX_VARIO_MPS,
@@ -1331,6 +1286,17 @@ static void vario_state_publish_5hz(uint32_t now_ms)
     s_vario_state.runtime.baro_vario_mps = quant_vario_mps;
     s_vario_state.runtime.ground_speed_kmh = quant_gs_kmh;
     s_vario_state.runtime.alt2_relative_m = alt2_m;
+
+    if ((s_vario_state.runtime.baro_valid != false) && (s_vario_state.runtime.pressure_hpa > 0.0f))
+    {
+        s_vario_state.runtime.pressure_altitude_std_m =
+            roundf(vario_state_pressure_to_altitude_m(s_vario_state.runtime.pressure_hpa, 1013.25f));
+    }
+    else
+    {
+        s_vario_state.runtime.pressure_altitude_std_m = 0.0f;
+    }
+
     s_vario_state.runtime.last_publish_ms = now_ms;
 
     speed_delta_kmh = quant_gs_kmh - s_vario_state.runtime.last_published_ground_speed_kmh;

@@ -7,8 +7,8 @@
 #include <math.h>
 #include <stdio.h>
 
-#define VARIO_QUICKSET_VISIBLE_ROWS 7
-#define VARIO_QUICKSET_ROW_PITCH    12
+#define VARIO_QUICKSET_VISIBLE_ROWS 6
+#define VARIO_QUICKSET_ROW_PITCH    15
 
 static void vario_quickset_format_vspeed_threshold(char *buf, size_t buf_len, int16_t threshold_cms)
 {
@@ -41,8 +41,9 @@ static void vario_quickset_format_alt2_ref(char *buf, size_t buf_len, int32_t al
     snprintf(buf,
              buf_len,
              "%ld %s",
-             (long)Vario_Settings_AltitudeCentimetersToDisplayRounded(altitude_cm),
-             Vario_Settings_GetAltitudeUnitText());
+             (long)Vario_Settings_AltitudeMetersToDisplayRoundedWithUnit(((float)altitude_cm) * 0.01f,
+                                                                         Vario_Settings_Get()->alt2_unit),
+             Vario_Settings_GetAltitudeUnitTextForUnit(Vario_Settings_Get()->alt2_unit));
 }
 
 static void vario_quickset_get_item_text(vario_quickset_item_t item,
@@ -56,16 +57,25 @@ static void vario_quickset_get_item_text(vario_quickset_item_t item,
     {
         case VARIO_QUICKSET_ITEM_QNH:
             snprintf(out_label, label_len, "QNH");
-            snprintf(out_value,
-                     value_len,
-                     "%ld.%02ld hPa",
-                     (long)Vario_Settings_GetQnhDisplayWhole(),
-                     (long)Vario_Settings_GetQnhDisplayFrac2());
+            Vario_Settings_FormatQnhText(out_value, value_len);
             break;
 
         case VARIO_QUICKSET_ITEM_ALT_UNIT:
             snprintf(out_label, label_len, "Alt Unit");
             snprintf(out_value, value_len, "%s", Vario_Settings_GetAltitudeUnitText());
+            break;
+
+        case VARIO_QUICKSET_ITEM_ALT2_MODE:
+            snprintf(out_label, label_len, "ALT2 Mode");
+            snprintf(out_value, value_len, "%s", Vario_Settings_GetAlt2ModeText());
+            break;
+
+        case VARIO_QUICKSET_ITEM_ALT2_UNIT:
+            snprintf(out_label, label_len, "ALT2 Unit");
+            snprintf(out_value,
+                     value_len,
+                     "%s",
+                     Vario_Settings_GetAltitudeUnitTextForUnit(settings->alt2_unit));
             break;
 
         case VARIO_QUICKSET_ITEM_VSPEED_UNIT:
@@ -76,6 +86,26 @@ static void vario_quickset_get_item_text(vario_quickset_item_t item,
         case VARIO_QUICKSET_ITEM_SPEED_UNIT:
             snprintf(out_label, label_len, "Speed Unit");
             snprintf(out_value, value_len, "%s", Vario_Settings_GetSpeedUnitText());
+            break;
+
+        case VARIO_QUICKSET_ITEM_PRESSURE_UNIT:
+            snprintf(out_label, label_len, "Pressure");
+            snprintf(out_value, value_len, "%s", Vario_Settings_GetPressureUnitText());
+            break;
+
+        case VARIO_QUICKSET_ITEM_TEMPERATURE_UNIT:
+            snprintf(out_label, label_len, "Temp Unit");
+            snprintf(out_value, value_len, "%s", Vario_Settings_GetTemperatureUnitText());
+            break;
+
+        case VARIO_QUICKSET_ITEM_TIME_FORMAT:
+            snprintf(out_label, label_len, "Time Format");
+            snprintf(out_value, value_len, "%s", Vario_Settings_GetTimeFormatText());
+            break;
+
+        case VARIO_QUICKSET_ITEM_COORD_FORMAT:
+            snprintf(out_label, label_len, "Coord Format");
+            snprintf(out_value, value_len, "%s", Vario_Settings_GetCoordFormatText());
             break;
 
         case VARIO_QUICKSET_ITEM_ALT_SOURCE:
@@ -117,6 +147,11 @@ static void vario_quickset_get_item_text(vario_quickset_item_t item,
             vario_quickset_format_speed_threshold(out_value,
                                                   value_len,
                                                   settings->flight_start_speed_kmh_x10);
+            break;
+
+        case VARIO_QUICKSET_ITEM_BEEP_ONLY_WHEN_FLYING:
+            snprintf(out_label, label_len, "Beep Gate");
+            snprintf(out_value, value_len, "%s", Vario_Settings_GetBeepModeText());
             break;
 
         case VARIO_QUICKSET_ITEM_AUDIO_ENABLE:
@@ -189,7 +224,7 @@ void Vario_QuickSet_Render(u8g2_t *u8g2, const vario_buttonbar_t *buttonbar)
         }
     }
 
-    Vario_Display_DrawPageTitle(u8g2, v, "FLIGHT / AUDIO", "FLYTEC STYLE");
+    Vario_Display_DrawPageTitle(u8g2, v, "INSTRUMENT", "UNITS / AUDIO");
 
     for (i = 0u; i < visible; ++i)
     {
@@ -204,7 +239,7 @@ void Vario_QuickSet_Render(u8g2_t *u8g2, const vario_buttonbar_t *buttonbar)
             break;
         }
 
-        row_y = (int16_t)(v->y + 20 + ((int16_t)i * VARIO_QUICKSET_ROW_PITCH));
+        row_y = (int16_t)(v->y + 28 + ((int16_t)i * VARIO_QUICKSET_ROW_PITCH));
         vario_quickset_get_item_text((vario_quickset_item_t)item_index,
                                      settings,
                                      label,
@@ -220,10 +255,6 @@ void Vario_QuickSet_Render(u8g2_t *u8g2, const vario_buttonbar_t *buttonbar)
                                   value);
     }
 
-    /* ---------------------------------------------------------------------- */
-    /*  scrolling hint                                                         */
-    /*  - 현재 전체 몇 개 중 몇 번째 항목을 보고 있는지 작은 글씨로 표시        */
-    /* ---------------------------------------------------------------------- */
     {
         char pos_text[20];
         snprintf(pos_text,
@@ -231,16 +262,14 @@ void Vario_QuickSet_Render(u8g2_t *u8g2, const vario_buttonbar_t *buttonbar)
                  "%u/%u",
                  (unsigned)(cursor + 1u),
                  (unsigned)VARIO_QUICKSET_ITEM_COUNT);
-        u8g2_SetFont(u8g2, u8g2_font_4x6_tf);
+        u8g2_SetFont(u8g2, u8g2_font_5x8_tr);
         Vario_Display_DrawTextRight(u8g2,
-                                    (int16_t)(v->x + v->w - 4),
-                                    (int16_t)(v->y + v->h - 10),
+                                    (int16_t)(v->x + v->w - 6),
+                                    (int16_t)(v->y + v->h - 6),
                                     pos_text);
         u8g2_DrawStr(u8g2,
-                     (uint8_t)(v->x + 4),
-                     (uint8_t)(v->y + v->h - 10),
-                     "F6: Graphics page");
+                     (uint8_t)(v->x + 8),
+                     (uint8_t)(v->y + v->h - 6),
+                     "F6: Display page");
     }
-
-    Vario_Display_DrawRawOverlay(u8g2, v);
 }

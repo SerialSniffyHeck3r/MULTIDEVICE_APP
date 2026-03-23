@@ -44,6 +44,7 @@
 /* -------------------------------------------------------------------------- */
 static uint32_t s_vario_boot_confirm_arm_ms;
 static uint8_t  s_vario_boot_confirm_done;
+static uint16_t s_vario_last_backlight_permille = 0xFFFFu;
 
 /* -------------------------------------------------------------------------- */
 /* 내부 helper 선언                                                            */
@@ -51,6 +52,7 @@ static uint8_t  s_vario_boot_confirm_done;
 static void vario_task_run_shared_platform_services(uint32_t now_ms);
 static void vario_task_run_legacy_profile(uint32_t now_ms);
 static void vario_task_run_mode_state_machine(uint32_t now_ms);
+static void vario_task_apply_platform_settings(void);
 
 /* -------------------------------------------------------------------------- */
 /* 공용 플랫폼 서비스 구간                                                     */
@@ -88,6 +90,37 @@ static void vario_task_run_shared_platform_services(uint32_t now_ms)
     /* - normal VARIO boot profile 에서는 Vario_Button_Task() 가 소비한다.      */
     /* ---------------------------------------------------------------------- */
     Button_Task(now_ms);
+}
+
+/* -------------------------------------------------------------------------- */
+/* 플랫폼 반영 helper                                                          */
+/*                                                                            */
+/* 설정 저장소 자체는 하위 출력 드라이버를 직접 건드리지 않는다.               */
+/* 현재 task 가 settings snapshot 을 읽어 플랫폼 API 로 반영한다.              */
+/* -------------------------------------------------------------------------- */
+static void vario_task_apply_platform_settings(void)
+{
+    const vario_settings_t *settings;
+    uint16_t                permille;
+
+    settings = Vario_Settings_Get();
+    if (settings == NULL)
+    {
+        return;
+    }
+
+    permille = (uint16_t)settings->display_brightness_percent * 10u;
+    if (permille > 1000u)
+    {
+        permille = 1000u;
+    }
+
+    if (permille != s_vario_last_backlight_permille)
+    {
+        Backlight_App_SetAutoEnabled(false);
+        Backlight_App_SetManualBrightnessPermille(permille);
+        s_vario_last_backlight_permille = permille;
+    }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -258,6 +291,7 @@ void Vario_App_Task(void)
 
     /* 공용 하위 서비스 구간 */
     vario_task_run_shared_platform_services(now_ms);
+    vario_task_apply_platform_settings();
 
     /* ---------------------------------------------------------------------- */
     /* Soft Power overlay 상태머신                                              */

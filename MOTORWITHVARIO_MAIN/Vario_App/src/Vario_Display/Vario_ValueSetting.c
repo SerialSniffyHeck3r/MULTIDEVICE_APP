@@ -6,8 +6,8 @@
 
 #include <stdio.h>
 
-#define VARIO_VALUESETTING_VISIBLE_ROWS 7
-#define VARIO_VALUESETTING_ROW_PITCH    12
+#define VARIO_VALUESETTING_VISIBLE_ROWS 6
+#define VARIO_VALUESETTING_ROW_PITCH    15
 
 static void vario_valuesetting_get_item_text(vario_value_item_t item,
                                              const vario_settings_t *settings,
@@ -18,6 +18,11 @@ static void vario_valuesetting_get_item_text(vario_value_item_t item,
 {
     switch (item)
     {
+        case VARIO_VALUE_ITEM_BRIGHTNESS:
+            snprintf(out_label, label_len, "Brightness");
+            snprintf(out_value, value_len, "%u%%", (unsigned)settings->display_brightness_percent);
+            break;
+
         case VARIO_VALUE_ITEM_COMPASS_SPAN:
             snprintf(out_label, label_len, "Compass Span");
             snprintf(out_value, value_len, "%u deg", (unsigned)settings->compass_span_deg);
@@ -131,7 +136,7 @@ void Vario_ValueSetting_Render(u8g2_t *u8g2, const vario_buttonbar_t *buttonbar)
         }
     }
 
-    Vario_Display_DrawPageTitle(u8g2, v, "GRAPHICS", "LAYOUT TUNE");
+    Vario_Display_DrawPageTitle(u8g2, v, "DISPLAY", "HUD / GRAPHICS");
 
     for (i = 0u; i < visible; ++i)
     {
@@ -146,7 +151,7 @@ void Vario_ValueSetting_Render(u8g2_t *u8g2, const vario_buttonbar_t *buttonbar)
             break;
         }
 
-        row_y = (int16_t)(v->y + 20 + ((int16_t)i * VARIO_VALUESETTING_ROW_PITCH));
+        row_y = (int16_t)(v->y + 28 + ((int16_t)i * VARIO_VALUESETTING_ROW_PITCH));
         vario_valuesetting_get_item_text((vario_value_item_t)item_index,
                                          settings,
                                          label,
@@ -169,16 +174,14 @@ void Vario_ValueSetting_Render(u8g2_t *u8g2, const vario_buttonbar_t *buttonbar)
                  "%u/%u",
                  (unsigned)(cursor + 1u),
                  (unsigned)VARIO_VALUE_ITEM_COUNT);
-        u8g2_SetFont(u8g2, u8g2_font_4x6_tf);
+        u8g2_SetFont(u8g2, u8g2_font_5x8_tr);
         Vario_Display_DrawTextRight(u8g2,
-                                    (int16_t)(v->x + v->w - 4),
-                                    (int16_t)(v->y + v->h - 10),
+                                    (int16_t)(v->x + v->w - 6),
+                                    (int16_t)(v->y + v->h - 6),
                                     pos_text);
         u8g2_DrawStr(u8g2,
-                     (uint8_t)(v->x + 4),
-                     (uint8_t)(v->y + v->h - 10),
-                     "F6: Flight/Audio page");
+                     (uint8_t)(v->x + 8),
+                     (uint8_t)(v->y + v->h - 6),
+                     "F6: Instrument page");
     }
-
-    Vario_Display_DrawRawOverlay(u8g2, v);
 }

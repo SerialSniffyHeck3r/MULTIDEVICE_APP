@@ -132,6 +132,8 @@ void Vario_Audio_Task(uint32_t now_ms)
     }
 
     audio_active = ((settings->audio_enabled != 0u) &&
+                    ((settings->beep_only_when_flying == 0u) ||
+                     ((rt != NULL) && (rt->flight_active != false))) &&
                     (vario_audio_mode_owns_tone(mode) != false) &&
                     (vario_audio_is_outside_deadband(rt, settings) != false));
 
