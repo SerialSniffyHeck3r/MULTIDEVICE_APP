@@ -91,6 +91,7 @@ typedef struct
     uint32_t baseline_mpu_samples;
     uint32_t baseline_mag_samples;
     uint32_t baseline_baro_samples;
+    uint32_t baseline_baro_sensor_samples[APP_GY86_BARO_SENSOR_SLOTS];
     uint8_t mpu_id_ok;
     uint8_t mag_id_ok;
     uint8_t mpu_flow_ok;
@@ -98,6 +99,9 @@ typedef struct
     uint8_t baro_flow_ok;
     uint8_t accel_sanity_ok;
     uint8_t baro_sanity_ok;
+    uint8_t baro_sensor_expected_mask;
+    uint8_t baro_sensor_flow_mask;
+    uint8_t baro_sensor_sanity_mask;
 } selftest_imu_runtime_t;
 
 /* -------------------------------------------------------------------------- */
@@ -157,6 +161,12 @@ static void SELFTEST_FinishFail(selftest_item_report_t *item,
                                 const char *text);
 static void SELFTEST_UpdateFinishedFlag(uint32_t now_ms);
 static uint32_t SELFTEST_Abs32(int32_t value);
+static uint8_t SELFTEST_BaroConfiguredMask(const app_gy86_state_t *imu_snapshot);
+static void SELFTEST_BuildBaroFailText(char *out,
+                                       size_t out_size,
+                                       uint8_t expected_mask,
+                                       uint8_t observed_mask,
+                                       const char *fallback_text);
 static HAL_StatusTypeDef SELFTEST_I2C_ReadU8(uint16_t dev_addr,
                                              uint8_t reg_addr,
                                              uint8_t *out_value);
@@ -193,6 +203,83 @@ static uint32_t SELFTEST_Abs32(int32_t value)
     }
 
     return (uint32_t)value;
+}
+
+static uint8_t SELFTEST_BaroConfiguredMask(const app_gy86_state_t *imu_snapshot)
+{
+    uint32_t idx;
+    uint8_t mask;
+
+    if (imu_snapshot == 0)
+    {
+        return 0u;
+    }
+
+    mask = 0u;
+
+    for (idx = 0u; idx < APP_GY86_BARO_SENSOR_SLOTS; idx++)
+    {
+        if (imu_snapshot->baro_sensor[idx].configured != 0u)
+        {
+            mask |= (uint8_t)(1u << idx);
+        }
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /*  초기 부트 순간에는 configured 슬롯 정보가 아직 비어 있을 수 있다.      */
+    /*  그런 경우에는 compile-time device count를 fallback으로 사용한다.       */
+    /* ---------------------------------------------------------------------- */
+    if (mask == 0u)
+    {
+        for (idx = 0u; idx < GY86_IMU_MS5611_DEVICE_COUNT; idx++)
+        {
+            mask |= (uint8_t)(1u << idx);
+        }
+    }
+
+    return mask;
+}
+
+static void SELFTEST_BuildBaroFailText(char *out,
+                                       size_t out_size,
+                                       uint8_t expected_mask,
+                                       uint8_t observed_mask,
+                                       const char *fallback_text)
+{
+    uint8_t missing_mask;
+
+    if ((out == 0) || (out_size == 0u))
+    {
+        return;
+    }
+
+    missing_mask = expected_mask & (uint8_t)~observed_mask;
+
+    if (missing_mask == 0u)
+    {
+        if (fallback_text != 0)
+        {
+            (void)snprintf(out, out_size, "%s", fallback_text);
+        }
+        else
+        {
+            (void)snprintf(out, out_size, "BARO FAIL");
+        }
+        return;
+    }
+
+    if (missing_mask == 0x01u)
+    {
+        (void)snprintf(out, out_size, "BARO1 FAIL");
+    }
+    else if (missing_mask == 0x02u)
+    {
+        (void)snprintf(out, out_size, "BARO2 FAIL");
+    }
+    else
+    {
+        (void)snprintf(out, out_size, "BARO1+2 FAIL");
+    }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -495,6 +582,17 @@ void SELFTEST_Begin(uint32_t now_ms)
     s_selftest.imu.baseline_mpu_samples = imu_snapshot.mpu.sample_count;
     s_selftest.imu.baseline_mag_samples = imu_snapshot.mag.sample_count;
     s_selftest.imu.baseline_baro_samples = imu_snapshot.baro.sample_count;
+    s_selftest.imu.baro_sensor_expected_mask = SELFTEST_BaroConfiguredMask(&imu_snapshot);
+
+    {
+        uint32_t idx;
+
+        for (idx = 0u; idx < APP_GY86_BARO_SENSOR_SLOTS; idx++)
+        {
+            s_selftest.imu.baseline_baro_sensor_samples[idx] =
+                imu_snapshot.baro_sensor[idx].sample_count;
+        }
+    }
 
     s_selftest.sensors.next_sample_ms = now_ms;
     s_selftest.sensors.baseline_ds18_samples = ds18_snapshot.raw.sample_count;
@@ -614,7 +712,13 @@ static void SELFTEST_TaskImu(uint32_t now_ms)
             }
             else if (s_selftest.imu.baro_flow_ok == 0u)
             {
-                SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, "ERROR 4-2");
+                char fail_text[sizeof(item->short_text)];
+                SELFTEST_BuildBaroFailText(fail_text,
+                                           sizeof(fail_text),
+                                           s_selftest.imu.baro_sensor_expected_mask,
+                                           s_selftest.imu.baro_sensor_flow_mask,
+                                           "BARO FAIL");
+                SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, fail_text);
             }
             else if (s_selftest.imu.accel_sanity_ok == 0u)
             {
@@ -622,7 +726,13 @@ static void SELFTEST_TaskImu(uint32_t now_ms)
             }
             else
             {
-                SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, "ERROR 4-3");
+                char fail_text[sizeof(item->short_text)];
+                SELFTEST_BuildBaroFailText(fail_text,
+                                           sizeof(fail_text),
+                                           s_selftest.imu.baro_sensor_expected_mask,
+                                           s_selftest.imu.baro_sensor_sanity_mask,
+                                           "BARO FAIL");
+                SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, fail_text);
             }
         }
         return;
@@ -679,6 +789,32 @@ static void SELFTEST_TaskImu(uint32_t now_ms)
         ((imu_snapshot.status_flags & APP_GY86_STATUS_BARO_VALID) != 0u) &&
         (imu_snapshot.baro.sample_count > s_selftest.imu.baseline_baro_samples))
     {
+        uint32_t idx;
+
+        for (idx = 0u; idx < APP_GY86_BARO_SENSOR_SLOTS; idx++)
+        {
+            const app_gy86_baro_sensor_state_t *baro_sensor;
+
+            if ((s_selftest.imu.baro_sensor_expected_mask & (1u << idx)) == 0u)
+            {
+                continue;
+            }
+
+            baro_sensor = &imu_snapshot.baro_sensor[idx];
+            if ((baro_sensor->online != 0u) &&
+                (baro_sensor->valid != 0u) &&
+                (baro_sensor->fresh != 0u) &&
+                (baro_sensor->sample_count > s_selftest.imu.baseline_baro_sensor_samples[idx]))
+            {
+                s_selftest.imu.baro_sensor_flow_mask |= (uint8_t)(1u << idx);
+            }
+        }
+    }
+
+    if ((s_selftest.imu.baro_sensor_expected_mask != 0u) &&
+        ((s_selftest.imu.baro_sensor_flow_mask & s_selftest.imu.baro_sensor_expected_mask) ==
+         s_selftest.imu.baro_sensor_expected_mask))
+    {
         s_selftest.imu.baro_flow_ok = 1u;
     }
 
@@ -714,34 +850,55 @@ static void SELFTEST_TaskImu(uint32_t now_ms)
     /*   pressure 값 안정성과 샘플 진행성을 더 중요하게 본다.                  */
     /* ---------------------------------------------------------------------- */
     {
-        uint32_t baro_new_samples;
-        uint8_t baro_pressure_ok;
+        uint32_t idx;
 
-        baro_new_samples = 0u;
-        if (imu_snapshot.baro.sample_count > s_selftest.imu.baseline_baro_samples)
+        for (idx = 0u; idx < APP_GY86_BARO_SENSOR_SLOTS; idx++)
         {
-            baro_new_samples =
-                imu_snapshot.baro.sample_count - s_selftest.imu.baseline_baro_samples;
+            const app_gy86_baro_sensor_state_t *baro_sensor;
+            uint32_t baro_new_samples;
+            uint8_t  baro_pressure_ok;
+
+            if ((s_selftest.imu.baro_sensor_expected_mask & (1u << idx)) == 0u)
+            {
+                continue;
+            }
+
+            baro_sensor = &imu_snapshot.baro_sensor[idx];
+            baro_new_samples = 0u;
+
+            if (baro_sensor->sample_count > s_selftest.imu.baseline_baro_sensor_samples[idx])
+            {
+                baro_new_samples =
+                    baro_sensor->sample_count - s_selftest.imu.baseline_baro_sensor_samples[idx];
+            }
+
+            baro_pressure_ok = 0u;
+
+            if ((baro_sensor->pressure_pa > 30000) &&
+                (baro_sensor->pressure_pa < 120000))
+            {
+                baro_pressure_ok = 1u;
+            }
+
+            if ((baro_sensor->pressure_hpa_x100 > 30000) &&
+                (baro_sensor->pressure_hpa_x100 < 120000))
+            {
+                baro_pressure_ok = 1u;
+            }
+
+            if ((baro_sensor->online != 0u) &&
+                (baro_sensor->valid != 0u) &&
+                (baro_sensor->fresh != 0u) &&
+                (baro_new_samples >= 2u) &&
+                (baro_pressure_ok != 0u))
+            {
+                s_selftest.imu.baro_sensor_sanity_mask |= (uint8_t)(1u << idx);
+            }
         }
 
-        baro_pressure_ok = 0u;
-
-        if ((imu_snapshot.baro.pressure_pa > 30000) &&
-            (imu_snapshot.baro.pressure_pa < 120000))
-        {
-            baro_pressure_ok = 1u;
-        }
-
-        if ((imu_snapshot.baro.pressure_hpa_x100 > 30000) &&
-            (imu_snapshot.baro.pressure_hpa_x100 < 120000))
-        {
-            baro_pressure_ok = 1u;
-        }
-
-        if (((imu_snapshot.debug.init_ok_mask & APP_GY86_DEVICE_BARO) != 0u) &&
-            ((imu_snapshot.status_flags & APP_GY86_STATUS_BARO_VALID) != 0u) &&
-            (baro_new_samples >= 2u) &&
-            (baro_pressure_ok != 0u))
+        if ((s_selftest.imu.baro_sensor_expected_mask != 0u) &&
+            ((s_selftest.imu.baro_sensor_sanity_mask & s_selftest.imu.baro_sensor_expected_mask) ==
+             s_selftest.imu.baro_sensor_expected_mask))
         {
             s_selftest.imu.baro_sanity_ok = 1u;
         }
@@ -780,7 +937,13 @@ static void SELFTEST_TaskImu(uint32_t now_ms)
         }
         else if (s_selftest.imu.baro_flow_ok == 0u)
         {
-            SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, "ERROR 4-2L"); //FAIL BARO FLOW
+            char fail_text[sizeof(item->short_text)];
+            SELFTEST_BuildBaroFailText(fail_text,
+                                       sizeof(fail_text),
+                                       s_selftest.imu.baro_sensor_expected_mask,
+                                       s_selftest.imu.baro_sensor_flow_mask,
+                                       "BARO FAIL");
+            SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, fail_text);
         }
         else if (s_selftest.imu.accel_sanity_ok == 0u)
         {
@@ -788,7 +951,13 @@ static void SELFTEST_TaskImu(uint32_t now_ms)
         }
         else
         {
-            SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, "ERROR 4-3L"); //FAIL BARO SANITY
+            char fail_text[sizeof(item->short_text)];
+            SELFTEST_BuildBaroFailText(fail_text,
+                                       sizeof(fail_text),
+                                       s_selftest.imu.baro_sensor_expected_mask,
+                                       s_selftest.imu.baro_sensor_sanity_mask,
+                                       "BARO FAIL");
+            SELFTEST_FinishFail(item, now_ms, SELFTEST_FAIL_IMU, fail_text);
         }
     }
 }

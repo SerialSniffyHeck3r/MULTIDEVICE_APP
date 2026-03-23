@@ -378,8 +378,9 @@
       APP_UI_PAGE_SPI_FLASH   = 6u,
       APP_UI_PAGE_CLOCK       = 7u,
       APP_UI_PAGE_ALTITUDE    = 8u,
-      APP_UI_PAGE_BIKE        = 9u,
-      APP_UI_PAGE_COUNT       = 10u
+      APP_UI_PAGE_BARO_FUSION = 9u,
+      APP_UI_PAGE_BIKE        = 10u,
+      APP_UI_PAGE_COUNT       = 11u
   } app_ui_page_t;
 
 
@@ -2955,6 +2956,169 @@
   }
 
   /* -------------------------------------------------------------------------- */
+  /*  BARO FUSION debug page                                                    */
+  /*                                                                            */
+  /*  목적                                                                      */
+  /*  - ALTITUDE page는 최종 altitude/vario 결과를 보는 페이지다.               */
+  /*  - 이 페이지는 그보다 한 단계 아래에서                                     */
+  /*    "두 barometer가 실제로 동시에 살아 있는지"                             */
+  /*    "이번 fused sample에 어느 sensor가 실제 사용되었는지"                  */
+  /*    "offset/bias 보정과 disagreement gate가 어떻게 동작하는지"             */
+  /*    를 텍스트로 확인하는 페이지다.                                           */
+  /*                                                                            */
+  /*  화면 배치                                                                  */
+  /*  - 좌측 컬럼(X=0)   : fused summary + sensor1 상세                         */
+  /*  - 우측 컬럼(X=122) : global flags + sensor2 상세                          */
+  /*  - 기존 legacy debug와 동일한 4x6 text layout만 사용하고                   */
+  /*    사각형/아이콘 같은 UI 요소는 추가하지 않는다.                            */
+  /* -------------------------------------------------------------------------- */
+  static void APP_DrawBaroFusionDebugPage(u8g2_t *u8g2,
+                                          const app_sensor_debug_snapshot_t *sensor,
+                                          uint32_t now_ms)
+  {
+      const app_gy86_state_t *imu;
+      const app_gy86_baro_sensor_state_t *sensor1;
+      const app_gy86_baro_sensor_state_t *sensor2;
+      uint8_t y_left;
+      uint8_t y_right;
+      uint32_t fused_age_ms;
+      uint32_t sensor1_age_ms;
+      uint32_t sensor2_age_ms;
+      char line[64];
+      char text_a[24];
+      char text_b[24];
+
+      if ((u8g2 == 0) || (sensor == 0))
+      {
+          return;
+      }
+
+      imu = &sensor->gy86;
+      sensor1 = &imu->baro_sensor[0];
+      sensor2 = &imu->baro_sensor[1];
+
+      fused_age_ms = (imu->baro.timestamp_ms == 0u) ? 0u : (now_ms - imu->baro.timestamp_ms);
+      sensor1_age_ms = (sensor1->timestamp_ms == 0u) ? 0u : (now_ms - sensor1->timestamp_ms);
+      sensor2_age_ms = (sensor2->timestamp_ms == 0u) ? 0u : (now_ms - sensor2->timestamp_ms);
+
+      u8g2_SetFont(u8g2, u8g2_font_4x6_tr);
+      y_left = 6u;
+      y_right = 6u;
+
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, "BARO FUSE DBG");
+      snprintf(line, sizeof(line),
+               "FS%u P%u F%02X",
+               (unsigned)imu->debug.baro_fused_sensor_count,
+               (unsigned)((imu->debug.baro_primary_sensor_index < APP_GY86_BARO_SENSOR_SLOTS) ?
+                          (imu->debug.baro_primary_sensor_index + 1u) : 0u),
+               (unsigned)imu->debug.baro_fusion_flags);
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+
+      APP_FormatSignedCentiText(text_a, sizeof(text_a), imu->baro.pressure_hpa_x100);
+      APP_FormatSignedCentiText(text_b, sizeof(text_b), imu->baro.temp_cdeg);
+      snprintf(line, sizeof(line), "F %s/%s", text_a, text_b);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      APP_FormatSignedCentiText(text_a, sizeof(text_a), imu->debug.baro_sensor_delta_pa_raw);
+      APP_FormatSignedCentiText(text_b, sizeof(text_b), imu->debug.baro_sensor_delta_pa_aligned);
+      snprintf(line, sizeof(line), "D %s/%s", text_a, text_b);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      snprintf(line, sizeof(line),
+               "AGE %lu SC%lu",
+               (unsigned long)fused_age_ms,
+               (unsigned long)imu->baro.sample_count);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      snprintf(line, sizeof(line),
+               "S1 C%u O%u V%u F%u",
+               sensor1->configured ? 1u : 0u,
+               sensor1->online ? 1u : 0u,
+               sensor1->valid ? 1u : 0u,
+               sensor1->fresh ? 1u : 0u);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      snprintf(line, sizeof(line),
+               "S1 B%u A%02X E%u",
+               (unsigned)sensor1->bus_id,
+               (unsigned)sensor1->addr_7bit,
+               (unsigned)sensor1->error_streak);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      APP_FormatSignedCentiText(text_a, sizeof(text_a), sensor1->pressure_hpa_x100);
+      APP_FormatSignedCentiText(text_b, sizeof(text_b), sensor1->temp_cdeg);
+      snprintf(line, sizeof(line), "S1 P%s T%s", text_a, text_b);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      snprintf(line, sizeof(line),
+               "S1 W%u S%u R%u",
+               (unsigned)sensor1->weight_permille,
+               sensor1->selected ? 1u : 0u,
+               sensor1->rejected ? 1u : 0u);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      APP_FormatSignedCentiText(text_a, sizeof(text_a), sensor1->bias_pa);
+      APP_FormatSignedCentiText(text_b, sizeof(text_b), sensor1->residual_pa);
+      snprintf(line, sizeof(line), "S1 B%s R%s", text_a, text_b);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      snprintf(line, sizeof(line),
+               "S1 N%lu A%lu",
+               (unsigned long)sensor1->sample_count,
+               (unsigned long)sensor1_age_ms);
+      APP_DrawTextLineAtX(u8g2, 0u, &y_left, line);
+
+      snprintf(line, sizeof(line),
+               "RAW %u/%u",
+               (unsigned)((imu->status_flags & APP_GY86_STATUS_BARO_VALID) ? 1u : 0u),
+               (unsigned)((imu->debug.init_ok_mask & APP_GY86_DEVICE_BARO) ? 1u : 0u));
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+
+      snprintf(line, sizeof(line),
+               "S2 C%u O%u V%u F%u",
+               sensor2->configured ? 1u : 0u,
+               sensor2->online ? 1u : 0u,
+               sensor2->valid ? 1u : 0u,
+               sensor2->fresh ? 1u : 0u);
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+
+      snprintf(line, sizeof(line),
+               "S2 B%u A%02X E%u",
+               (unsigned)sensor2->bus_id,
+               (unsigned)sensor2->addr_7bit,
+               (unsigned)sensor2->error_streak);
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+
+      APP_FormatSignedCentiText(text_a, sizeof(text_a), sensor2->pressure_hpa_x100);
+      APP_FormatSignedCentiText(text_b, sizeof(text_b), sensor2->temp_cdeg);
+      snprintf(line, sizeof(line), "S2 P%s T%s", text_a, text_b);
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+
+      snprintf(line, sizeof(line),
+               "S2 W%u S%u R%u",
+               (unsigned)sensor2->weight_permille,
+               sensor2->selected ? 1u : 0u,
+               sensor2->rejected ? 1u : 0u);
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+
+      APP_FormatSignedCentiText(text_a, sizeof(text_a), sensor2->bias_pa);
+      APP_FormatSignedCentiText(text_b, sizeof(text_b), sensor2->residual_pa);
+      snprintf(line, sizeof(line), "S2 B%s R%s", text_a, text_b);
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+
+      snprintf(line, sizeof(line),
+               "S2 N%lu A%lu",
+               (unsigned long)sensor2->sample_count,
+               (unsigned long)sensor2_age_ms);
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, line);
+
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, "P1 raw/ali");
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, "P2 sel/rej");
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, "AGE ms");
+      APP_DrawTextLineAtX(u8g2, 122u, &y_right, "F=flag hex");
+  }
+
+  /* -------------------------------------------------------------------------- */
   /*  BIKE DYNAMICS debug page 편집 파라미터                                      */
   /*                                                                            */
   /*  이 페이지는                                                               */
@@ -3727,6 +3891,9 @@
       case APP_UI_PAGE_ALTITUDE:
           return APP_UI_ALTITUDE_MIN_REFRESH_MS;
 
+      case APP_UI_PAGE_BARO_FUSION:
+          return APP_UI_ALTITUDE_MIN_REFRESH_MS;
+
       case APP_UI_PAGE_BIKE:
           return APP_UI_BIKE_MIN_REFRESH_MS;
 
@@ -4049,7 +4216,8 @@ void UI_DebugLegacy_Draw(u8g2_t *u8g2, uint32_t now_ms)
         g_last_ui_draw_ms = now_ms;
         g_ui_force_redraw = 0u;
 
-        if (g_ui_page == APP_UI_PAGE_SENSOR)
+        if ((g_ui_page == APP_UI_PAGE_SENSOR) ||
+            (g_ui_page == APP_UI_PAGE_BARO_FUSION))
         {
             APP_STATE_CopySensorDebugSnapshot(&g_sensor_snapshot);
         }
@@ -4126,6 +4294,10 @@ void UI_DebugLegacy_Draw(u8g2_t *u8g2, uint32_t now_ms)
     else if (g_ui_page == APP_UI_PAGE_ALTITUDE)
     {
         APP_DrawAltitudeDebugPage(u8g2, &g_altitude_snapshot, &g_settings_snapshot, now_ms);
+    }
+    else if (g_ui_page == APP_UI_PAGE_BARO_FUSION)
+    {
+        APP_DrawBaroFusionDebugPage(u8g2, &g_sensor_snapshot, now_ms);
     }
 
     else if (g_ui_page == APP_UI_PAGE_BIKE)

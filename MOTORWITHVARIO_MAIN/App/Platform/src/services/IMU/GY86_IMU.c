@@ -80,6 +80,35 @@ extern I2C_HandleTypeDef GY86_IMU_I2C2_HANDLE;
 #define MS5611_CMD_PROM_READ_BASE    0xA0u
 
 /* -------------------------------------------------------------------------- */
+/*  dual MS5611 fusion tuning                                                 */
+/*                                                                            */
+/*  목적                                                                       */
+/*  - 두 pressure sensor를 단순 평균이 아니라                                 */
+/*    freshness / offset / disagreement 상태를 보며 합친다.                   */
+/*  - sensor 하나가 한두 샘플 늦거나, static offset이 있거나,                  */
+/*    순간적으로 튀어도 fused pressure가 크게 흔들리지 않게 한다.             */
+/* -------------------------------------------------------------------------- */
+#ifndef GY86_MS5611_FUSION_FRESH_TIMEOUT_MS
+#define GY86_MS5611_FUSION_FRESH_TIMEOUT_MS 80u
+#endif
+
+#ifndef GY86_MS5611_FUSION_DISAGREE_ENTER_PA
+#define GY86_MS5611_FUSION_DISAGREE_ENTER_PA 60
+#endif
+
+#ifndef GY86_MS5611_FUSION_DISAGREE_EXIT_PA
+#define GY86_MS5611_FUSION_DISAGREE_EXIT_PA 35
+#endif
+
+#ifndef GY86_MS5611_FUSION_BIAS_TRACK_ALPHA
+#define GY86_MS5611_FUSION_BIAS_TRACK_ALPHA 0.025f
+#endif
+
+#ifndef GY86_MS5611_FUSION_BIAS_TRACK_GATE_PA
+#define GY86_MS5611_FUSION_BIAS_TRACK_GATE_PA 160.0f
+#endif
+
+/* -------------------------------------------------------------------------- */
 /*  backend 공통 타입                                                          */
 /*                                                                            */
 /*  포인트                                                                     */
@@ -216,9 +245,32 @@ typedef struct
 
     /* ---------------------------------------------------------------------- */
     /*  MS5611 aggregate / dual-sensor runtime                                 */
+    /*                                                                        */
+    /*  fused_baro_sample_count     : fused publish 누적 수                    */
+    /*  ms5611_pressure_bias_pa[]   : sensor0 기준 상대 pressure offset 추정    */
+    /*  ms5611_aligned_pressure_pa[]: bias 제거 후 fusion에 사용한 pressure      */
+    /*  ms5611_residual_pa[]        : aligned - primary residual               */
+    /*  ms5611_weight_permille[]    : 이번 publish에 사용된 weight             */
+    /*  ms5611_selected_mask        : fused sample에 실제 반영된 sensor bit     */
+    /*  ms5611_rejected_mask        : stale/disagree로 제외된 sensor bit        */
+    /*  ms5611_disagree_latched_mask: disagreement hysteresis latch 상태       */
+    /*  ms5611_primary_index        : 현재 raw/prom 기준으로 채택된 primary     */
     /* ---------------------------------------------------------------------- */
     gy86_ms5611_device_t ms5611_dev[GY86_IMU_MS5611_DEVICE_COUNT];
     uint32_t fused_baro_sample_count;
+    float    ms5611_pressure_bias_pa[GY86_IMU_MS5611_DEVICE_COUNT];
+    int32_t  ms5611_aligned_pressure_pa[GY86_IMU_MS5611_DEVICE_COUNT];
+    int32_t  ms5611_residual_pa[GY86_IMU_MS5611_DEVICE_COUNT];
+    uint16_t ms5611_weight_permille[GY86_IMU_MS5611_DEVICE_COUNT];
+    uint8_t  ms5611_selected_mask;
+    uint8_t  ms5611_rejected_mask;
+    uint8_t  ms5611_disagree_latched_mask;
+    uint8_t  ms5611_primary_index;
+    uint8_t  ms5611_fused_count;
+    uint8_t  ms5611_fusion_flags;
+    uint8_t  reserved2;
+    int32_t  ms5611_raw_delta_pa;
+    int32_t  ms5611_aligned_delta_pa;
 } gy86_runtime_t;
 
 static gy86_runtime_t s_gy86_rt;
@@ -227,6 +279,11 @@ static gy86_runtime_t s_gy86_rt;
 /*  forward declarations used by backend code                                 */
 /* -------------------------------------------------------------------------- */
 static void GY86_UpdateInitializedFlag(app_gy86_state_t *imu);
+static uint8_t GY86_Ms5611_DeviceIsFresh(uint32_t now_ms,
+                                         const gy86_ms5611_device_t *dev);
+static void GY86_Ms5611_ClearFusionDiagnostics(void);
+static void GY86_Ms5611_UpdateAppStateDiagnostics(app_gy86_state_t *imu,
+                                                  uint32_t now_ms);
 void GY86_RecordRuntimeErrorAndMaybeOffline(uint8_t device_mask,
                                             uint8_t *online_flag,
                                             uint8_t *error_streak,
@@ -250,6 +307,8 @@ static void GY86_Ms5611_DeviceRuntimeInit(gy86_ms5611_device_t *dev,
 
 static void GY86_Ms5611_RuntimeInit(void)
 {
+    GY86_Ms5611_ClearFusionDiagnostics();
+
     /* ------------------------------------------------------------------ */
     /*  device[0]은 항상 "기존 onboard GY-86 MS5611" 역할을 맡긴다.      */
     /* ------------------------------------------------------------------ */
@@ -275,6 +334,122 @@ static void GY86_Ms5611_RuntimeInit(void)
                                   &s_gy86_i2c_bus2,
                                   GY86_MS5611_ADDR_I2C2);
 #endif
+}
+
+static int32_t GY86_RoundFloatToS32(float value)
+{
+    if (value >= 0.0f)
+    {
+        return (int32_t)(value + 0.5f);
+    }
+
+    return (int32_t)(value - 0.5f);
+}
+
+static uint32_t GY86_Abs32(int32_t value)
+{
+    if (value < 0)
+    {
+        return (uint32_t)(-value);
+    }
+
+    return (uint32_t)value;
+}
+
+static uint8_t GY86_Ms5611_DeviceIsFresh(uint32_t now_ms,
+                                         const gy86_ms5611_device_t *dev)
+{
+    uint32_t age_ms;
+
+    if (dev == 0)
+    {
+        return 0u;
+    }
+
+    if ((dev->online == 0u) || (dev->valid == 0u) || (dev->timestamp_ms == 0u))
+    {
+        return 0u;
+    }
+
+    age_ms = now_ms - dev->timestamp_ms;
+
+    return (age_ms <= GY86_MS5611_FUSION_FRESH_TIMEOUT_MS) ? 1u : 0u;
+}
+
+static void GY86_Ms5611_ClearFusionDiagnostics(void)
+{
+    uint32_t idx;
+
+    s_gy86_rt.ms5611_selected_mask = 0u;
+    s_gy86_rt.ms5611_rejected_mask = 0u;
+    s_gy86_rt.ms5611_primary_index = 0xFFu;
+    s_gy86_rt.ms5611_fused_count = 0u;
+    s_gy86_rt.ms5611_fusion_flags = 0u;
+    s_gy86_rt.ms5611_raw_delta_pa = 0;
+    s_gy86_rt.ms5611_aligned_delta_pa = 0;
+
+    for (idx = 0u; idx < GY86_IMU_MS5611_DEVICE_COUNT; idx++)
+    {
+        s_gy86_rt.ms5611_aligned_pressure_pa[idx] = 0;
+        s_gy86_rt.ms5611_residual_pa[idx] = 0;
+        s_gy86_rt.ms5611_weight_permille[idx] = 0u;
+    }
+}
+
+static void GY86_Ms5611_UpdateAppStateDiagnostics(app_gy86_state_t *imu,
+                                                  uint32_t now_ms)
+{
+    uint32_t idx;
+
+    if (imu == 0)
+    {
+        return;
+    }
+
+    imu->debug.baro_device_slots = APP_GY86_BARO_SENSOR_SLOTS;
+    imu->debug.baro_fused_sensor_count = s_gy86_rt.ms5611_fused_count;
+    imu->debug.baro_primary_sensor_index = s_gy86_rt.ms5611_primary_index;
+    imu->debug.baro_fusion_flags = s_gy86_rt.ms5611_fusion_flags;
+    imu->debug.baro_sensor_delta_pa_raw = s_gy86_rt.ms5611_raw_delta_pa;
+    imu->debug.baro_sensor_delta_pa_aligned = s_gy86_rt.ms5611_aligned_delta_pa;
+
+    for (idx = 0u; idx < APP_GY86_BARO_SENSOR_SLOTS; idx++)
+    {
+        app_gy86_baro_sensor_state_t *dst;
+
+        dst = &imu->baro_sensor[idx];
+        memset(dst, 0, sizeof(*dst));
+
+        if (idx >= GY86_IMU_MS5611_DEVICE_COUNT)
+        {
+            continue;
+        }
+
+        if ((s_gy86_rt.ms5611_dev[idx].bus == 0) ||
+            (s_gy86_rt.ms5611_dev[idx].addr == 0u))
+        {
+            continue;
+        }
+
+        dst->configured = 1u;
+        dst->online = s_gy86_rt.ms5611_dev[idx].online;
+        dst->valid = s_gy86_rt.ms5611_dev[idx].valid;
+        dst->fresh = GY86_Ms5611_DeviceIsFresh(now_ms, &s_gy86_rt.ms5611_dev[idx]);
+        dst->selected = ((s_gy86_rt.ms5611_selected_mask & (1u << idx)) != 0u) ? 1u : 0u;
+        dst->rejected = ((s_gy86_rt.ms5611_rejected_mask & (1u << idx)) != 0u) ? 1u : 0u;
+        dst->bus_id = (s_gy86_rt.ms5611_dev[idx].bus != 0) ? s_gy86_rt.ms5611_dev[idx].bus->bus_id : 0u;
+        dst->addr_7bit = (uint8_t)(s_gy86_rt.ms5611_dev[idx].addr >> 1);
+        dst->error_streak = s_gy86_rt.ms5611_dev[idx].error_streak;
+        dst->weight_permille = s_gy86_rt.ms5611_weight_permille[idx];
+        dst->timestamp_ms = s_gy86_rt.ms5611_dev[idx].timestamp_ms;
+        dst->sample_count = s_gy86_rt.ms5611_dev[idx].sample_count;
+        dst->temp_cdeg = s_gy86_rt.ms5611_dev[idx].temp_cdeg;
+        dst->pressure_hpa_x100 = s_gy86_rt.ms5611_dev[idx].pressure_hpa_x100;
+        dst->pressure_pa = s_gy86_rt.ms5611_dev[idx].pressure_pa;
+        dst->aligned_pressure_pa = s_gy86_rt.ms5611_aligned_pressure_pa[idx];
+        dst->bias_pa = GY86_RoundFloatToS32(s_gy86_rt.ms5611_pressure_bias_pa[idx]);
+        dst->residual_pa = s_gy86_rt.ms5611_residual_pa[idx];
+    }
 }
 
 static uint8_t GY86_Ms5611_AnyOnline(void)
@@ -320,9 +495,15 @@ static void GY86_Ms5611_CopyPromToAppState(app_gy86_state_t *imu)
     memset(imu->baro.prom_c, 0, sizeof(imu->baro.prom_c));
 
     src_index = 0u;
+
+    if ((s_gy86_rt.ms5611_primary_index < GY86_IMU_MS5611_DEVICE_COUNT) &&
+        (s_gy86_rt.ms5611_dev[s_gy86_rt.ms5611_primary_index].online != 0u))
+    {
+        src_index = s_gy86_rt.ms5611_primary_index;
+    }
 #if USE_DOUBLE_BAROSENSOR
-    if ((s_gy86_rt.ms5611_dev[0].online == 0u) &&
-        (s_gy86_rt.ms5611_dev[1].online != 0u))
+    else if ((s_gy86_rt.ms5611_dev[0].online == 0u) &&
+             (s_gy86_rt.ms5611_dev[1].online != 0u))
     {
         src_index = 1u;
     }
@@ -1278,6 +1459,20 @@ static HAL_StatusTypeDef GY86_Ms5611_InitOne(app_gy86_state_t *imu,
     dev->pressure_pa = 0;
     dev->valid = 0u;
 
+    {
+        uint32_t device_index;
+
+        device_index = (uint32_t)(dev - &s_gy86_rt.ms5611_dev[0]);
+        if (device_index < GY86_IMU_MS5611_DEVICE_COUNT)
+        {
+            s_gy86_rt.ms5611_pressure_bias_pa[device_index] = 0.0f;
+            s_gy86_rt.ms5611_aligned_pressure_pa[device_index] = 0;
+            s_gy86_rt.ms5611_residual_pa[device_index] = 0;
+            s_gy86_rt.ms5611_weight_permille[device_index] = 0u;
+            s_gy86_rt.ms5611_disagree_latched_mask &= (uint8_t)~(1u << device_index);
+        }
+    }
+
     return HAL_OK;
 }
 
@@ -1340,6 +1535,7 @@ static HAL_StatusTypeDef GY86_Ms5611_Init(app_gy86_state_t *imu)
     imu->debug.baro_backend_id     = APP_IMU_BACKEND_MS5611;
     imu->debug.last_hal_status_baro = (uint8_t)HAL_OK;
     GY86_Ms5611_CopyPromToAppState(imu);
+    GY86_Ms5611_UpdateAppStateDiagnostics(imu, HAL_GetTick());
 
     return (final_status == HAL_OK) ? HAL_OK : HAL_ERROR;
 }
@@ -1410,22 +1606,29 @@ static void GY86_Ms5611_PublishFusedSample(app_gy86_state_t *imu,
                                            uint32_t now_ms,
                                            uint8_t *updated)
 {
-    int64_t pressure_sum;
-    int64_t temp_sum;
-    uint32_t fused_count;
     uint32_t idx;
-    uint32_t latest_timestamp_ms;
+    uint32_t fresh_age_ms[GY86_IMU_MS5611_DEVICE_COUNT];
+    uint32_t freshness_score[GY86_IMU_MS5611_DEVICE_COUNT];
+    uint8_t  fresh_mask;
+    uint8_t  accepted_mask;
+    uint8_t  primary_index;
     gy86_ms5611_device_t *primary_dev;
+    int32_t fused_pressure_pa;
+    int32_t fused_temp_cdeg;
+    uint32_t fused_weight_sum;
+    uint32_t latest_timestamp_ms;
+    int64_t pressure_acc;
+    int64_t temp_acc;
 
     if (imu == 0)
     {
         return;
     }
 
-    pressure_sum = 0LL;
-    temp_sum = 0LL;
-    fused_count = 0u;
-    latest_timestamp_ms = 0u;
+    GY86_Ms5611_ClearFusionDiagnostics();
+    fresh_mask = 0u;
+    accepted_mask = 0u;
+    primary_index = 0xFFu;
     primary_dev = 0;
 
     for (idx = 0u; idx < GY86_IMU_MS5611_DEVICE_COUNT; idx++)
@@ -1433,41 +1636,249 @@ static void GY86_Ms5611_PublishFusedSample(app_gy86_state_t *imu,
         gy86_ms5611_device_t *dev;
 
         dev = &s_gy86_rt.ms5611_dev[idx];
-        if ((dev->online == 0u) || (dev->valid == 0u))
+        freshness_score[idx] = 0u;
+        fresh_age_ms[idx] = 0u;
+
+        if (GY86_Ms5611_DeviceIsFresh(now_ms, dev) == 0u)
         {
             continue;
         }
 
-        if (primary_dev == 0)
-        {
-            primary_dev = dev;
-        }
+        fresh_age_ms[idx] = now_ms - dev->timestamp_ms;
+        fresh_mask |= (uint8_t)(1u << idx);
+        freshness_score[idx] = (GY86_MS5611_FUSION_FRESH_TIMEOUT_MS - fresh_age_ms[idx]) + 1u;
+    }
 
-        pressure_sum += (int64_t)dev->pressure_hpa_x100;
-        temp_sum += (int64_t)dev->temp_cdeg;
-        fused_count++;
+    if ((fresh_mask & 0x01u) != 0u)
+    {
+        primary_index = 0u;
+    }
+    else
+    {
+        uint32_t best_age_ms;
 
-        if ((latest_timestamp_ms == 0u) || ((int32_t)(dev->timestamp_ms - latest_timestamp_ms) > 0))
+        best_age_ms = 0xFFFFFFFFu;
+
+        for (idx = 0u; idx < GY86_IMU_MS5611_DEVICE_COUNT; idx++)
         {
-            latest_timestamp_ms = dev->timestamp_ms;
+            if ((fresh_mask & (1u << idx)) == 0u)
+            {
+                continue;
+            }
+
+            if (fresh_age_ms[idx] < best_age_ms)
+            {
+                best_age_ms = fresh_age_ms[idx];
+                primary_index = (uint8_t)idx;
+            }
         }
     }
 
-    if ((fused_count == 0u) || (primary_dev == 0))
+    if (primary_index >= GY86_IMU_MS5611_DEVICE_COUNT)
     {
+        GY86_Ms5611_UpdateAppStateDiagnostics(imu, now_ms);
         return;
     }
 
-    imu->baro.timestamp_ms      = (latest_timestamp_ms != 0u) ? latest_timestamp_ms : now_ms;
+    primary_dev = &s_gy86_rt.ms5611_dev[primary_index];
+    s_gy86_rt.ms5611_primary_index = primary_index;
+
+    for (idx = 0u; idx < GY86_IMU_MS5611_DEVICE_COUNT; idx++)
+    {
+        gy86_ms5611_device_t *dev;
+        int32_t aligned_pressure_pa;
+        int32_t residual_pa;
+
+        dev = &s_gy86_rt.ms5611_dev[idx];
+
+        if ((fresh_mask & (1u << idx)) == 0u)
+        {
+            if ((dev->online != 0u) || (dev->valid != 0u))
+            {
+                s_gy86_rt.ms5611_rejected_mask |= (uint8_t)(1u << idx);
+                s_gy86_rt.ms5611_fusion_flags |= APP_GY86_BARO_FUSION_FLAG_STALE_FALLBACK;
+            }
+            continue;
+        }
+
+        aligned_pressure_pa = dev->pressure_pa;
+        residual_pa = 0;
+
+        if ((idx != 0u) && ((fresh_mask & 0x01u) != 0u))
+        {
+            float residual_to_bias_pa;
+            uint8_t disagree_latched;
+
+            residual_to_bias_pa = (float)(dev->pressure_pa -
+                                          s_gy86_rt.ms5611_dev[0].pressure_pa) -
+                                  s_gy86_rt.ms5611_pressure_bias_pa[idx];
+
+            if ((residual_to_bias_pa > -GY86_MS5611_FUSION_BIAS_TRACK_GATE_PA) &&
+                (residual_to_bias_pa <  GY86_MS5611_FUSION_BIAS_TRACK_GATE_PA))
+            {
+                s_gy86_rt.ms5611_pressure_bias_pa[idx] +=
+                    GY86_MS5611_FUSION_BIAS_TRACK_ALPHA * residual_to_bias_pa;
+
+                if ((s_gy86_rt.ms5611_pressure_bias_pa[idx] > 1.0f) ||
+                    (s_gy86_rt.ms5611_pressure_bias_pa[idx] < -1.0f))
+                {
+                    s_gy86_rt.ms5611_fusion_flags |= APP_GY86_BARO_FUSION_FLAG_OFFSET_TRACK_ACTIVE;
+                }
+            }
+
+            aligned_pressure_pa = dev->pressure_pa -
+                                  GY86_RoundFloatToS32(s_gy86_rt.ms5611_pressure_bias_pa[idx]);
+            residual_pa = aligned_pressure_pa - s_gy86_rt.ms5611_dev[0].pressure_pa;
+
+            disagree_latched = ((s_gy86_rt.ms5611_disagree_latched_mask & (1u << idx)) != 0u) ? 1u : 0u;
+
+            if (disagree_latched != 0u)
+            {
+                if (GY86_Abs32(residual_pa) <= (uint32_t)GY86_MS5611_FUSION_DISAGREE_EXIT_PA)
+                {
+                    s_gy86_rt.ms5611_disagree_latched_mask &= (uint8_t)~(1u << idx);
+                }
+                else
+                {
+                    s_gy86_rt.ms5611_rejected_mask |= (uint8_t)(1u << idx);
+                    s_gy86_rt.ms5611_fusion_flags |= APP_GY86_BARO_FUSION_FLAG_DISAGREE_REJECT;
+                    s_gy86_rt.ms5611_aligned_pressure_pa[idx] = aligned_pressure_pa;
+                    s_gy86_rt.ms5611_residual_pa[idx] = residual_pa;
+                    continue;
+                }
+            }
+            else if (GY86_Abs32(residual_pa) > (uint32_t)GY86_MS5611_FUSION_DISAGREE_ENTER_PA)
+            {
+                s_gy86_rt.ms5611_disagree_latched_mask |= (uint8_t)(1u << idx);
+                s_gy86_rt.ms5611_rejected_mask |= (uint8_t)(1u << idx);
+                s_gy86_rt.ms5611_fusion_flags |= APP_GY86_BARO_FUSION_FLAG_DISAGREE_REJECT;
+                s_gy86_rt.ms5611_aligned_pressure_pa[idx] = aligned_pressure_pa;
+                s_gy86_rt.ms5611_residual_pa[idx] = residual_pa;
+                continue;
+            }
+        }
+
+        if (idx == primary_index)
+        {
+            aligned_pressure_pa = dev->pressure_pa;
+            residual_pa = 0;
+        }
+
+        accepted_mask |= (uint8_t)(1u << idx);
+        s_gy86_rt.ms5611_selected_mask |= (uint8_t)(1u << idx);
+        s_gy86_rt.ms5611_aligned_pressure_pa[idx] = aligned_pressure_pa;
+        s_gy86_rt.ms5611_residual_pa[idx] = residual_pa;
+    }
+
+#if (GY86_IMU_MS5611_DEVICE_COUNT >= 2u)
+    if ((s_gy86_rt.ms5611_dev[0].valid != 0u) && (s_gy86_rt.ms5611_dev[1].valid != 0u))
+    {
+        s_gy86_rt.ms5611_raw_delta_pa =
+            s_gy86_rt.ms5611_dev[1].pressure_pa - s_gy86_rt.ms5611_dev[0].pressure_pa;
+        s_gy86_rt.ms5611_aligned_delta_pa =
+            s_gy86_rt.ms5611_aligned_pressure_pa[1] - s_gy86_rt.ms5611_aligned_pressure_pa[0];
+    }
+#endif
+
+    if ((accepted_mask & (1u << primary_index)) == 0u)
+    {
+        accepted_mask |= (uint8_t)(1u << primary_index);
+        s_gy86_rt.ms5611_selected_mask |= (uint8_t)(1u << primary_index);
+        s_gy86_rt.ms5611_aligned_pressure_pa[primary_index] = primary_dev->pressure_pa;
+        s_gy86_rt.ms5611_residual_pa[primary_index] = 0;
+    }
+
+    pressure_acc = 0LL;
+    temp_acc = 0LL;
+    fused_weight_sum = 0u;
+    latest_timestamp_ms = primary_dev->timestamp_ms;
+
+    for (idx = 0u; idx < GY86_IMU_MS5611_DEVICE_COUNT; idx++)
+    {
+        gy86_ms5611_device_t *dev;
+        uint32_t weight;
+
+        if ((accepted_mask & (1u << idx)) == 0u)
+        {
+            continue;
+        }
+
+        dev = &s_gy86_rt.ms5611_dev[idx];
+        weight = freshness_score[idx];
+
+        if ((idx != primary_index) && (primary_index == 0u))
+        {
+            uint32_t residual_abs_pa;
+            uint32_t penalty_permille;
+
+            residual_abs_pa = GY86_Abs32(s_gy86_rt.ms5611_residual_pa[idx]);
+            penalty_permille = 1000u;
+
+            if ((uint32_t)GY86_MS5611_FUSION_DISAGREE_ENTER_PA != 0u)
+            {
+                uint32_t scaled_penalty;
+
+                scaled_penalty = (residual_abs_pa * 700u) / (uint32_t)GY86_MS5611_FUSION_DISAGREE_ENTER_PA;
+                if (scaled_penalty > 700u)
+                {
+                    scaled_penalty = 700u;
+                }
+
+                penalty_permille -= scaled_penalty;
+            }
+
+            weight = (weight * penalty_permille) / 1000u;
+        }
+
+        if (weight == 0u)
+        {
+            weight = 1u;
+        }
+
+        s_gy86_rt.ms5611_weight_permille[idx] = (uint16_t)weight;
+        pressure_acc += (int64_t)s_gy86_rt.ms5611_aligned_pressure_pa[idx] * (int64_t)weight;
+        temp_acc += (int64_t)dev->temp_cdeg * (int64_t)weight;
+        fused_weight_sum += weight;
+        if ((int32_t)(dev->timestamp_ms - latest_timestamp_ms) > 0)
+        {
+            latest_timestamp_ms = dev->timestamp_ms;
+        }
+        s_gy86_rt.ms5611_fused_count++;
+    }
+
+    if (fused_weight_sum == 0u)
+    {
+        GY86_Ms5611_UpdateAppStateDiagnostics(imu, now_ms);
+        return;
+    }
+
+    if (s_gy86_rt.ms5611_fused_count <= 1u)
+    {
+        s_gy86_rt.ms5611_fusion_flags |= APP_GY86_BARO_FUSION_FLAG_SINGLE_SENSOR;
+    }
+
+    for (idx = 0u; idx < GY86_IMU_MS5611_DEVICE_COUNT; idx++)
+    {
+        if ((accepted_mask & (1u << idx)) != 0u)
+        {
+            s_gy86_rt.ms5611_weight_permille[idx] =
+                (uint16_t)(((uint32_t)s_gy86_rt.ms5611_weight_permille[idx] * 1000u) / fused_weight_sum);
+        }
+    }
+
+    fused_pressure_pa = (int32_t)(pressure_acc / (int64_t)fused_weight_sum);
+    fused_temp_cdeg = (int32_t)(temp_acc / (int64_t)fused_weight_sum);
+
+    imu->baro.timestamp_ms      = latest_timestamp_ms;
     imu->baro.sample_count      = ++s_gy86_rt.fused_baro_sample_count;
     imu->baro.d1_raw            = primary_dev->d1_raw;
     imu->baro.d2_raw            = primary_dev->d2_raw;
-    imu->baro.temp_cdeg         = (int32_t)(temp_sum / (int64_t)fused_count);
-    imu->baro.pressure_hpa_x100 = (int32_t)(pressure_sum / (int64_t)fused_count);
-    /* fused pressure도 동일하게 hPa*100 == Pa 이다. */
-    imu->baro.pressure_pa       = imu->baro.pressure_hpa_x100;
+    imu->baro.temp_cdeg         = fused_temp_cdeg;
+    imu->baro.pressure_hpa_x100 = fused_pressure_pa;
+    imu->baro.pressure_pa       = fused_pressure_pa;
 
     GY86_Ms5611_CopyPromToAppState(imu);
+    GY86_Ms5611_UpdateAppStateDiagnostics(imu, now_ms);
 
     imu->debug.baro_last_ok_ms   = now_ms;
     imu->debug.ms5611_state      = 0u;
@@ -1652,6 +2063,10 @@ static HAL_StatusTypeDef GY86_Ms5611_Poll(uint32_t now_ms,
     {
         GY86_Ms5611_PublishFusedSample(imu, now_ms, updated);
     }
+    else
+    {
+        GY86_Ms5611_UpdateAppStateDiagnostics(imu, now_ms);
+    }
 
     return HAL_OK;
 }
@@ -1711,6 +2126,10 @@ static void GY86_ResetAppStateSlice(app_gy86_state_t *imu)
 #endif
 
     imu->debug.baro_poll_period_ms = GY86_IMU_BARO_PERIOD_MS;
+    imu->debug.baro_device_slots = APP_GY86_BARO_SENSOR_SLOTS;
+    imu->debug.baro_primary_sensor_index = 0xFFu;
+
+    GY86_Ms5611_UpdateAppStateDiagnostics(imu, HAL_GetTick());
 }
 
 /* -------------------------------------------------------------------------- */

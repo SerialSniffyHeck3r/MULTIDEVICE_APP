@@ -371,9 +371,20 @@ static void APP_STATE_ResetGy86Unlocked(void)
     g_app_state.gy86.debug.mag_backend_id       = APP_IMU_BACKEND_NONE;
     g_app_state.gy86.debug.baro_backend_id      = APP_IMU_BACKEND_NONE;
 
+    /* ---------------------------------------------------------------------- */
+    /*  dual-baro 디버그 슬롯 기본값                                           */
+    /*                                                                        */
+    /*  실제 configured/online/valid 값은                                      */
+    /*  low-level driver init이 끝난 뒤 GY86_IMU.c 가 채운다.                 */
+    /*  여기서는 slot 개수와 invalid primary index sentinel 만 미리 넣는다.   */
+    /* ---------------------------------------------------------------------- */
+    g_app_state.gy86.debug.baro_device_slots        = APP_GY86_BARO_SENSOR_SLOTS;
+    g_app_state.gy86.debug.baro_primary_sensor_index = 0xFFu;
+
     g_app_state.gy86.debug.mpu_poll_period_ms  = 0u;
     g_app_state.gy86.debug.mag_poll_period_ms  = 0u;
     g_app_state.gy86.debug.baro_poll_period_ms = 0u;
+
 }
 
 /* -------------------------------------------------------------------------- */

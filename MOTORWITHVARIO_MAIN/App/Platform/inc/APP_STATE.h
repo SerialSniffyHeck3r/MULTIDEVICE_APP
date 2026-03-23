@@ -40,6 +40,8 @@ extern "C" {
 #define APP_PACKED
 #endif
 
+
+
 /* -------------------------------------------------------------------------- */
 /*  사용자 환경설정                                                             */
 /* -------------------------------------------------------------------------- */
@@ -969,6 +971,85 @@ typedef struct
     int32_t  pressure_pa;          /* 보정 후 기압, Pa                            */
 } app_gy86_baro_raw_t;
 
+
+#ifndef APP_GY86_BARO_SENSOR_SLOTS
+#define APP_GY86_BARO_SENSOR_SLOTS 2u
+#endif
+
+/* -------------------------------------------------------------------------- */
+/*  dual barometer app-state 공개 슬롯                                         */
+/*                                                                            */
+/*  목적                                                                       */
+/*  - 기존 APP_STATE.gy86.baro 는 "상위 계층이 그대로 쓰는 fused 결과" 하나만   */
+/*    유지한다.                                                                */
+/*  - 아래 구조체는 그 fused 결과가 어떻게 만들어졌는지 확인하기 위한          */
+/*    "센서별 진단 슬롯" 이다.                                                 */
+/*                                                                            */
+/*  사용 규칙                                                                  */
+/*  - 앱/UI/self-test 는 이 구조체를 read-only 로만 사용한다.                  */
+/*  - low-level driver(GY86_IMU.c)만 이 값을 채운다.                           */
+/*  - sensor 1개 빌드에서도 slot 수는 2개를 유지하고, 미사용 slot은 0으로 둔다. */
+/*                                                                            */
+/*  pressure_pa / pressure_hpa_x100                                            */
+/*  - 이 프로젝트의 MS5611 경로에서는                                           */
+/*    hPa*100 과 Pa 가 수치적으로 동일한 스케일이므로                           */
+/*    둘 다 함께 유지해도 값은 같은 숫자 범위를 가진다.                        */
+/*                                                                            */
+/*  aligned_pressure_pa                                                        */
+/*  - secondary sensor의 static offset(bias)을 제거해                           */
+/*    fusion 판단에 실제로 사용한 pressure 값                                  */
+/*                                                                            */
+/*  bias_pa                                                                    */
+/*  - primary 기준으로 추정된 상대 압력 오프셋                                 */
+/*                                                                            */
+/*  residual_pa                                                                */
+/*  - aligned_pressure_pa 와 primary pressure 사이의 잔차                      */
+/*  - outlier reject / disagreement gate가 보는 핵심 값                        */
+/* -------------------------------------------------------------------------- */
+typedef struct
+{
+    uint8_t  configured;           /* 이 slot이 실제 하드웨어 배치상 존재하는가   */
+    uint8_t  online;               /* 현재 probe/init/poll 기준 살아 있는가       */
+    uint8_t  valid;                /* 최근 sample이 완전한 D1/D2 세트인가         */
+    uint8_t  fresh;                /* fusion freshness timeout 안에 들어오는가    */
+
+    uint8_t  selected;             /* 이번 fused sample 계산에 실제 사용되었는가  */
+    uint8_t  rejected;             /* disagreement/stale gate로 제외되었는가      */
+    uint8_t  bus_id;               /* 1=I2C1, 2=I2C2                              */
+    uint8_t  addr_7bit;            /* 사람이 읽기 쉬운 7-bit I2C 주소             */
+
+    uint8_t  error_streak;         /* runtime 연속 오류 streak                    */
+    uint8_t  reserved0;            /* 정렬/향후 확장용                            */
+    uint16_t weight_permille;      /* 이번 fusion에서 사용된 가중치 0..1000       */
+
+    uint32_t timestamp_ms;         /* 마지막 완전 샘플 시각                       */
+    uint32_t sample_count;         /* 이 센서 단독 누적 sample count              */
+
+    int32_t  temp_cdeg;            /* 이 센서 단독 온도, 0.01 degC               */
+    int32_t  pressure_hpa_x100;    /* 이 센서 단독 pressure, 0.01 hPa            */
+    int32_t  pressure_pa;          /* 이 센서 단독 pressure, Pa                  */
+
+    int32_t  aligned_pressure_pa;  /* bias 제거 후 fusion에 투입한 pressure       */
+    int32_t  bias_pa;              /* primary 대비 추정한 static offset           */
+    int32_t  residual_pa;          /* aligned - primary residual                  */
+} app_gy86_baro_sensor_state_t;
+
+/* -------------------------------------------------------------------------- */
+/*  dual barometer fusion summary flag                                         */
+/*                                                                            */
+/*  SINGLE_SENSOR        : 실제 publish가 1개 센서만으로 이뤄졌는가             */
+/*  STALE_FALLBACK       : 다른 센서는 stale 해서 제외되었는가                 */
+/*  DISAGREE_REJECT      : 다른 센서는 disagreement gate로 제외되었는가        */
+/*  OFFSET_TRACK_ACTIVE  : bias 추정값이 의미 있게 활성화되었는가              */
+/* -------------------------------------------------------------------------- */
+enum
+{
+    APP_GY86_BARO_FUSION_FLAG_SINGLE_SENSOR       = 0x01u,
+    APP_GY86_BARO_FUSION_FLAG_STALE_FALLBACK      = 0x02u,
+    APP_GY86_BARO_FUSION_FLAG_DISAGREE_REJECT     = 0x04u,
+    APP_GY86_BARO_FUSION_FLAG_OFFSET_TRACK_ACTIVE = 0x08u
+};
+
 /* GY-86 전체 모듈 디버그 정보 */
 typedef struct
 {
@@ -989,6 +1070,28 @@ typedef struct
     uint8_t  mag_id_c;             /* HMC5883L ID C raw                           */
 
     uint8_t  ms5611_state;         /* D1/D2 변환 state machine 내부 상태          */
+
+    /* ---------------------------------------------------------------------- */
+    /*  dual barometer fusion summary                                          */
+    /*                                                                        */
+    /*  baro_device_slots        : compile-time 으로 노출하는 slot 수          */
+    /*  baro_fused_sensor_count  : 이번 fused sample에 실제 사용된 센서 수     */
+    /*  baro_primary_sensor_index: 현재 primary/fallback 기준 sensor index     */
+    /*  baro_fusion_flags        : APP_GY86_BARO_FUSION_FLAG_* bitmask         */
+    /*                                                                        */
+    /*  baro_sensor_delta_pa_raw                                                */
+    /*  - sensor1 - sensor0 의 raw pressure 차이                               */
+    /*                                                                        */
+    /*  baro_sensor_delta_pa_aligned                                            */
+    /*  - bias 보정 후 sensor1 - sensor0 차이                                   */
+    /*  - disagreement gate는 이 값을 본다                                     */
+    /* ---------------------------------------------------------------------- */
+    uint8_t  baro_device_slots;
+    uint8_t  baro_fused_sensor_count;
+    uint8_t  baro_primary_sensor_index;
+    uint8_t  baro_fusion_flags;
+    int32_t  baro_sensor_delta_pa_raw;
+    int32_t  baro_sensor_delta_pa_aligned;
 
     uint32_t init_attempt_count;   /* 전체 init/re-probe 시도 횟수                */
     uint32_t last_init_attempt_ms; /* 마지막 init 시도 시각                       */
@@ -1013,10 +1116,12 @@ typedef struct
     uint8_t           status_flags;/* 최신 raw 유효 비트                          */
     uint32_t          last_update_ms; /* 마지막으로 어떤 하위 칩이든 업데이트된 시각 */
 
-    app_gy86_mpu_raw_t  mpu;       /* accel/gyro/raw 저장소                       */
-    app_gy86_mag_raw_t  mag;       /* magnetometer raw 저장소                     */
-    app_gy86_baro_raw_t baro;      /* pressure raw 저장소                         */
-    app_gy86_debug_t    debug;     /* GY-86 디버그 저장소                         */
+    app_gy86_mpu_raw_t           mpu;        /* accel/gyro/raw 저장소                    */
+    app_gy86_mag_raw_t           mag;        /* magnetometer raw 저장소                  */
+    app_gy86_baro_raw_t          baro;       /* fused pressure raw 저장소                */
+    app_gy86_baro_sensor_state_t baro_sensor[APP_GY86_BARO_SENSOR_SLOTS];
+                                             /* sensor별 dual-baro 진단 슬롯             */
+    app_gy86_debug_t             debug;      /* GY-86 디버그 저장소                      */
 } app_gy86_state_t;
 
 /* -------------------------------------------------------------------------- */
