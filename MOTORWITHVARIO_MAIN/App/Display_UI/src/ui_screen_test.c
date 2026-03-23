@@ -38,18 +38,25 @@ static uint32_t         s_test_last_processed_tick_20hz = 0u;
 static uint32_t         s_test_bottom_overlay_until_ms = 0u;
 static uint8_t          s_test_font_preview_index = 0u;
 
+
 /* -------------------------------------------------------------------------- */
-/*  U8G2 font browser state                                                   */
+/*  U8G2 numeric font browser state                                           */
 /*                                                                            */
-/*  요구사항                                                                  */
-/*  - TEST 홈 화면은 이제 "자동 scene rotation" 대신                        */
-/*    "단일 폰트 브라우저" 로 동작한다.                                      */
-/*  - F6 short press 때마다 아래 테이블의 다음 폰트로 이동한다.               */
-/*  - flight layout에서 실제 사용 중인 폰트도 같이 포함하고,                  */
-/*    얇은/굵은/세리프/모노/레트로/숫자 전용 폰트까지 한 화면에서 점검한다.   */
+/*  이 TEST 홈 화면은 이제 "그래픽 데모 + 폰트 데모" 혼합 화면이 아니라        */
+/*  "숫자 폰트 전용 브라우저" 로만 동작한다.                                   */
+/*                                                                            */
+/*  동작 규칙                                                                  */
+/*  - F6 short press: 다음 숫자 폰트로 이동                                    */
+/*  - 표시 대상: VCR / logisoso / LCD / Spleen 계열만 유지                     */
+/*  - preview는 숫자 / 시계 / 소수점 형태의 문자열만 표시한다.                 */
 /* -------------------------------------------------------------------------- */
-#define UI_TEST_FONT_FLAG_NUMERIC_ONLY   (0x01u)
-#define UI_TEST_FONT_FLAG_FLIGHT_LAYOUT  (0x02u)
+#define UI_TEST_FONT_FLAG_NUMERIC_PREVIEW  (0x01u)
+
+#define UI_TEST_FONT_FLAG_FAMILY_MASK      (0x70u)
+#define UI_TEST_FONT_FLAG_FAMILY_VCR       (0x10u)
+#define UI_TEST_FONT_FLAG_FAMILY_LOGISOSO  (0x20u)
+#define UI_TEST_FONT_FLAG_FAMILY_LCD       (0x30u)
+#define UI_TEST_FONT_FLAG_FAMILY_SPLEEN    (0x40u)
 
 typedef struct
 {
@@ -60,58 +67,59 @@ typedef struct
 
 static const ui_test_font_preview_t s_test_font_preview_table[] =
 {
-  { "u8g2_font_4x6_tf",            u8g2_font_4x6_tf,            UI_TEST_FONT_FLAG_FLIGHT_LAYOUT },
-  { "u8g2_font_5x8_tr",            u8g2_font_5x8_tr,            UI_TEST_FONT_FLAG_FLIGHT_LAYOUT },
-  { "u8g2_font_6x12_mf",           u8g2_font_6x12_mf,           UI_TEST_FONT_FLAG_FLIGHT_LAYOUT },
-  { "u8g2_font_helvR08_tf",        u8g2_font_helvR08_tf,        UI_TEST_FONT_FLAG_FLIGHT_LAYOUT },
-  { "u8g2_font_helvB10_tf",        u8g2_font_helvB10_tf,        UI_TEST_FONT_FLAG_FLIGHT_LAYOUT },
-  { "u8g2_font_logisoso24_tn",     u8g2_font_logisoso24_tn,     UI_TEST_FONT_FLAG_FLIGHT_LAYOUT | UI_TEST_FONT_FLAG_NUMERIC_ONLY },
+  /* ---------------------------------------------------------------------- */
+  /*  VCR OSD MONO                                                          */
+  /*  - dafont 계열의 레트로 CRT/VCR 감성 숫자 테스트                       */
+  /* ---------------------------------------------------------------------- */
+  { "u8g2_font_VCR_OSD_tn",        u8g2_font_VCR_OSD_tn,        UI_TEST_FONT_FLAG_NUMERIC_PREVIEW | UI_TEST_FONT_FLAG_FAMILY_VCR },
+  { "u8g2_font_VCR_OSD_mn",        u8g2_font_VCR_OSD_mn,        UI_TEST_FONT_FLAG_NUMERIC_PREVIEW | UI_TEST_FONT_FLAG_FAMILY_VCR },
 
-  { "u8g2_font_4x6_tr",            u8g2_font_4x6_tr,            0u },
-  { "u8g2_font_4x6_mf",            u8g2_font_4x6_mf,            0u },
-  { "u8g2_font_5x7_tf",            u8g2_font_5x7_tf,            0u },
-  { "u8g2_font_5x7_tr",            u8g2_font_5x7_tr,            0u },
-  { "u8g2_font_5x7_mf",            u8g2_font_5x7_mf,            0u },
-  { "u8g2_font_5x8_tf",            u8g2_font_5x8_tf,            0u },
-  { "u8g2_font_5x8_mf",            u8g2_font_5x8_mf,            0u },
-  { "u8g2_font_profont10_tf",      u8g2_font_profont10_tf,      0u },
-  { "u8g2_font_profont10_tr",      u8g2_font_profont10_tr,      0u },
-  { "u8g2_font_profont10_mf",      u8g2_font_profont10_mf,      0u },
-  { "u8g2_font_synchronizer_nbp_tf", u8g2_font_synchronizer_nbp_tf, 0u },
-  { "u8g2_font_smallsimple_tr",    u8g2_font_smallsimple_tr,    0u },
-  { "u8g2_font_6x10_tf",           u8g2_font_6x10_tf,           0u },
-  { "u8g2_font_6x10_tr",           u8g2_font_6x10_tr,           0u },
-  { "u8g2_font_6x10_mf",           u8g2_font_6x10_mf,           0u },
-  { "u8g2_font_6x12_tf",           u8g2_font_6x12_tf,           0u },
-  { "u8g2_font_6x12_tr",           u8g2_font_6x12_tr,           0u },
-  { "u8g2_font_profont11_tf",      u8g2_font_profont11_tf,      0u },
-  { "u8g2_font_7x14_tf",           u8g2_font_7x14_tf,           0u },
-  { "u8g2_font_7x14B_tf",          u8g2_font_7x14B_tf,          0u },
-  { "u8g2_font_8x13B_tf",          u8g2_font_8x13B_tf,          0u },
-  { "u8g2_font_9x15_tf",           u8g2_font_9x15_tf,           0u },
-  { "u8g2_font_9x15B_tf",          u8g2_font_9x15B_tf,          0u },
-  { "u8g2_font_9x18_tf",           u8g2_font_9x18_tf,           0u },
-  { "u8g2_font_9x18B_tf",          u8g2_font_9x18B_tf,          0u },
-  { "u8g2_font_t0_15_tf",          u8g2_font_t0_15_tf,          0u },
-  { "u8g2_font_t0_15b_tf",         u8g2_font_t0_15b_tf,         0u },
-  { "u8g2_font_helvB08_tf",        u8g2_font_helvB08_tf,        0u },
-  { "u8g2_font_helvR10_tf",        u8g2_font_helvR10_tf,        0u },
-  { "u8g2_font_ncenB10_tf",        u8g2_font_ncenB10_tf,        0u },
-  { "u8g2_font_ncenR10_tf",        u8g2_font_ncenR10_tf,        0u },
-  { "u8g2_font_timB12_tf",         u8g2_font_timB12_tf,         0u },
-  { "u8g2_font_timR12_tf",         u8g2_font_timR12_tf,         0u },
-  { "u8g2_font_fub11_tf",          u8g2_font_fub11_tf,          0u },
-  { "u8g2_font_fur11_tf",          u8g2_font_fur11_tf,          0u },
-  { "u8g2_font_crox3h_tf",         u8g2_font_crox3h_tf,         0u },
-  { "u8g2_font_crox3hb_tf",        u8g2_font_crox3hb_tf,        0u },
-  { "u8g2_font_helvB12_tf",        u8g2_font_helvB12_tf,        0u },
-  { "u8g2_font_helvR12_tf",        u8g2_font_helvR12_tf,        0u },
-  { "u8g2_font_ncenB12_tf",        u8g2_font_ncenB12_tf,        0u },
-  { "u8g2_font_ncenR12_tf",        u8g2_font_ncenR12_tf,        0u },
-  { "u8g2_font_VCR_OSD_tf",        u8g2_font_VCR_OSD_tf,        0u }
+  /* ---------------------------------------------------------------------- */
+  /*  logisoso                                                              */
+  /*  - U8G2의 대형 숫자 표시용 대표 계열                                   */
+  /* ---------------------------------------------------------------------- */
+  { "u8g2_font_logisoso16_tn",     u8g2_font_logisoso16_tn,     UI_TEST_FONT_FLAG_NUMERIC_PREVIEW | UI_TEST_FONT_FLAG_FAMILY_LOGISOSO },
+  { "u8g2_font_logisoso18_tn",     u8g2_font_logisoso18_tn,     UI_TEST_FONT_FLAG_NUMERIC_PREVIEW | UI_TEST_FONT_FLAG_FAMILY_LOGISOSO },
+  { "u8g2_font_logisoso20_tn",     u8g2_font_logisoso20_tn,     UI_TEST_FONT_FLAG_NUMERIC_PREVIEW | UI_TEST_FONT_FLAG_FAMILY_LOGISOSO },
+  { "u8g2_font_logisoso22_tn",     u8g2_font_logisoso22_tn,     UI_TEST_FONT_FLAG_NUMERIC_PREVIEW | UI_TEST_FONT_FLAG_FAMILY_LOGISOSO },
+  { "u8g2_font_logisoso24_tn",     u8g2_font_logisoso24_tn,     UI_TEST_FONT_FLAG_NUMERIC_PREVIEW | UI_TEST_FONT_FLAG_FAMILY_LOGISOSO },
+  { "u8g2_font_logisoso26_tn",     u8g2_font_logisoso26_tn,     UI_TEST_FONT_FLAG_NUMERIC_PREVIEW | UI_TEST_FONT_FLAG_FAMILY_LOGISOSO },
+  { "u8g2_font_logisoso28_tn",     u8g2_font_logisoso28_tn,     UI_TEST_FONT_FLAG_NUMERIC_PREVIEW | UI_TEST_FONT_FLAG_FAMILY_LOGISOSO },
+  { "u8g2_font_logisoso30_tn",     u8g2_font_logisoso30_tn,     UI_TEST_FONT_FLAG_NUMERIC_PREVIEW | UI_TEST_FONT_FLAG_FAMILY_LOGISOSO },
+  { "u8g2_font_logisoso32_tn",     u8g2_font_logisoso32_tn,     UI_TEST_FONT_FLAG_NUMERIC_PREVIEW | UI_TEST_FONT_FLAG_FAMILY_LOGISOSO },
+  { "u8g2_font_logisoso34_tn",     u8g2_font_logisoso34_tn,     UI_TEST_FONT_FLAG_NUMERIC_PREVIEW | UI_TEST_FONT_FLAG_FAMILY_LOGISOSO },
+  { "u8g2_font_logisoso38_tn",     u8g2_font_logisoso38_tn,     UI_TEST_FONT_FLAG_NUMERIC_PREVIEW | UI_TEST_FONT_FLAG_FAMILY_LOGISOSO },
+  { "u8g2_font_logisoso42_tn",     u8g2_font_logisoso42_tn,     UI_TEST_FONT_FLAG_NUMERIC_PREVIEW | UI_TEST_FONT_FLAG_FAMILY_LOGISOSO },
+  { "u8g2_font_logisoso46_tn",     u8g2_font_logisoso46_tn,     UI_TEST_FONT_FLAG_NUMERIC_PREVIEW | UI_TEST_FONT_FLAG_FAMILY_LOGISOSO },
+  { "u8g2_font_logisoso50_tn",     u8g2_font_logisoso50_tn,     UI_TEST_FONT_FLAG_NUMERIC_PREVIEW | UI_TEST_FONT_FLAG_FAMILY_LOGISOSO },
+  { "u8g2_font_logisoso54_tn",     u8g2_font_logisoso54_tn,     UI_TEST_FONT_FLAG_NUMERIC_PREVIEW | UI_TEST_FONT_FLAG_FAMILY_LOGISOSO },
+  { "u8g2_font_logisoso58_tn",     u8g2_font_logisoso58_tn,     UI_TEST_FONT_FLAG_NUMERIC_PREVIEW | UI_TEST_FONT_FLAG_FAMILY_LOGISOSO },
+  { "u8g2_font_logisoso62_tn",     u8g2_font_logisoso62_tn,     UI_TEST_FONT_FLAG_NUMERIC_PREVIEW | UI_TEST_FONT_FLAG_FAMILY_LOGISOSO },
+  { "u8g2_font_logisoso78_tn",     u8g2_font_logisoso78_tn,     UI_TEST_FONT_FLAG_NUMERIC_PREVIEW | UI_TEST_FONT_FLAG_FAMILY_LOGISOSO },
+  { "u8g2_font_logisoso92_tn",     u8g2_font_logisoso92_tn,     UI_TEST_FONT_FLAG_NUMERIC_PREVIEW | UI_TEST_FONT_FLAG_FAMILY_LOGISOSO },
+
+  /* ---------------------------------------------------------------------- */
+  /*  LCD                                                                   */
+  /*  - IPAandRUSLCD 계열은 숫자/시계 문자열 위주로 비교한다.                */
+  /* ---------------------------------------------------------------------- */
+  { "u8g2_font_IPAandRUSLCD_tf",   u8g2_font_IPAandRUSLCD_tf,   UI_TEST_FONT_FLAG_NUMERIC_PREVIEW | UI_TEST_FONT_FLAG_FAMILY_LCD },
+  { "u8g2_font_IPAandRUSLCD_tr",   u8g2_font_IPAandRUSLCD_tr,   UI_TEST_FONT_FLAG_NUMERIC_PREVIEW | UI_TEST_FONT_FLAG_FAMILY_LCD },
+  { "u8g2_font_IPAandRUSLCD_te",   u8g2_font_IPAandRUSLCD_te,   UI_TEST_FONT_FLAG_NUMERIC_PREVIEW | UI_TEST_FONT_FLAG_FAMILY_LCD },
+
+  /* ---------------------------------------------------------------------- */
+  /*  Spleen                                                                */
+  /*  - monospace 숫자 테스트용                                             */
+  /* ---------------------------------------------------------------------- */
+  { "u8g2_font_spleen5x8_mn",      u8g2_font_spleen5x8_mn,      UI_TEST_FONT_FLAG_NUMERIC_PREVIEW | UI_TEST_FONT_FLAG_FAMILY_SPLEEN },
+  { "u8g2_font_spleen6x12_mn",     u8g2_font_spleen6x12_mn,     UI_TEST_FONT_FLAG_NUMERIC_PREVIEW | UI_TEST_FONT_FLAG_FAMILY_SPLEEN },
+  { "u8g2_font_spleen8x16_mn",     u8g2_font_spleen8x16_mn,     UI_TEST_FONT_FLAG_NUMERIC_PREVIEW | UI_TEST_FONT_FLAG_FAMILY_SPLEEN },
+  { "u8g2_font_spleen12x24_mn",    u8g2_font_spleen12x24_mn,    UI_TEST_FONT_FLAG_NUMERIC_PREVIEW | UI_TEST_FONT_FLAG_FAMILY_SPLEEN },
+  { "u8g2_font_spleen16x32_mn",    u8g2_font_spleen16x32_mn,    UI_TEST_FONT_FLAG_NUMERIC_PREVIEW | UI_TEST_FONT_FLAG_FAMILY_SPLEEN },
+  { "u8g2_font_spleen32x64_mn",    u8g2_font_spleen32x64_mn,    UI_TEST_FONT_FLAG_NUMERIC_PREVIEW | UI_TEST_FONT_FLAG_FAMILY_SPLEEN }
 };
 
 #define UI_TEST_FONT_PREVIEW_COUNT   ((uint8_t)(sizeof(s_test_font_preview_table) / sizeof(s_test_font_preview_table[0])))
+
 
 /* -------------------------------------------------------------------------- */
 /*  Bike service popup follow state                                            */
@@ -142,6 +150,9 @@ static void ui_screen_test_configure_bottom_bar(void);
 static const uint8_t *ui_screen_test_get_cute_icon(uint8_t index);
 static const ui_test_font_preview_t *ui_screen_test_get_font_preview(uint8_t index);
 static const char *ui_screen_test_get_font_flag_text(uint8_t flags);
+static const char *ui_screen_test_pick_numeric_preview(u8g2_t *u8g2,
+                                                     const ui_rect_t *rect,
+                                                     uint8_t flags);
 static int16_t ui_screen_test_measure_font_line_height(u8g2_t *u8g2);
 static void ui_screen_test_draw_centered_text(u8g2_t *u8g2,
                                               const ui_rect_t *rect,
@@ -388,32 +399,29 @@ static void ui_screen_test_request_overlay(uint32_t now_ms)
   s_test_bottom_overlay_until_ms = now_ms + UI_BOTTOMBAR_OVERLAY_TIMEOUT_MS;
 }
 
+
 /* -------------------------------------------------------------------------- */
 /*  TEST home bottom bar                                                      */
 /*                                                                            */
-/*  이 하단바는 TEST 홈 화면 전용 기능 힌트다.                                  */
-/*  - F1 : DBG                                                                 */
-/*  - F2 : PAUSE / RUN                                                         */
-/*  - F3 : MODE                                                                */
-/*  - F4 : TOAST                                                               */
-/*  - F5 : POPUP                                                               */
-/*  - F6 : 오른쪽 화살표 아이콘                                                */
+/*  이번 폰트 테스트 화면에서는                                               */
+/*  - F1 : 기존 debug legacy 진입 유지                                        */
+/*  - F6 : 다음 폰트                                                          */
+/*  - F2~F5 short press용 그래픽 데모 힌트는 제거                             */
+/*                                                                            */
+/*  주의                                                                      */
+/*  - long press maintenance 단축키는 다른 기능 호환을 위해 내부적으로는      */
+/*    그대로 남겨 두되, 화면에는 노출하지 않는다.                             */
 /* -------------------------------------------------------------------------- */
 static void ui_screen_test_configure_bottom_bar(void)
 {
   UI_BottomBar_SetMode(UI_BOTTOMBAR_MODE_BUTTONS);
 
   UI_BottomBar_SetButton(UI_FKEY_1, "DBG", UI_BOTTOMBAR_FLAG_DIVIDER);
-  UI_BottomBar_SetButton(UI_FKEY_2,
-                         (s_test_updates_paused != 0u) ? "RUN" : "PAUSE",
-                         UI_BOTTOMBAR_FLAG_DIVIDER);
-  UI_BottomBar_SetButton(UI_FKEY_3, "MODE", UI_BOTTOMBAR_FLAG_DIVIDER);
-  UI_BottomBar_SetButton(UI_FKEY_4, "TOAST", UI_BOTTOMBAR_FLAG_DIVIDER);
-  UI_BottomBar_SetButton(UI_FKEY_5, "POPUP", UI_BOTTOMBAR_FLAG_DIVIDER);
-  UI_BottomBar_SetButtonIcon4(UI_FKEY_6,
-                              icon_arrow_right_7x4,
-                              ICON7X4_W,
-                              0u);
+  UI_BottomBar_SetButton(UI_FKEY_2, "", UI_BOTTOMBAR_FLAG_DIVIDER);
+  UI_BottomBar_SetButton(UI_FKEY_3, "", UI_BOTTOMBAR_FLAG_DIVIDER);
+  UI_BottomBar_SetButton(UI_FKEY_4, "", UI_BOTTOMBAR_FLAG_DIVIDER);
+  UI_BottomBar_SetButton(UI_FKEY_5, "", UI_BOTTOMBAR_FLAG_DIVIDER);
+  UI_BottomBar_SetButton(UI_FKEY_6, "NEXT", 0u);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -653,74 +661,18 @@ ui_screen_test_action_t UI_ScreenTest_HandleButtonEvent(const button_event_t *ev
       return UI_SCREEN_TEST_ACTION_ENTER_DEBUG_LEGACY;
 
     case BUTTON_ID_2:
-      s_test_updates_paused = (s_test_updates_paused == 0u) ? 1u : 0u;
-      if (s_test_updates_paused != 0u)
-      {
-        s_test_blink_phase_on = (SlowToggle2Hz != false);
-      }
-
-      ui_screen_test_configure_bottom_bar();
-
-      UI_Toast_Show((s_test_updates_paused != 0u) ? "TEST HOLD" : "TEST RUN",
-                    icon_ui_bell_8x8,
-                    ICON8_W,
-                    ICON8_H,
-                    now_ms,
-                    900u);
-      break;
-
     case BUTTON_ID_3:
-      s_test_layout_mode = (ui_layout_mode_t)(((uint32_t)s_test_layout_mode + 1u) %
-                                              (uint32_t)UI_LAYOUT_MODE_COUNT);
-      if (s_test_layout_mode == UI_LAYOUT_MODE_TOP_EXTENDED_OVERLAY)
-      {
-        ui_screen_test_request_overlay(now_ms);
-      }
-
-      UI_Toast_Show("LAYOUT CHANGED",
-                    icon_ui_folder_8x8,
-                    ICON8_W,
-                    ICON8_H,
-                    now_ms,
-                    900u);
-      break;
-
     case BUTTON_ID_4:
-      UI_Toast_Show("TOAST WITH ICON",
-                    icon_ui_info_8x8,
-                    ICON8_W,
-                    ICON8_H,
-                    now_ms,
-                    UI_TOAST_DEFAULT_TIMEOUT_MS);
-      break;
-
     case BUTTON_ID_5:
-      UI_Popup_Show("POPUP",
-                    "OPAQUE BODY ENABLED",
-                    "RIGHT TEXT ALIGN FIXED",
-                    icon_ui_warn_8x8,
-                    ICON8_W,
-                    ICON8_H,
-                    now_ms,
-                    UI_POPUP_DEFAULT_TIMEOUT_MS);
+      /* -------------------------------------------------------------- */
+      /* short press용 그래픽 데모 / toast / popup / layout 토글 제거   */
+      /* -------------------------------------------------------------- */
       break;
 
     case BUTTON_ID_6:
-    {
-      const ui_test_font_preview_t *font_preview;
-
       s_test_font_preview_index = (uint8_t)((s_test_font_preview_index + 1u) %
                                             UI_TEST_FONT_PREVIEW_COUNT);
-      font_preview = ui_screen_test_get_font_preview(s_test_font_preview_index);
-
-      UI_Toast_Show((font_preview != 0) ? font_preview->name : "FONT NEXT",
-                    icon_ui_info_8x8,
-                    ICON8_W,
-                    ICON8_H,
-                    now_ms,
-                    900u);
       break;
-    }
 
     case BUTTON_ID_NONE:
     default:
@@ -1396,27 +1348,29 @@ static const ui_test_font_preview_t *ui_screen_test_get_font_preview(uint8_t ind
   return &s_test_font_preview_table[index % UI_TEST_FONT_PREVIEW_COUNT];
 }
 
+
 /* -------------------------------------------------------------------------- */
-/* Local helper: font tag text                                                */
+/* Local helper: font family tag text                                         */
 /* -------------------------------------------------------------------------- */
 static const char *ui_screen_test_get_font_flag_text(uint8_t flags)
 {
-  if ((flags & UI_TEST_FONT_FLAG_FLIGHT_LAYOUT) != 0u)
+  switch (flags & UI_TEST_FONT_FLAG_FAMILY_MASK)
   {
-    if ((flags & UI_TEST_FONT_FLAG_NUMERIC_ONLY) != 0u)
-    {
-      return "FLIGHT / NUM";
-    }
+    case UI_TEST_FONT_FLAG_FAMILY_VCR:
+      return "VCR";
 
-    return "FLIGHT";
+    case UI_TEST_FONT_FLAG_FAMILY_LOGISOSO:
+      return "LOGISOSO";
+
+    case UI_TEST_FONT_FLAG_FAMILY_LCD:
+      return "LCD";
+
+    case UI_TEST_FONT_FLAG_FAMILY_SPLEEN:
+      return "SPLEEN";
+
+    default:
+      return "UNKNOWN";
   }
-
-  if ((flags & UI_TEST_FONT_FLAG_NUMERIC_ONLY) != 0u)
-  {
-    return "NUMERIC";
-  }
-
-  return "GENERAL";
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1480,6 +1434,68 @@ static void ui_screen_test_draw_centered_text(u8g2_t *u8g2,
                text);
 }
 
+
+/* -------------------------------------------------------------------------- */
+/* Local helper: numeric preview text selector                                */
+/*                                                                            */
+/* 큰 폰트는 화면을 넘어가기 쉬우므로                                          */
+/* 가능한 한 긴 샘플부터 시도하다가 viewport 안에 들어오는 문자열로 자동 축소  */
+/* 한다.                                                                      */
+/* -------------------------------------------------------------------------- */
+static const char *ui_screen_test_pick_numeric_preview(u8g2_t *u8g2,
+                                                       const ui_rect_t *rect,
+                                                       uint8_t flags)
+{
+  const char * const *samples;
+  uint32_t sample_count;
+  uint32_t i;
+  static const char * const generic_samples[] =
+  {
+    "0123456789",
+    "12:34",
+    "-12.3",
+    "123.4",
+    "123",
+    "88",
+    "8"
+  };
+  static const char * const lcd_samples[] =
+  {
+    "12:34",
+    "88:88",
+    "12.34",
+    "1234",
+    "88",
+    "8"
+  };
+
+  if ((u8g2 == 0) || (rect == 0))
+  {
+    return "8";
+  }
+
+  if ((flags & UI_TEST_FONT_FLAG_FAMILY_MASK) == UI_TEST_FONT_FLAG_FAMILY_LCD)
+  {
+    samples = lcd_samples;
+    sample_count = (uint32_t)(sizeof(lcd_samples) / sizeof(lcd_samples[0]));
+  }
+  else
+  {
+    samples = generic_samples;
+    sample_count = (uint32_t)(sizeof(generic_samples) / sizeof(generic_samples[0]));
+  }
+
+  for (i = 0u; i < sample_count; i++)
+  {
+    if ((int16_t)u8g2_GetStrWidth(u8g2, samples[i]) <= (int16_t)(rect->w - 6))
+    {
+      return samples[i];
+    }
+  }
+
+  return samples[sample_count - 1u];
+}
+
 /* -------------------------------------------------------------------------- */
 /* Local helper: layout mode text                                             */
 /*                                                                            */
@@ -1539,16 +1555,12 @@ static void ui_screen_test_draw_viewport_boundary(u8g2_t *u8g2,
                  (u8g2_uint_t)viewport->h);
 }
 
+
 /* -------------------------------------------------------------------------- */
 /* Local helper: title panel                                                  */
 /*                                                                            */
-/* 이 패널은 본문 뷰포트 안쪽 상단 1단에 그리는 안내 패널이다.               */
-/* - blink_phase_on = true  : 흰 배경 + 프레임                               */
-/* - blink_phase_on = false : 검은 박스 + 흰 글씨                            */
-/*                                                                            */
-/* 위치                                                                      */
-/* - viewport 안쪽에서 2px 들여쓴 시작점부터                                 */
-/* - 본문 상단에 폭 전체를 거의 다 쓰는 가로 패널                             */
+/* 기존 깜빡임/상태 데모 패널을 제거하고                                      */
+/* 숫자 폰트 테스트용 고정 헤더만 남긴다.                                     */
 /* -------------------------------------------------------------------------- */
 static void ui_screen_test_draw_title_panel(u8g2_t *u8g2,
                                             const ui_rect_t *rect,
@@ -1558,101 +1570,39 @@ static void ui_screen_test_draw_title_panel(u8g2_t *u8g2,
                                             uint8_t font_index)
 {
   char line[32];
-  int16_t panel_x;
-  int16_t panel_y;
-  int16_t panel_w;
-  int16_t panel_h;
+
+  (void)blink_phase_on;
+  (void)updates_paused;
+  (void)layout_mode;
 
   if ((u8g2 == 0) || (rect == 0))
   {
     return;
   }
 
-  panel_x = rect->x;
-  panel_y = rect->y;
-  panel_w = rect->w;
-  panel_h = 24;
-
-  if (panel_w < 24)
-  {
-    return;
-  }
-
-  if (panel_h > rect->h)
-  {
-    panel_h = rect->h;
-  }
-
-  if (blink_phase_on != false)
-  {
-    u8g2_SetDrawColor(u8g2, 1);
-    u8g2_DrawFrame(u8g2,
-                   (u8g2_uint_t)panel_x,
-                   (u8g2_uint_t)panel_y,
-                   (u8g2_uint_t)panel_w,
-                   (u8g2_uint_t)panel_h);
-
-    u8g2_SetFont(u8g2, u8g2_font_7x13_mf);
-    u8g2_DrawStr(u8g2,
-                 (u8g2_uint_t)(panel_x + 6),
-                 (u8g2_uint_t)(panel_y + 11),
-                 "U8G2 FONT TEST");
-
-    u8g2_SetFont(u8g2, u8g2_font_5x8_tr);
-    snprintf(line,
-             sizeof(line),
-             "%s %s %02u/%02u",
-             updates_paused ? "HOLD" : "RUN",
-             ui_screen_test_layout_text(layout_mode),
-             (unsigned)(font_index + 1u),
-             (unsigned)UI_TEST_FONT_PREVIEW_COUNT);
-    u8g2_DrawStr(u8g2,
-                 (u8g2_uint_t)(panel_x + 6),
-                 (u8g2_uint_t)(panel_y + 21),
-                 line);
-  }
-  else
-  {
-    u8g2_SetDrawColor(u8g2, 1);
-    u8g2_DrawBox(u8g2,
-                 (u8g2_uint_t)panel_x,
-                 (u8g2_uint_t)panel_y,
-                 (u8g2_uint_t)panel_w,
-                 (u8g2_uint_t)panel_h);
-
-    u8g2_SetDrawColor(u8g2, 0);
-    u8g2_SetFont(u8g2, u8g2_font_7x13_mf);
-    u8g2_DrawStr(u8g2,
-                 (u8g2_uint_t)(panel_x + 6),
-                 (u8g2_uint_t)(panel_y + 11),
-                 "U8G2 FONT TEST");
-
-    u8g2_SetFont(u8g2, u8g2_font_5x8_tr);
-    snprintf(line,
-             sizeof(line),
-             "%s %s %02u/%02u",
-             updates_paused ? "HOLD" : "RUN",
-             ui_screen_test_layout_text(layout_mode),
-             (unsigned)(font_index + 1u),
-             (unsigned)UI_TEST_FONT_PREVIEW_COUNT);
-    u8g2_DrawStr(u8g2,
-                 (u8g2_uint_t)(panel_x + 6),
-                 (u8g2_uint_t)(panel_y + 21),
-                 line);
-
-    u8g2_SetDrawColor(u8g2, 1);
-  }
+  u8g2_SetDrawColor(u8g2, 1);
+  u8g2_SetFont(u8g2, u8g2_font_5x8_tr);
+  snprintf(line,
+           sizeof(line),
+           "NUM FONT TEST  %02u/%02u",
+           (unsigned)(font_index + 1u),
+           (unsigned)UI_TEST_FONT_PREVIEW_COUNT);
+  u8g2_DrawStr(u8g2,
+               (u8g2_uint_t)rect->x,
+               (u8g2_uint_t)(rect->y + 7),
+               line);
 }
 
+
 /* -------------------------------------------------------------------------- */
-/* Local helper: scene 0 - font showcase                                      */
+/* Local helper: numeric font showcase                                        */
 /*                                                                            */
-/* 이 장면은 U8G2에서 현재 바로 쓰는 텍스트 폰트 3종을 뷰포트 안에서         */
-/* 자동으로 돌려 보이는 장면이다.                                            */
+/* viewport 안에서는 오직 폰트 비교만 수행한다.                               */
+/* - 상단: family / font name / 인덱스                                         */
+/* - 중앙: 현재 폰트의 숫자 샘플                                               */
+/* - 하단: 보조 숫자 문자열                                                     */
 /*                                                                            */
-/* 위치                                                                      */
-/* - body_rect 안쪽 좌상단부터 순서대로 아래로 텍스트를 적재                 */
-/* - 우측에는 cute icon 하나를 붙여서 XBM과 폰트가 동시에 보이게 함          */
+/* 기존 geometry / blinking / cute icon / auto stress 데모는 사용하지 않는다. */
 /* -------------------------------------------------------------------------- */
 static void ui_screen_test_draw_scene_fonts(u8g2_t *u8g2,
                                             const ui_rect_t *body_rect,
@@ -1660,13 +1610,11 @@ static void ui_screen_test_draw_scene_fonts(u8g2_t *u8g2,
                                             const uint8_t *cute_icon)
 {
   const ui_test_font_preview_t *font_preview;
-  ui_rect_t info_rect;
   ui_rect_t preview_rect;
-  int16_t helper_line_h;
-  int16_t preview_line_h;
-  int16_t preview_gap;
-  int16_t total_h;
-  int16_t start_y;
+  const char *preview_text;
+  const char *sub_text;
+  int16_t text_h;
+  int16_t sub_h;
   int16_t baseline;
 
   (void)live_counter_20hz;
@@ -1683,34 +1631,26 @@ static void ui_screen_test_draw_scene_fonts(u8g2_t *u8g2,
     return;
   }
 
-  info_rect = *body_rect;
-  info_rect.h = 18;
-
-  preview_rect = *body_rect;
-  preview_rect.y = (int16_t)(body_rect->y + 20);
-  preview_rect.h = (int16_t)(body_rect->h - 22);
-
-  if (preview_rect.h < 20)
-  {
-    preview_rect.y = (int16_t)(body_rect->y + 10);
-    preview_rect.h = (int16_t)(body_rect->h - 12);
-  }
-
-  if (preview_rect.h < 10)
-  {
-    preview_rect.y = (int16_t)(body_rect->y + 1);
-    preview_rect.h = (int16_t)(body_rect->h - 2);
-  }
-
+  /* 상단 정보: family + font symbol */
+  u8g2_SetDrawColor(u8g2, 1);
   u8g2_SetFont(u8g2, u8g2_font_5x8_tr);
   u8g2_DrawStr(u8g2,
-               (u8g2_uint_t)(info_rect.x + 4),
-               (u8g2_uint_t)(info_rect.y + 6),
-               font_preview->name);
-  u8g2_DrawStr(u8g2,
-               (u8g2_uint_t)(info_rect.x + 4),
-               (u8g2_uint_t)(info_rect.y + 15),
+               (u8g2_uint_t)body_rect->x,
+               (u8g2_uint_t)(body_rect->y + 7),
                ui_screen_test_get_font_flag_text(font_preview->flags));
+  u8g2_DrawStr(u8g2,
+               (u8g2_uint_t)body_rect->x,
+               (u8g2_uint_t)(body_rect->y + 15),
+               font_preview->name);
+
+  preview_rect = *body_rect;
+  preview_rect.y = (int16_t)(body_rect->y + 18);
+  preview_rect.h = (int16_t)(body_rect->h - 27);
+
+  if (preview_rect.h < 14)
+  {
+    preview_rect.h = 14;
+  }
 
   u8g2_DrawFrame(u8g2,
                  (u8g2_uint_t)preview_rect.x,
@@ -1718,43 +1658,43 @@ static void ui_screen_test_draw_scene_fonts(u8g2_t *u8g2,
                  (u8g2_uint_t)preview_rect.w,
                  (u8g2_uint_t)preview_rect.h);
 
-  helper_line_h = 9;
-  preview_gap = 4;
+  /* family별로 숫자/시계형 샘플을 자동 선택 */
+  u8g2_SetFont(u8g2, font_preview->font);
+  preview_text = ui_screen_test_pick_numeric_preview(u8g2, &preview_rect, font_preview->flags);
+  text_h = ui_screen_test_measure_font_line_height(u8g2);
 
-  if ((font_preview->flags & UI_TEST_FONT_FLAG_NUMERIC_ONLY) != 0u)
+  if (text_h >= (int16_t)(preview_rect.h - 4))
   {
-    u8g2_SetFont(u8g2, u8g2_font_5x8_tr);
-    helper_line_h = ui_screen_test_measure_font_line_height(u8g2);
-
-    u8g2_SetFont(u8g2, font_preview->font);
-    preview_line_h = ui_screen_test_measure_font_line_height(u8g2);
-    total_h = (int16_t)(helper_line_h + preview_gap + preview_line_h + preview_gap + helper_line_h);
-    start_y = (int16_t)(preview_rect.y + ((preview_rect.h - total_h) / 2));
-
-    u8g2_SetFont(u8g2, u8g2_font_5x8_tr);
-    baseline = (int16_t)(start_y + u8g2_GetAscent(u8g2));
-    ui_screen_test_draw_centered_text(u8g2, &preview_rect, baseline, "Font TEST");
-
-    u8g2_SetFont(u8g2, font_preview->font);
-    baseline = (int16_t)(start_y + helper_line_h + preview_gap + u8g2_GetAscent(u8g2));
-    ui_screen_test_draw_centered_text(u8g2, &preview_rect, baseline, "12.34");
-
-    u8g2_SetFont(u8g2, u8g2_font_5x8_tr);
-    baseline = (int16_t)(start_y + helper_line_h + preview_gap + preview_line_h + preview_gap + u8g2_GetAscent(u8g2));
-    ui_screen_test_draw_centered_text(u8g2, &preview_rect, baseline, "km/h");
+    /* -------------------------------------------------------------- */
+    /* 매우 큰 숫자 폰트는 세로가 viewport를 넘을 수 있으므로          */
+    /* baseline을 아래쪽에 붙여서 적어도 숫자의 하단부와 폭은          */
+    /* 확인할 수 있게 한다.                                           */
+    /* -------------------------------------------------------------- */
+    baseline = (int16_t)(preview_rect.y + preview_rect.h - 2);
   }
   else
   {
-    u8g2_SetFont(u8g2, font_preview->font);
-    preview_line_h = ui_screen_test_measure_font_line_height(u8g2);
-    total_h = (int16_t)((preview_line_h * 2) + preview_gap);
-    start_y = (int16_t)(preview_rect.y + ((preview_rect.h - total_h) / 2));
+    baseline = (int16_t)(preview_rect.y + ((preview_rect.h - text_h) / 2) + u8g2_GetAscent(u8g2));
+    if (baseline < (int16_t)(preview_rect.y + u8g2_GetAscent(u8g2) + 1))
+    {
+      baseline = (int16_t)(preview_rect.y + u8g2_GetAscent(u8g2) + 1);
+    }
+  }
 
-    baseline = (int16_t)(start_y + u8g2_GetAscent(u8g2));
-    ui_screen_test_draw_centered_text(u8g2, &preview_rect, baseline, "Font TEST");
+  ui_screen_test_draw_centered_text(u8g2, &preview_rect, baseline, preview_text);
 
-    baseline = (int16_t)(start_y + preview_line_h + preview_gap + u8g2_GetAscent(u8g2));
-    ui_screen_test_draw_centered_text(u8g2, &preview_rect, baseline, "12.34 km/h");
+  /* 아주 작은 폰트는 아래에 보조 문자열을 한 줄 더 붙여 비교성을 높인다. */
+  if (text_h <= 16)
+  {
+    sub_text = "0 1 2 3 4 5 6 7 8 9";
+    u8g2_SetFont(u8g2, u8g2_font_5x8_tr);
+    sub_h = ui_screen_test_measure_font_line_height(u8g2);
+    baseline = (int16_t)(preview_rect.y + preview_rect.h - 2);
+
+    if (baseline > (int16_t)(preview_rect.y + sub_h + 2))
+    {
+      ui_screen_test_draw_centered_text(u8g2, &preview_rect, baseline, sub_text);
+    }
   }
 }
 
@@ -2076,11 +2016,12 @@ static void ui_screen_test_draw_scene_stress(u8g2_t *u8g2,
   }
 }
 
+
 /* -------------------------------------------------------------------------- */
 /* Local helper: footer info line                                             */
 /*                                                                            */
-/* 이 줄은 본문 영역 맨 아래쪽 안쪽에 현재 viewport 크기와 tick 정보를       */
-/* 작게 표시한다.                                                             */
+/* 기존 live tick / 상태 데모 라인을 제거하고                                 */
+/* 폰트 브라우저 안내 문구만 남긴다.                                          */
 /* -------------------------------------------------------------------------- */
 static void ui_screen_test_draw_footer_info(u8g2_t *u8g2,
                                             const ui_rect_t *rect,
@@ -2088,7 +2029,7 @@ static void ui_screen_test_draw_footer_info(u8g2_t *u8g2,
                                             bool updates_paused)
 {
   const ui_test_font_preview_t *font_preview;
-  char line[80];
+  char line[48];
   int16_t y;
 
   (void)live_counter_20hz;
@@ -2110,12 +2051,11 @@ static void ui_screen_test_draw_footer_info(u8g2_t *u8g2,
   u8g2_SetFont(u8g2, u8g2_font_5x8_tr);
   snprintf(line,
            sizeof(line),
-           "F6 NEXT  %s  %02u/%02u",
-           ui_screen_test_get_font_flag_text(font_preview->flags),
+           "F6 NEXT   %02u/%02u",
            (unsigned)(s_test_font_preview_index + 1u),
            (unsigned)UI_TEST_FONT_PREVIEW_COUNT);
   u8g2_DrawStr(u8g2,
-               (u8g2_uint_t)(rect->x + 4),
+               (u8g2_uint_t)rect->x,
                (u8g2_uint_t)y,
                line);
 }
@@ -2386,6 +2326,7 @@ static void ui_screen_test_draw_settings_screen(u8g2_t *u8g2,
 /* - TEST 홈 화면은 이제 자동 scene rotation 대신                              */
 /*   F6로 폰트를 넘겨 보는 U8G2 font browser 로 동작한다.                     */
 /* -------------------------------------------------------------------------- */
+
 void UI_ScreenTest_Draw(u8g2_t *u8g2,
                         const ui_rect_t *viewport,
                         uint32_t live_counter_20hz,
@@ -2396,8 +2337,9 @@ void UI_ScreenTest_Draw(u8g2_t *u8g2,
 {
   const uint8_t *cute_icon;
   ui_rect_t inner_rect;
-  ui_rect_t body_rect;
-  uint8_t font_index;
+
+  (void)blink_phase_on;
+  (void)layout_mode;
 
   if ((u8g2 == 0) || (viewport == 0))
   {
@@ -2415,69 +2357,28 @@ void UI_ScreenTest_Draw(u8g2_t *u8g2,
     return;
   }
 
-  /* ------------------------------------------------------------------------ */
-  /* 가장 바깥 1px 경계선                                                     */
-  /*                                                                          */
-  /* 이 선이 바로 "상단바/하단바를 제외한 본문 합성 영역의 외곽선" 이다.      */
-  /* ------------------------------------------------------------------------ */
-  ui_screen_test_draw_viewport_boundary(u8g2, viewport);
-
-  /* ------------------------------------------------------------------------ */
-  /* 경계선 안쪽에서 실제 데모를 그릴 내부 사각형                             */
-  /* ------------------------------------------------------------------------ */
   inner_rect = *viewport;
-  inner_rect.x = (int16_t)(inner_rect.x + 2);
-  inner_rect.y = (int16_t)(inner_rect.y + 2);
-  inner_rect.w = (int16_t)(inner_rect.w - 4);
-  inner_rect.h = (int16_t)(inner_rect.h - 4);
+  inner_rect.x = (int16_t)(inner_rect.x + 1);
+  inner_rect.y = (int16_t)(inner_rect.y + 1);
+  inner_rect.w = (int16_t)(inner_rect.w - 2);
+  inner_rect.h = (int16_t)(inner_rect.h - 2);
 
-  if ((inner_rect.w <= 10) || (inner_rect.h <= 20))
+  if ((inner_rect.w <= 10) || (inner_rect.h <= 18))
   {
     u8g2_SetFont(u8g2, u8g2_font_5x8_tr);
     u8g2_DrawStr(u8g2,
-                 (u8g2_uint_t)(viewport->x + 2),
+                 (u8g2_uint_t)(viewport->x + 1),
                  (u8g2_uint_t)(viewport->y + 8),
                  "SMALL VIEWPORT");
     return;
   }
 
   cute_icon = ui_screen_test_get_cute_icon(cute_icon_index);
-  font_index = s_test_font_preview_index;
 
   /* ------------------------------------------------------------------------ */
-  /* 상단 타이틀 패널                                                         */
+  /* 폰트 테스트 화면은 더 이상 깜빡이는 title panel / 그래픽 scene /         */
+  /* viewport 경계선 데모를 그리지 않는다.                                    */
   /* ------------------------------------------------------------------------ */
-  ui_screen_test_draw_title_panel(u8g2,
-                                  &inner_rect,
-                                  blink_phase_on,
-                                  updates_paused,
-                                  layout_mode,
-                                  font_index);
-
-  /* ------------------------------------------------------------------------ */
-  /* 타이틀 패널 아래 실제 장면 본문 영역                                     */
-  /* ------------------------------------------------------------------------ */
-  body_rect = inner_rect;
-  body_rect.y = (int16_t)(body_rect.y + 28);
-  body_rect.h = (int16_t)(body_rect.h - 40);
-
-  if (body_rect.h < 24)
-  {
-    body_rect.h = (int16_t)(inner_rect.h - 30);
-  }
-
-  if (body_rect.h < 12)
-  {
-    body_rect.h = 12;
-  }
-
-  /* ------------------------------------------------------------------------ */
-  /* single font browser                                                      */
-  /* ------------------------------------------------------------------------ */
-  ui_screen_test_draw_scene_fonts(u8g2, &body_rect, live_counter_20hz, cute_icon);
-
-  /* ------------------------------------------------------------------------ */
-  /* 맨 아래 정보 라인                                                        */
-  /* ------------------------------------------------------------------------ */
+  ui_screen_test_draw_scene_fonts(u8g2, &inner_rect, live_counter_20hz, cute_icon);
   ui_screen_test_draw_footer_info(u8g2, &inner_rect, live_counter_20hz, updates_paused);
 }
