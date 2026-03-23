@@ -64,19 +64,6 @@ static float motor_dyn_safe_sqrt(float v)
     return sqrtf(v);
 }
 
-static float motor_dyn_wrap_deg(float deg)
-{
-    while (deg < 0.0f)
-    {
-        deg += 360.0f;
-    }
-    while (deg >= 360.0f)
-    {
-        deg -= 360.0f;
-    }
-    return deg;
-}
-
 static void motor_dyn_normalize3(float *x, float *y, float *z)
 {
     float norm;
@@ -168,9 +155,6 @@ static void motor_dyn_capture_zero_basis(const app_bike_settings_t *bike_setting
     float trim_fwd_x;
     float trim_fwd_y;
     float trim_fwd_z;
-    float trim_left_x;
-    float trim_left_y;
-    float trim_left_z;
     float projected_len;
 
     if ((bike_settings == 0) || (s_runtime.gravity_valid == false))
@@ -190,10 +174,6 @@ static void motor_dyn_capture_zero_basis(const app_bike_settings_t *bike_setting
     trim_fwd_x = (fwd_x * c) + (left_x * s);
     trim_fwd_y = (fwd_y * c) + (left_y * s);
     trim_fwd_z = (fwd_z * c) + (left_z * s);
-
-    trim_left_x = (-fwd_x * s) + (left_x * c);
-    trim_left_y = (-fwd_y * s) + (left_y * c);
-    trim_left_z = (-fwd_z * s) + (left_z * c);
 
     /* ---------------------------------------------------------------------- */
     /*  zero_up 은 "지금 현재의 중력 방향" 이다.                              */

@@ -1,5 +1,6 @@
-
 #include "Motor_UI_Internal.h"
+
+#include <stdio.h>
 
 static const char *const s_menu_items[MOTOR_MENU_ITEM_COUNT] =
 {
@@ -11,35 +12,49 @@ static const char *const s_menu_items[MOTOR_MENU_ITEM_COUNT] =
     "SETTINGS"
 };
 
-void Motor_UI_DrawScreen_Menu(u8g2_t *u8g2, const motor_state_t *state)
+void Motor_UI_DrawScreen_Menu(u8g2_t *u8g2, const ui_rect_t *viewport, const motor_state_t *state)
 {
     uint8_t i;
-    uint8_t y;
+    uint8_t first_row;
+    uint8_t visible_rows;
+    int16_t y;
 
-    if ((u8g2 == 0) || (state == 0))
+    if ((u8g2 == 0) || (viewport == 0) || (state == 0))
     {
         return;
     }
 
-    Motor_UI_DrawStatusBar(u8g2, state);
+    /* ---------------------------------------------------------------------- */
+    /*  메뉴 화면                                                              */
+    /*  - 상단바와 하단바는 공용 엔진이 그린다.                                 */
+    /*  - 여기서는 viewport 안에 list만 배치한다.                              */
+    /* ---------------------------------------------------------------------- */
+    Motor_UI_DrawViewportTitle(u8g2, viewport, "MAIN MENU");
     u8g2_SetFont(u8g2, u8g2_font_6x10_tr);
-    u8g2_DrawStr(u8g2, 6, 22, "MAIN MENU");
 
-    for (i = 0u; i < MOTOR_MENU_ITEM_COUNT; i++)
+    visible_rows = 6u;
+    first_row = 0u;
+    if (state->ui.selected_index >= visible_rows)
     {
-        y = (uint8_t)(32u + i * 14u);
-        if (i == state->ui.selected_index)
+        first_row = (uint8_t)(state->ui.selected_index - (visible_rows - 1u));
+    }
+
+    for (i = 0u; (i < visible_rows) && ((first_row + i) < MOTOR_MENU_ITEM_COUNT); i++)
+    {
+        y = (int16_t)(viewport->y + 24 + (i * 14));
+        if ((first_row + i) == state->ui.selected_index)
         {
-            u8g2_DrawBox(u8g2, 6, y - 9u, 228, 12);
+            u8g2_DrawBox(u8g2, viewport->x + 4, y - 9, viewport->w - 8, 12);
             u8g2_SetDrawColor(u8g2, 0);
-            u8g2_DrawStr(u8g2, 10, y, s_menu_items[i]);
+            u8g2_DrawStr(u8g2, viewport->x + 8, y, s_menu_items[first_row + i]);
             u8g2_SetDrawColor(u8g2, 1);
         }
         else
         {
-            u8g2_DrawStr(u8g2, 10, y, s_menu_items[i]);
+            u8g2_DrawStr(u8g2, viewport->x + 8, y, s_menu_items[first_row + i]);
         }
     }
 
-    Motor_UI_DrawBottomHint(u8g2, "1/2 MOVE", "5 ENTER", "6 BACK");
+    u8g2_SetFont(u8g2, u8g2_font_5x7_tr);
+    u8g2_DrawStr(u8g2, viewport->x + 6, viewport->y + viewport->h - 4, "Use B1/B2 to move, B5 to enter");
 }

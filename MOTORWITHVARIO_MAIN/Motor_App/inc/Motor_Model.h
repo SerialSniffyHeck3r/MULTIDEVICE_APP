@@ -297,11 +297,12 @@ typedef struct
     uint8_t auto_day_night_super_night_threshold_percent;
     uint8_t auto_day_night_night_brightness_percent;
     uint8_t auto_day_night_super_night_brightness_percent;
-    uint8_t screen_flip_enabled;
-    uint8_t contrast_raw;
-    uint8_t temperature_compensation_raw;
-    uint8_t page_wrap_enabled;
-    uint8_t lock_while_moving;
+    uint8_t contrast_raw;                         /* UC1608 contrast raw                  */
+    uint8_t temperature_compensation_raw;         /* UC1608 temp compensation raw         */
+    uint8_t smart_update_enabled;                 /* smart update cache enable            */
+    uint8_t frame_limit_enabled;                  /* frame limiter enable                 */
+    uint8_t page_wrap_enabled;                    /* page wrap for drive screens          */
+    uint8_t lock_while_moving;                    /* moving state lock for settings       */
 } motor_display_settings_t;
 
 /* -------------------------------------------------------------------------- */
@@ -390,8 +391,9 @@ typedef struct
 typedef struct
 {
     uint8_t menu_wrap_enabled;
+    uint8_t show_debug_stubs;
+    uint8_t ride_summary_popup_enabled;
     uint8_t reserved0;
-    uint16_t reserved1;
 } motor_system_settings_t;
 
 /* -------------------------------------------------------------------------- */
@@ -577,11 +579,16 @@ typedef struct
 {
     uint8_t  screen;                                  /* motor_screen_t raw                 */
     uint8_t  previous_drive_screen;                   /* motor_screen_t raw                 */
-    uint8_t  selected_index;
-    uint8_t  selected_slot;
-    uint8_t  editing;
-    uint8_t  screen_locked;
-    uint8_t  redraw_requested;
+    uint8_t  selected_index;                          /* menu/settings selected row         */
+    uint8_t  selected_slot;                           /* data field selected slot           */
+    uint8_t  first_visible_row;                       /* scrolling list first row           */
+    uint8_t  editing;                                 /* value edit latch                   */
+    uint8_t  screen_locked;                           /* moving lock or manual lock         */
+    uint8_t  redraw_requested;                        /* next frame force redraw            */
+    uint8_t  overlay_visible;                         /* drive bottom bar overlay visible   */
+    uint8_t  overlay_key_armed;                       /* first short press only opens bar   */
+    uint16_t reserved0;
+    uint32_t overlay_until_ms;                        /* overlay bottom bar timeout         */
     uint32_t toast_until_ms;
     char     toast_text[MOTOR_UI_TOAST_TEXT_MAX];
 } motor_ui_state_t;

@@ -104,9 +104,10 @@ void Motor_Settings_ResetToDefaults(void)
     s_motor_settings.display.auto_day_night_super_night_threshold_percent = 12u;
     s_motor_settings.display.auto_day_night_night_brightness_percent = 42u;
     s_motor_settings.display.auto_day_night_super_night_brightness_percent = 18u;
-    s_motor_settings.display.screen_flip_enabled = 0u;
     s_motor_settings.display.contrast_raw = 120u;
     s_motor_settings.display.temperature_compensation_raw = 2u;
+    s_motor_settings.display.smart_update_enabled = 1u;
+    s_motor_settings.display.frame_limit_enabled = 1u;
     s_motor_settings.display.page_wrap_enabled = 1u;
     s_motor_settings.display.lock_while_moving = 0u;
 
@@ -145,6 +146,8 @@ void Motor_Settings_ResetToDefaults(void)
     s_motor_settings.obd.shift_light_rpm = 10000u;
 
     s_motor_settings.system.menu_wrap_enabled = 1u;
+    s_motor_settings.system.show_debug_stubs = 1u;
+    s_motor_settings.system.ride_summary_popup_enabled = 1u;
 
     motor_settings_fill_default_data_fields();
 }
@@ -200,7 +203,6 @@ void Motor_Settings_Commit(void)
     shared_settings.backlight.night_brightness_percent = s_motor_settings.display.auto_day_night_night_brightness_percent;
     shared_settings.backlight.super_night_brightness_percent = s_motor_settings.display.auto_day_night_super_night_brightness_percent;
 
-    shared_settings.uc1608.flip_mode = (s_motor_settings.display.screen_flip_enabled != 0u) ? 1u : 0u;
     shared_settings.uc1608.contrast = s_motor_settings.display.contrast_raw;
     shared_settings.uc1608.temperature_compensation = s_motor_settings.display.temperature_compensation_raw;
 
