@@ -32,6 +32,7 @@
 #include "Vario_State.h"
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #ifndef VARIO_APP_BOOT_CONFIRM_DELAY_MS
 #define VARIO_APP_BOOT_CONFIRM_DELAY_MS 2000u
@@ -225,8 +226,14 @@ static void vario_task_apply_platform_settings(void)
 /* -------------------------------------------------------------------------- */
 static void vario_task_run_legacy_profile(uint32_t now_ms)
 {
+    /* ---------------------------------------------------------------------- */
+    /* legacy root family 는 버튼 이벤트 / blink phase / status 변화에 따라     */
+    /* UI engine 내부에서 자체 redraw 판단을 한다.                             */
+    /*                                                                          */
+    /* 따라서 여기서는 더 이상 매 루프 강제 redraw 를 넣지 않는다.             */
+    /* variometer ownership 해제만 유지하고, 실제 draw 여부는 엔진에게 맡긴다. */
+    /* ---------------------------------------------------------------------- */
     Audio_App_ReleaseVariometer(now_ms);
-    UI_Engine_RequestRedraw();
     UI_Engine_Task(now_ms);
 }
 
@@ -260,88 +267,66 @@ static void vario_task_run_mode_state_machine(uint32_t now_ms)
         /* - status bar 없음                                                    */
         /* - bottom bar 없음                                                    */
         /* - tone ownership 있음                                                */
-        /* - 실제 renderer 는 UI_ScreenVario_GetLayoutMode() 가                */
-        /*   FULLSCREEN 을 반환함으로써 자동 결정된다.                         */
+        /*                                                                          */
+        /* redraw 정책                                                           */
+        /* - baro / GS / filtered altitude 의 실질 publish cadence 는           */
+        /*   Vario_State_Task() 내부 10Hz / 5Hz scheduler 가 소유한다.          */
+        /* - 따라서 상위 상태머신은 더 이상 매 루프 UI_Engine_RequestRedraw()   */
+        /*   를 던지지 않는다.                                                  */
         /* ------------------------------------------------------------------ */
         Vario_Button_Task(now_ms);
         Vario_Audio_Task(now_ms);
-        UI_Engine_RequestRedraw();
         break;
 
     case VARIO_MODE_SCREEN_2:
         /* ------------------------------------------------------------------ */
         /* SCREEN 2                                                            */
-        /* - 바리오 메인 full-screen page                                      */
-        /* - status bar 없음                                                    */
-        /* - bottom bar 없음                                                    */
-        /* - tone ownership 있음                                                */
         /* ------------------------------------------------------------------ */
         Vario_Button_Task(now_ms);
         Vario_Audio_Task(now_ms);
-        UI_Engine_RequestRedraw();
         break;
 
     case VARIO_MODE_SCREEN_3:
         /* ------------------------------------------------------------------ */
         /* SCREEN 3                                                            */
-        /* - 바리오 메인 full-screen page                                      */
-        /* - status bar 없음                                                    */
-        /* - bottom bar 없음                                                    */
-        /* - tone ownership 있음                                                */
         /* ------------------------------------------------------------------ */
         Vario_Button_Task(now_ms);
         Vario_Audio_Task(now_ms);
-        UI_Engine_RequestRedraw();
         break;
 
     case VARIO_MODE_SETTING:
         /* ------------------------------------------------------------------ */
         /* SETTING                                                             */
-        /* - status bar 있음                                                    */
-        /* - bottom bar 있음                                                    */
-        /* - 하단 문자열은 UI_ScreenVario -> UI_BottomBar API 로 정의됨         */
-        /* - 설정 화면에서는 variometer tone ownership 해제                     */
         /* ------------------------------------------------------------------ */
         Vario_Button_Task(now_ms);
         Vario_Audio_Task(now_ms);
-        UI_Engine_RequestRedraw();
         break;
 
     case VARIO_MODE_QUICKSET:
         /* ------------------------------------------------------------------ */
         /* QUICKSET                                                            */
-        /* - status bar 있음                                                    */
-        /* - bottom bar 있음                                                    */
-        /* - 하단 문자열은 UI_ScreenVario -> UI_BottomBar API 로 정의됨         */
-        /* - 설정 계열이므로 tone ownership 해제                                */
         /* ------------------------------------------------------------------ */
         Vario_Button_Task(now_ms);
         Vario_Audio_Task(now_ms);
-        UI_Engine_RequestRedraw();
         break;
 
     case VARIO_MODE_VALUESETTING:
         /* ------------------------------------------------------------------ */
         /* VALUESETTING                                                        */
-        /* - status bar 있음                                                    */
-        /* - bottom bar 있음                                                    */
-        /* - 하단 문자열은 UI_ScreenVario -> UI_BottomBar API 로 정의됨         */
-        /* - 설정 계열이므로 tone ownership 해제                                */
         /* ------------------------------------------------------------------ */
         Vario_Button_Task(now_ms);
         Vario_Audio_Task(now_ms);
-        UI_Engine_RequestRedraw();
         break;
 
     case VARIO_MODE_COUNT:
     default:
         /* ------------------------------------------------------------------ */
         /* 비정상 mode 방어                                                    */
-        /* - screen1 로 되돌리고 한 프레임 redraw 요청                          */
+        /* - screen1 로 되돌리는 순간 Vario_State_SetMode() 가 redraw request  */
+        /*   를 이미 세운다.                                                    */
         /* ------------------------------------------------------------------ */
         Vario_State_SetMode(VARIO_MODE_SCREEN_1);
         Vario_Audio_Task(now_ms);
-        UI_Engine_RequestRedraw();
         break;
     }
 }
