@@ -428,8 +428,8 @@ static void BOOT_SELFTEST_SCREEN_DrawFrame(const selftest_report_t *report,
     /* 4개 self-test 결과 라인                                                  */
     /* ---------------------------------------------------------------------- */
     BOOT_SELFTEST_SCREEN_DrawItemLine(u8g2, 92,  "GPS",      &report->gps);
-    BOOT_SELFTEST_SCREEN_DrawItemLine(u8g2, 101, "IMU",      &report->imu);
-    BOOT_SELFTEST_SCREEN_DrawItemLine(u8g2, 110, "SENSORS",  &report->sensors);
+    BOOT_SELFTEST_SCREEN_DrawItemLine(u8g2, 101, "SENSORS",      &report->imu);
+    BOOT_SELFTEST_SCREEN_DrawItemLine(u8g2, 110, "INTERNAL",  &report->sensors);
     BOOT_SELFTEST_SCREEN_DrawItemLine(u8g2, 119, "HARDWARE", &report->hardware);
 
     /* ---------------------------------------------------------------------- */

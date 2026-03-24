@@ -1641,6 +1641,110 @@ typedef struct
 /*  - IMU-aided 결과와 no-IMU 결과도 동시에 유지해서                          */
 /*    튜닝/검증/로그 비교가 가능하게 만든다.                                   */
 /* -------------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------- */
+/*  ALTITUDE low-level unit bank helper types                                  */
+/*                                                                            */
+/*  canonical / derived ownership                                             */
+/*  - *_cm / *_cms / *_hpa_x100 필드가 source-of-truth 이다.                  */
+/*  - 아래 bank는 그 canonical metric 값을 건드리지 않고,                      */
+/*    동일한 순간의 물리량을 여러 단위계로 병렬 보관하는 "파생 표현층" 이다.   */
+/*                                                                            */
+/*  설계 의도                                                                  */
+/*  - 상위 UI / App layer는 meter 값을 다시 feet로 환산하지 않고              */
+/*    이 bank에서 필요한 단위 슬롯만 선택한다.                                */
+/*  - 특히 feet는 이미 1m로 양자화된 값을 다시 바꾼 것이 아니라                */
+/*    canonical centimeter source에서 직접 계산된다.                          */
+/*    따라서 feet 해상도가 meter 표시 해상도에 끌려 내려가지 않는다.          */
+/* -------------------------------------------------------------------------- */
+typedef struct
+{
+    /* ---------------------------------------------------------------------- */
+    /*  선형 altitude quantity 표현쌍                                          */
+    /*                                                                        */
+    /*  meters_rounded                                                         */
+    /*  - centimeter canonical source를 가장 가까운 1 m 로 반올림한 값        */
+    /*                                                                        */
+    /*  feet_rounded                                                           */
+    /*  - 동일 source를 feet로 직접 변환한 뒤 가장 가까운 1 ft 로 반올림       */
+    /*  - meters_rounded 를 다시 3.28084배 한 값이 아니다.                    */
+    /* ---------------------------------------------------------------------- */
+    int32_t meters_rounded;
+    int32_t feet_rounded;
+} app_altitude_linear_units_t;
+
+typedef struct
+{
+    /* ---------------------------------------------------------------------- */
+    /*  vertical-speed 표현쌍                                                  */
+    /*                                                                        */
+    /*  mps_x10_rounded                                                        */
+    /*  - 0.1 m/s 고정소수점 표현                                              */
+    /*                                                                        */
+    /*  fpm_rounded                                                            */
+    /*  - feet per minute 정수 반올림 표현                                     */
+    /* ---------------------------------------------------------------------- */
+    int32_t mps_x10_rounded;
+    int32_t fpm_rounded;
+} app_altitude_vspeed_units_t;
+
+typedef struct
+{
+    /* ---------------------------------------------------------------------- */
+    /*  pressure 표현쌍                                                        */
+    /*                                                                        */
+    /*  hpa_x100                                                               */
+    /*  - canonical 그대로 유지되는 0.01 hPa 고정소수점                        */
+    /*                                                                        */
+    /*  inhg_x1000                                                             */
+    /*  - inch of mercury, 0.001 inHg 고정소수점                               */
+    /* ---------------------------------------------------------------------- */
+    int32_t hpa_x100;
+    int32_t inhg_x1000;
+} app_altitude_pressure_units_t;
+
+typedef struct
+{
+    /* ---------------------------------------------------------------------- */
+    /*  pressure / qnh quantity bank                                           */
+    /*                                                                        */
+    /*  이름은 아래 canonical 필드명과 1:1 대응되도록 유지한다.                */
+    /* ---------------------------------------------------------------------- */
+    app_altitude_pressure_units_t pressure_raw;
+    app_altitude_pressure_units_t pressure_prefilt;
+    app_altitude_pressure_units_t pressure_filt;
+    app_altitude_pressure_units_t pressure_residual;
+    app_altitude_pressure_units_t qnh_manual;
+    app_altitude_pressure_units_t qnh_equiv_gps;
+
+    /* ---------------------------------------------------------------------- */
+    /*  altitude quantity bank                                                 */
+    /* ---------------------------------------------------------------------- */
+    app_altitude_linear_units_t   alt_pressure_std;
+    app_altitude_linear_units_t   alt_qnh_manual;
+    app_altitude_linear_units_t   alt_gps_hmsl;
+    app_altitude_linear_units_t   alt_fused_noimu;
+    app_altitude_linear_units_t   alt_fused_imu;
+    app_altitude_linear_units_t   alt_display;
+    app_altitude_linear_units_t   alt_rel_home_noimu;
+    app_altitude_linear_units_t   alt_rel_home_imu;
+    app_altitude_linear_units_t   home_alt_noimu;
+    app_altitude_linear_units_t   home_alt_imu;
+    app_altitude_linear_units_t   baro_bias_noimu;
+    app_altitude_linear_units_t   baro_bias_imu;
+
+    /* ---------------------------------------------------------------------- */
+    /*  vertical-speed quantity bank                                           */
+    /* ---------------------------------------------------------------------- */
+    app_altitude_vspeed_units_t   debug_audio_vario;
+    app_altitude_vspeed_units_t   vario_fast_noimu;
+    app_altitude_vspeed_units_t   vario_slow_noimu;
+    app_altitude_vspeed_units_t   vario_fast_imu;
+    app_altitude_vspeed_units_t   vario_slow_imu;
+    app_altitude_vspeed_units_t   baro_vario_raw;
+    app_altitude_vspeed_units_t   baro_vario_filt;
+} app_altitude_unit_bank_t;
+
 typedef struct
 {
     /* ---------------------------------------------------------------------- */
@@ -1730,6 +1834,20 @@ typedef struct
     uint16_t gps_pdop_x100;                 /* GPS PDOP x100                         */
     uint8_t  gps_numsv_used;                /* GPS numSV_used                        */
     uint8_t  gps_fix_type;                  /* GPS fixType                           */
+
+    /* ---------------------------------------------------------------------- */
+    /*  저수준 단위 bank                                                       */
+    /*                                                                        */
+    /*  중요한 규칙                                                            */
+    /*  - 위 canonical metric 필드가 먼저 갱신되고                             */
+    /*  - 아래 units bank는 그 canonical 값을 기반으로 같은 task 안에서        */
+    /*    즉시 파생 계산된다.                                                  */
+    /*                                                                        */
+    /*  따라서 상위 계층은                                                     */
+    /*  - "meter 값을 받아서 다시 feet로 환산" 하지 말고                      */
+    /*  - 필요한 슬롯만 선택해 읽어야 한다.                                    */
+    /* ---------------------------------------------------------------------- */
+    app_altitude_unit_bank_t units;
 } app_altitude_state_t;
 
 

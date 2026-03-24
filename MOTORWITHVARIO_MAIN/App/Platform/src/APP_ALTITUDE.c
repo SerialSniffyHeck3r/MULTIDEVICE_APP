@@ -550,6 +550,156 @@ static int32_t APP_ALTITUDE_RoundFloatToS32(float value)
     return (int32_t)(value - 0.5f);
 }
 
+
+/* -------------------------------------------------------------------------- */
+/*  low-level unit bank conversion helpers                                     */
+/*                                                                            */
+/*  중요한 원칙                                                                */
+/*  - canonical metric source(*_cm / *_cms / *_hpa_x100)는 절대 수정하지 않는다.*/
+/*  - feet / fpm / inHg 는 항상 그 canonical source에서 직접 계산한다.        */
+/*  - 이미 1 m 또는 0.1 m/s 로 양자화된 표시값을 다시 바꾸지 않는다.           */
+/*                                                                            */
+/*  이 규칙을 지켜야                                                           */
+/*  - meter 표시와 feet 표시가 거짓으로 1:1 대응해 보이지 않고                */
+/*  - 상위 계층이 단위 변환 책임을 되풀이하지 않으며                           */
+/*  - 같은 샘플에 대한 metric / imperial bank가 항상 동기화된다.              */
+/* -------------------------------------------------------------------------- */
+static int32_t APP_ALTITUDE_ConvertCmToRoundedMeters(int32_t altitude_cm)
+{
+    return APP_ALTITUDE_RoundFloatToS32(((float)altitude_cm) * 0.01f);
+}
+
+static int32_t APP_ALTITUDE_ConvertCmToRoundedFeet(int32_t altitude_cm)
+{
+    return APP_ALTITUDE_RoundFloatToS32(((float)altitude_cm) * 0.032808399f);
+}
+
+static int32_t APP_ALTITUDE_ConvertCmsToRoundedMpsX10(int32_t velocity_cms)
+{
+    return APP_ALTITUDE_RoundFloatToS32(((float)velocity_cms) * 0.1f);
+}
+
+static int32_t APP_ALTITUDE_ConvertCmsToRoundedFpm(int32_t velocity_cms)
+{
+    return APP_ALTITUDE_RoundFloatToS32(((float)velocity_cms) * 1.96850394f);
+}
+
+static int32_t APP_ALTITUDE_ConvertHpaX100ToRoundedInHgX1000(int32_t pressure_hpa_x100)
+{
+    return APP_ALTITUDE_RoundFloatToS32(((float)pressure_hpa_x100) * 0.29529983f);
+}
+
+static void APP_ALTITUDE_FillLinearUnitPair(app_altitude_linear_units_t *dst,
+                                            int32_t canonical_altitude_cm)
+{
+    if (dst == 0)
+    {
+        return;
+    }
+
+    dst->meters_rounded = APP_ALTITUDE_ConvertCmToRoundedMeters(canonical_altitude_cm);
+    dst->feet_rounded   = APP_ALTITUDE_ConvertCmToRoundedFeet(canonical_altitude_cm);
+}
+
+static void APP_ALTITUDE_FillVSpeedUnitPair(app_altitude_vspeed_units_t *dst,
+                                            int32_t canonical_velocity_cms)
+{
+    if (dst == 0)
+    {
+        return;
+    }
+
+    dst->mps_x10_rounded = APP_ALTITUDE_ConvertCmsToRoundedMpsX10(canonical_velocity_cms);
+    dst->fpm_rounded     = APP_ALTITUDE_ConvertCmsToRoundedFpm(canonical_velocity_cms);
+}
+
+static void APP_ALTITUDE_FillPressureUnitPair(app_altitude_pressure_units_t *dst,
+                                              int32_t canonical_pressure_hpa_x100)
+{
+    if (dst == 0)
+    {
+        return;
+    }
+
+    dst->hpa_x100    = canonical_pressure_hpa_x100;
+    dst->inhg_x1000  = APP_ALTITUDE_ConvertHpaX100ToRoundedInHgX1000(canonical_pressure_hpa_x100);
+}
+
+static void APP_ALTITUDE_PopulateLowLevelUnitBank(app_altitude_state_t *altitude_state)
+{
+    if (altitude_state == 0)
+    {
+        return;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /*  pressure / qnh bank                                                    */
+    /*                                                                        */
+    /*  source-of-truth는 canonical hPa_x100 이다.                            */
+    /*  inHg 는 여기서만 direct derivation 한다.                              */
+    /* ---------------------------------------------------------------------- */
+    APP_ALTITUDE_FillPressureUnitPair(&altitude_state->units.pressure_raw,
+                                      altitude_state->pressure_raw_hpa_x100);
+    APP_ALTITUDE_FillPressureUnitPair(&altitude_state->units.pressure_prefilt,
+                                      altitude_state->pressure_prefilt_hpa_x100);
+    APP_ALTITUDE_FillPressureUnitPair(&altitude_state->units.pressure_filt,
+                                      altitude_state->pressure_filt_hpa_x100);
+    APP_ALTITUDE_FillPressureUnitPair(&altitude_state->units.pressure_residual,
+                                      altitude_state->pressure_residual_hpa_x100);
+    APP_ALTITUDE_FillPressureUnitPair(&altitude_state->units.qnh_manual,
+                                      altitude_state->qnh_manual_hpa_x100);
+    APP_ALTITUDE_FillPressureUnitPair(&altitude_state->units.qnh_equiv_gps,
+                                      altitude_state->qnh_equiv_gps_hpa_x100);
+
+    /* ---------------------------------------------------------------------- */
+    /*  altitude bank                                                          */
+    /*                                                                        */
+    /*  feet는 항상 cm canonical source에서 direct conversion 한다.            */
+    /* ---------------------------------------------------------------------- */
+    APP_ALTITUDE_FillLinearUnitPair(&altitude_state->units.alt_pressure_std,
+                                    altitude_state->alt_pressure_std_cm);
+    APP_ALTITUDE_FillLinearUnitPair(&altitude_state->units.alt_qnh_manual,
+                                    altitude_state->alt_qnh_manual_cm);
+    APP_ALTITUDE_FillLinearUnitPair(&altitude_state->units.alt_gps_hmsl,
+                                    altitude_state->alt_gps_hmsl_cm);
+    APP_ALTITUDE_FillLinearUnitPair(&altitude_state->units.alt_fused_noimu,
+                                    altitude_state->alt_fused_noimu_cm);
+    APP_ALTITUDE_FillLinearUnitPair(&altitude_state->units.alt_fused_imu,
+                                    altitude_state->alt_fused_imu_cm);
+    APP_ALTITUDE_FillLinearUnitPair(&altitude_state->units.alt_display,
+                                    altitude_state->alt_display_cm);
+    APP_ALTITUDE_FillLinearUnitPair(&altitude_state->units.alt_rel_home_noimu,
+                                    altitude_state->alt_rel_home_noimu_cm);
+    APP_ALTITUDE_FillLinearUnitPair(&altitude_state->units.alt_rel_home_imu,
+                                    altitude_state->alt_rel_home_imu_cm);
+    APP_ALTITUDE_FillLinearUnitPair(&altitude_state->units.home_alt_noimu,
+                                    altitude_state->home_alt_noimu_cm);
+    APP_ALTITUDE_FillLinearUnitPair(&altitude_state->units.home_alt_imu,
+                                    altitude_state->home_alt_imu_cm);
+    APP_ALTITUDE_FillLinearUnitPair(&altitude_state->units.baro_bias_noimu,
+                                    altitude_state->baro_bias_noimu_cm);
+    APP_ALTITUDE_FillLinearUnitPair(&altitude_state->units.baro_bias_imu,
+                                    altitude_state->baro_bias_imu_cm);
+
+    /* ---------------------------------------------------------------------- */
+    /*  vertical-speed bank                                                    */
+    /* ---------------------------------------------------------------------- */
+    APP_ALTITUDE_FillVSpeedUnitPair(&altitude_state->units.debug_audio_vario,
+                                    altitude_state->debug_audio_vario_cms);
+    APP_ALTITUDE_FillVSpeedUnitPair(&altitude_state->units.vario_fast_noimu,
+                                    altitude_state->vario_fast_noimu_cms);
+    APP_ALTITUDE_FillVSpeedUnitPair(&altitude_state->units.vario_slow_noimu,
+                                    altitude_state->vario_slow_noimu_cms);
+    APP_ALTITUDE_FillVSpeedUnitPair(&altitude_state->units.vario_fast_imu,
+                                    altitude_state->vario_fast_imu_cms);
+    APP_ALTITUDE_FillVSpeedUnitPair(&altitude_state->units.vario_slow_imu,
+                                    altitude_state->vario_slow_imu_cms);
+    APP_ALTITUDE_FillVSpeedUnitPair(&altitude_state->units.baro_vario_raw,
+                                    altitude_state->baro_vario_raw_cms);
+    APP_ALTITUDE_FillVSpeedUnitPair(&altitude_state->units.baro_vario_filt,
+                                    altitude_state->baro_vario_filt_cms);
+}
+
 static float APP_ALTITUDE_LpfAlphaFromTauMs(uint32_t tau_ms, float dt_s)
 {
     float tau_s;
@@ -3531,6 +3681,15 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
     g_app_state.altitude.gps_fix_type               = gps_fix->fixType;
 
     APP_ALTITUDE_HandleDebugAudio(now_ms, settings);
+
+    /* ------------------------------------------------------------------ */
+    /*  low-level multi-unit bank refresh                                  */
+    /*                                                                    */
+    /*  canonical metric slice와 debug-audio source까지 모두 확정한 뒤     */
+    /*  같은 task 안에서 parallel metric / imperial bank를 갱신한다.       */
+    /*  상위 계층은 이 bank를 선택만 하고 다시 환산하지 않는다.            */
+    /* ------------------------------------------------------------------ */
+    APP_ALTITUDE_PopulateLowLevelUnitBank((app_altitude_state_t *)&g_app_state.altitude);
 }
 
 void APP_ALTITUDE_DebugSetUiActive(bool active, uint32_t now_ms)
