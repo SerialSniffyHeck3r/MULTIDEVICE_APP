@@ -248,11 +248,21 @@ void Motor_DataField_Format(motor_data_field_id_t field_id,
         break;
 
     case MOTOR_FIELD_ALTITUDE:
-        Motor_Units_FormatAltitude(out_text->value, sizeof(out_text->value), state->nav.altitude_cm, units);
+        /* ------------------------------------------------------------------ */
+        /*  canonical altitude owner는 APP_ALTITUDE -> APP_STATE.altitude 이다. */
+        /*  Motor data field는 그 low-level unit bank에서 선택만 수행한다.     */
+        /* ------------------------------------------------------------------ */
+        Motor_Units_FormatAltitudeFromUnitBank(out_text->value,
+                                               sizeof(out_text->value),
+                                               &state->snapshot.altitude.units.alt_display,
+                                               units);
         break;
 
     case MOTOR_FIELD_REL_ALTITUDE:
-        Motor_Units_FormatAltitude(out_text->value, sizeof(out_text->value), state->nav.rel_altitude_cm, units);
+        Motor_Units_FormatAltitudeFromUnitBank(out_text->value,
+                                               sizeof(out_text->value),
+                                               &state->snapshot.altitude.units.alt_rel_home_noimu,
+                                               units);
         break;
 
     case MOTOR_FIELD_GRADE_PERCENT:

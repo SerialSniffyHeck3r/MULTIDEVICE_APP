@@ -115,6 +115,29 @@ int32_t Motor_Units_ConvertAltitudeCm(int32_t altitude_cm, const motor_unit_sett
     return altitude_cm / 100;
 }
 
+int32_t Motor_Units_SelectAltitudeFromUnitBank(const app_altitude_linear_units_t *unit_bank,
+                                               const motor_unit_settings_t *units)
+{
+    if (unit_bank == 0)
+    {
+        return 0;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /*  altitude low-level bank select                                         */
+    /*                                                                        */
+    /*  source-of-truth 변환은 APP_ALTITUDE 서비스가 이미 끝낸 상태이므로       */
+    /*  여기서는 preset/custom 선택에 맞는 슬롯만 고른다.                      */
+    /*  즉, Motor upper layer는 meter->feet 재환산을 반복하지 않는다.          */
+    /* ---------------------------------------------------------------------- */
+    if ((units != 0) && (units->altitude == (uint8_t)MOTOR_ALTITUDE_UNIT_FT))
+    {
+        return unit_bank->feet_rounded;
+    }
+
+    return unit_bank->meters_rounded;
+}
+
 int32_t Motor_Units_ConvertTempCx10(int32_t temp_c_x10, const motor_unit_settings_t *units)
 {
     if ((units != 0) && (units->temperature == (uint8_t)MOTOR_TEMP_UNIT_F))
@@ -170,6 +193,22 @@ void Motor_Units_FormatAltitude(char *out_text, size_t out_size, int32_t altitud
     }
 
     converted = Motor_Units_ConvertAltitudeCm(altitude_cm, units);
+    (void)snprintf(out_text, out_size, "%ld", (long)converted);
+}
+
+void Motor_Units_FormatAltitudeFromUnitBank(char *out_text,
+                                            size_t out_size,
+                                            const app_altitude_linear_units_t *unit_bank,
+                                            const motor_unit_settings_t *units)
+{
+    int32_t converted;
+
+    if ((out_text == 0) || (out_size == 0u))
+    {
+        return;
+    }
+
+    converted = Motor_Units_SelectAltitudeFromUnitBank(unit_bank, units);
     (void)snprintf(out_text, out_size, "%ld", (long)converted);
 }
 

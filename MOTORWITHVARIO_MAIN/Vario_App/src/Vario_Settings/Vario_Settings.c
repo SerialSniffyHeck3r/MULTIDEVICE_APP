@@ -817,11 +817,36 @@ void Vario_Settings_AdjustQuickSet(vario_quickset_item_t item, int8_t direction)
             break;
 
         case VARIO_QUICKSET_ITEM_ALT2_CAPTURE:
-            if ((direction != 0) && (rt != NULL) && (rt->derived_valid != false))
+        {
+            int32_t selected_altitude_cm;
+
+            if ((direction != 0) &&
+                (Vario_State_GetSelectedAltitudeCm(&selected_altitude_cm) != false))
             {
+                /* ---------------------------------------------------------- */
+                /*  ALT2 capture는 표시용 1m 양자화값이 아니라                */
+                /*  altitude_source 기준 canonical centimeter source를         */
+                /*  그대로 캡처한다.                                          */
+                /*                                                            */
+                /*  이렇게 해야                                              */
+                /*  - meter / feet 표시가 각자 자기 해상도를 유지하고         */
+                /*  - 상대고도 기준점도 upper display rounding 오차를         */
+                /*    물고 들어오지 않는다.                                   */
+                /* ---------------------------------------------------------- */
+                s_vario_settings.alt2_reference_cm = selected_altitude_cm;
+            }
+            else if ((direction != 0) && (rt != NULL) && (rt->derived_valid != false))
+            {
+                /* ---------------------------------------------------------- */
+                /*  방어 fallback                                             */
+                /*                                                            */
+                /*  runtime source resolve이 실패한 아주 초기 부팅 구간에서만 */
+                /*  기존 경로를 남겨 둔다.                                    */
+                /* ---------------------------------------------------------- */
                 s_vario_settings.alt2_reference_cm = (int32_t)lroundf(rt->alt1_absolute_m * 100.0f);
             }
             break;
+        }
 
         case VARIO_QUICKSET_ITEM_ALT3_RESET:
             if (direction != 0)

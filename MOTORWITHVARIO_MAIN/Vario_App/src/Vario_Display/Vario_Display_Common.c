@@ -753,6 +753,89 @@ static void vario_display_format_signed_altitude(char *buf, size_t buf_len, floa
 /* - ALT3 : settings->altitude_unit                                            */
 /* 조합을 사용한다.                                                            */
 /* -------------------------------------------------------------------------- */
+
+static int32_t vario_display_select_altitude_from_unit_bank(const app_altitude_linear_units_t *units,
+                                                            vario_alt_unit_t unit)
+{
+    if (units == NULL)
+    {
+        return 0;
+    }
+
+    return (unit == VARIO_ALT_UNIT_FEET) ? units->feet_rounded : units->meters_rounded;
+}
+
+static void vario_display_format_altitude_from_unit_bank(char *buf,
+                                                         size_t buf_len,
+                                                         const app_altitude_linear_units_t *units,
+                                                         vario_alt_unit_t unit)
+{
+    if ((buf == NULL) || (buf_len == 0u))
+    {
+        return;
+    }
+
+    snprintf(buf,
+             buf_len,
+             "%ld",
+             (long)vario_display_select_altitude_from_unit_bank(units, unit));
+}
+
+static const app_altitude_linear_units_t *vario_display_get_selected_absolute_unit_bank(const vario_runtime_t *rt,
+                                                                                         const vario_settings_t *settings)
+{
+    const app_altitude_state_t *alt;
+
+    if ((rt == NULL) || (settings == NULL))
+    {
+        return NULL;
+    }
+
+    alt = &rt->altitude;
+
+    switch (settings->altitude_source)
+    {
+        case VARIO_ALT_SOURCE_QNH_MANUAL:
+            return &alt->units.alt_qnh_manual;
+
+        case VARIO_ALT_SOURCE_FUSED_NOIMU:
+            return &alt->units.alt_fused_noimu;
+
+        case VARIO_ALT_SOURCE_FUSED_IMU:
+            if (alt->imu_vector_valid != false)
+            {
+                return &alt->units.alt_fused_imu;
+            }
+            return &alt->units.alt_fused_noimu;
+
+        case VARIO_ALT_SOURCE_GPS_HMSL:
+            return &alt->units.alt_gps_hmsl;
+
+        case VARIO_ALT_SOURCE_DISPLAY:
+        case VARIO_ALT_SOURCE_COUNT:
+        default:
+            return &alt->units.alt_display;
+    }
+}
+
+static long vario_display_get_flight_level_from_unit_bank(const vario_runtime_t *rt)
+{
+    float fl_value_ft;
+
+    if (rt == NULL)
+    {
+        return 0;
+    }
+
+    fl_value_ft = ((float)rt->altitude.units.alt_pressure_std.feet_rounded) * 0.01f;
+    if (fl_value_ft < 0.0f)
+    {
+        fl_value_ft = 0.0f;
+    }
+
+    return lroundf(fl_value_ft);
+}
+
 static void vario_display_format_altitude_with_unit(char *buf,
                                                     size_t buf_len,
                                                     float altitude_m,
@@ -1886,7 +1969,9 @@ static void vario_display_format_alt2_text(char *value_buf,
                                            const vario_runtime_t *rt,
                                            const vario_settings_t *settings)
 {
-    long fl_value;
+    const app_altitude_linear_units_t *absolute_units;
+    const app_altitude_linear_units_t *gps_units;
+    long                               fl_value;
 
     if ((value_buf == NULL) || (value_len == 0u) || (unit_buf == NULL) || (unit_len == 0u) ||
         (rt == NULL) || (settings == NULL))
@@ -1894,13 +1979,16 @@ static void vario_display_format_alt2_text(char *value_buf,
         return;
     }
 
+    absolute_units = vario_display_get_selected_absolute_unit_bank(rt, settings);
+    gps_units = &rt->altitude.units.alt_gps_hmsl;
+
     switch (settings->alt2_mode)
     {
         case VARIO_ALT2_MODE_ABSOLUTE:
-            vario_display_format_altitude_with_unit(value_buf,
-                                                    value_len,
-                                                    rt->alt1_absolute_m,
-                                                    settings->alt2_unit);
+            vario_display_format_altitude_from_unit_bank(value_buf,
+                                                         value_len,
+                                                         absolute_units,
+                                                         settings->alt2_unit);
             snprintf(unit_buf,
                      unit_len,
                      "%s",
@@ -1910,10 +1998,10 @@ static void vario_display_format_alt2_text(char *value_buf,
         case VARIO_ALT2_MODE_GPS:
             if (rt->gps_valid != false)
             {
-                vario_display_format_altitude_with_unit(value_buf,
-                                                        value_len,
-                                                        rt->gps_altitude_m,
-                                                        settings->alt2_unit);
+                vario_display_format_altitude_from_unit_bank(value_buf,
+                                                             value_len,
+                                                             gps_units,
+                                                             settings->alt2_unit);
             }
             else
             {
@@ -1928,11 +2016,7 @@ static void vario_display_format_alt2_text(char *value_buf,
         case VARIO_ALT2_MODE_FLIGHT_LEVEL:
             if (rt->baro_valid != false)
             {
-                fl_value = lroundf((rt->pressure_altitude_std_m * 3.2808399f) / 100.0f);
-                if (fl_value < 0)
-                {
-                    fl_value = 0;
-                }
+                fl_value = vario_display_get_flight_level_from_unit_bank(rt);
                 snprintf(value_buf, value_len, "%03ld", fl_value);
             }
             else
@@ -1945,6 +2029,14 @@ static void vario_display_format_alt2_text(char *value_buf,
         case VARIO_ALT2_MODE_RELATIVE:
         case VARIO_ALT2_MODE_COUNT:
         default:
+            /* ------------------------------------------------------------------ */
+            /*  ALT2 relative는 기준점이 VARIO app setting 에 있으므로             */
+            /*  APP_STATE의 정적 unit bank에 그대로 존재할 수는 없다.              */
+            /*                                                                    */
+            /*  대신 backing field 자체를 Vario_State.c 에서                      */
+            /*  centimeter 해상도로 계산해 두었기 때문에                           */
+            /*  여기서 feet로 변환해도 1m 계단 해상도에 묶이지 않는다.             */
+            /* ------------------------------------------------------------------ */
             vario_display_format_altitude_with_unit(value_buf,
                                                     value_len,
                                                     rt->alt2_relative_m,
@@ -1998,7 +2090,10 @@ static void vario_display_draw_top_right_altitudes(u8g2_t *u8g2,
 
     right_limit_x = (int16_t)(v->x + v->w - VARIO_UI_SIDE_BAR_W - VARIO_UI_TOP_RIGHT_PAD_X);
 
-    vario_display_format_altitude_with_unit(alt1_text, sizeof(alt1_text), rt->alt1_absolute_m, settings->altitude_unit);
+    vario_display_format_altitude_from_unit_bank(alt1_text,
+                                                sizeof(alt1_text),
+                                                vario_display_get_selected_absolute_unit_bank(rt, settings),
+                                                settings->altitude_unit);
     vario_display_format_alt2_text(alt2_text, sizeof(alt2_text), alt2_unit_buf, sizeof(alt2_unit_buf), rt, settings);
     vario_display_format_altitude_with_unit(alt3_text, sizeof(alt3_text), rt->alt3_accum_gain_m, settings->altitude_unit);
     alt1_unit = Vario_Settings_GetAltitudeUnitTextForUnit(settings->altitude_unit);

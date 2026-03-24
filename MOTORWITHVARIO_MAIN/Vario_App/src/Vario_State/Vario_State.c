@@ -418,19 +418,11 @@ static float vario_state_pick_slow_vario_mps(const app_altitude_state_t *alt,
 /* 을 그대로 사용한다.                                                        */
 /* 즉, "manual QNH로 계산된 결과" 의 canonical owner 역시 APP_ALTITUDE다.    */
 /* -------------------------------------------------------------------------- */
-static bool vario_state_select_measurement(float *out_altitude_m, float *out_vario_mps)
+static bool vario_state_select_source_altitude_cm(const app_altitude_state_t *alt,
+                                                const vario_settings_t *settings,
+                                                int32_t *out_altitude_cm)
 {
-    const vario_settings_t     *settings;
-    const app_altitude_state_t *alt;
-    float                       fast_vario_mps;
-    float                       slow_vario_mps;
-    float                       slow_weight;
-    float                       altitude_m;
-
-    settings = Vario_Settings_Get();
-    alt = &s_vario_state.runtime.altitude;
-
-    if ((out_altitude_m == NULL) || (out_vario_mps == NULL))
+    if ((alt == NULL) || (settings == NULL) || (out_altitude_cm == NULL))
     {
         return false;
     }
@@ -439,12 +431,6 @@ static bool vario_state_select_measurement(float *out_altitude_m, float *out_var
     {
         return false;
     }
-
-    fast_vario_mps = vario_state_pick_fast_vario_mps(alt, settings);
-    slow_vario_mps = vario_state_pick_slow_vario_mps(alt, settings);
-
-    slow_weight = ((float)(settings->digital_vario_average_seconds - 1u)) / 7.0f;
-    slow_weight = vario_state_clampf(slow_weight, 0.0f, 1.0f);
 
     switch (settings->altitude_source)
     {
@@ -455,9 +441,7 @@ static bool vario_state_select_measurement(float *out_altitude_m, float *out_var
                 return false;
             }
 
-            altitude_m = ((float)alt->alt_qnh_manual_cm) * 0.01f;
-            *out_altitude_m = altitude_m;
-            *out_vario_mps = (fast_vario_mps * (1.0f - slow_weight)) + (slow_vario_mps * slow_weight);
+            *out_altitude_cm = alt->alt_qnh_manual_cm;
             return true;
 
         case VARIO_ALT_SOURCE_FUSED_NOIMU:
@@ -465,8 +449,8 @@ static bool vario_state_select_measurement(float *out_altitude_m, float *out_var
             {
                 return false;
             }
-            *out_altitude_m = ((float)alt->alt_fused_noimu_cm) * 0.01f;
-            *out_vario_mps = (fast_vario_mps * (1.0f - slow_weight)) + (slow_vario_mps * slow_weight);
+
+            *out_altitude_cm = alt->alt_fused_noimu_cm;
             return true;
 
         case VARIO_ALT_SOURCE_FUSED_IMU:
@@ -474,15 +458,15 @@ static bool vario_state_select_measurement(float *out_altitude_m, float *out_var
             {
                 return false;
             }
+
             if (alt->imu_vector_valid != false)
             {
-                *out_altitude_m = ((float)alt->alt_fused_imu_cm) * 0.01f;
+                *out_altitude_cm = alt->alt_fused_imu_cm;
             }
             else
             {
-                *out_altitude_m = ((float)alt->alt_fused_noimu_cm) * 0.01f;
+                *out_altitude_cm = alt->alt_fused_noimu_cm;
             }
-            *out_vario_mps = (fast_vario_mps * (1.0f - slow_weight)) + (slow_vario_mps * slow_weight);
             return true;
 
         case VARIO_ALT_SOURCE_GPS_HMSL:
@@ -490,8 +474,8 @@ static bool vario_state_select_measurement(float *out_altitude_m, float *out_var
             {
                 return false;
             }
-            *out_altitude_m = ((float)alt->alt_gps_hmsl_cm) * 0.01f;
-            *out_vario_mps = (fast_vario_mps * (1.0f - slow_weight)) + (slow_vario_mps * slow_weight);
+
+            *out_altitude_cm = alt->alt_gps_hmsl_cm;
             return true;
 
         case VARIO_ALT_SOURCE_DISPLAY:
@@ -501,10 +485,50 @@ static bool vario_state_select_measurement(float *out_altitude_m, float *out_var
             {
                 return false;
             }
-            *out_altitude_m = ((float)alt->alt_display_cm) * 0.01f;
-            *out_vario_mps = (fast_vario_mps * (1.0f - slow_weight)) + (slow_vario_mps * slow_weight);
+
+            *out_altitude_cm = alt->alt_display_cm;
             return true;
     }
+}
+
+static bool vario_state_select_measurement(float *out_altitude_m, float *out_vario_mps)
+{
+    const vario_settings_t     *settings;
+    const app_altitude_state_t *alt;
+    float                       fast_vario_mps;
+    float                       slow_vario_mps;
+    float                       slow_weight;
+    int32_t                     selected_altitude_cm;
+
+    settings = Vario_Settings_Get();
+    alt = &s_vario_state.runtime.altitude;
+
+    if ((out_altitude_m == NULL) || (out_vario_mps == NULL))
+    {
+        return false;
+    }
+
+    if ((settings == NULL) || (alt->initialized == false))
+    {
+        return false;
+    }
+
+    if (vario_state_select_source_altitude_cm(alt,
+                                              settings,
+                                              &selected_altitude_cm) == false)
+    {
+        return false;
+    }
+
+    fast_vario_mps = vario_state_pick_fast_vario_mps(alt, settings);
+    slow_vario_mps = vario_state_pick_slow_vario_mps(alt, settings);
+
+    slow_weight = ((float)(settings->digital_vario_average_seconds - 1u)) / 7.0f;
+    slow_weight = vario_state_clampf(slow_weight, 0.0f, 1.0f);
+
+    *out_altitude_m = ((float)selected_altitude_cm) * 0.01f;
+    *out_vario_mps = (fast_vario_mps * (1.0f - slow_weight)) + (slow_vario_mps * slow_weight);
+    return true;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1276,11 +1300,14 @@ static void vario_state_update_integrated_metrics(void)
 
 static void vario_state_publish_5hz(uint32_t now_ms)
 {
-    float quant_alt_m;
-    float quant_vario_mps;
-    float quant_gs_kmh;
-    float alt2_m;
-    float speed_delta_kmh;
+    const vario_settings_t     *settings;
+    const app_altitude_state_t *alt;
+    float                       quant_alt_m;
+    float                       quant_vario_mps;
+    float                       quant_gs_kmh;
+    float                       speed_delta_kmh;
+    int32_t                     selected_altitude_cm;
+    int32_t                     alt2_relative_cm;
 
     if (s_vario_state.runtime.derived_valid == false)
     {
@@ -1293,23 +1320,46 @@ static void vario_state_publish_5hz(uint32_t now_ms)
         return;
     }
 
+    settings = Vario_Settings_Get();
+    alt = &s_vario_state.runtime.altitude;
+
     quant_alt_m = roundf(s_vario_state.runtime.filtered_altitude_m);
     quant_vario_mps = roundf(s_vario_state.runtime.filtered_vario_mps * 10.0f) * 0.1f;
     quant_gs_kmh = roundf(s_vario_state.runtime.filtered_ground_speed_kmh * 10.0f) * 0.1f;
 
-    alt2_m = quant_alt_m - (((float)Vario_Settings_Get()->alt2_reference_cm) * 0.01f);
-    alt2_m = roundf(alt2_m);
+    /* ---------------------------------------------------------------------- */
+    /*  absolute / relative altitude publish path                              */
+    /*                                                                        */
+    /*  핵심 수정                                                              */
+    /*  - 숫자 UI cadence는 계속 5Hz 이지만                                     */
+    /*  - ALT1 / ALT2 backing field의 source는 1m 양자화된 quant_alt_m 가      */
+    /*    아니라 canonical centimeter source다.                               */
+    /*                                                                        */
+    /*  즉, feet 표시가 meter 표시의 1m 계단을 뒤따라가는 문제가 여기서 끊긴다. */
+    /* ---------------------------------------------------------------------- */
+    if ((settings != NULL) &&
+        (vario_state_select_source_altitude_cm(alt,
+                                               settings,
+                                               &selected_altitude_cm) != false))
+    {
+        alt2_relative_cm = selected_altitude_cm - settings->alt2_reference_cm;
+    }
+    else
+    {
+        selected_altitude_cm = (int32_t)lroundf(s_vario_state.runtime.filtered_altitude_m * 100.0f);
+        alt2_relative_cm = selected_altitude_cm;
+    }
 
     s_vario_state.runtime.baro_altitude_m = quant_alt_m;
-    s_vario_state.runtime.alt1_absolute_m = quant_alt_m;
+    s_vario_state.runtime.alt1_absolute_m = ((float)selected_altitude_cm) * 0.01f;
     s_vario_state.runtime.baro_vario_mps = quant_vario_mps;
     s_vario_state.runtime.ground_speed_kmh = quant_gs_kmh;
-    s_vario_state.runtime.alt2_relative_m = alt2_m;
+    s_vario_state.runtime.alt2_relative_m = ((float)alt2_relative_cm) * 0.01f;
 
-    if ((s_vario_state.runtime.baro_valid != false) && (s_vario_state.runtime.pressure_hpa > 0.0f))
+    if (alt->baro_valid != false)
     {
         s_vario_state.runtime.pressure_altitude_std_m =
-            roundf(vario_state_pressure_to_altitude_m(s_vario_state.runtime.pressure_hpa, 1013.25f));
+            ((float)alt->alt_pressure_std_cm) * 0.01f;
     }
     else
     {
@@ -1555,6 +1605,21 @@ void Vario_State_MoveValueSettingCursor(int8_t direction)
 const vario_runtime_t *Vario_State_GetRuntime(void)
 {
     return &s_vario_state.runtime;
+}
+
+bool Vario_State_GetSelectedAltitudeCm(int32_t *out_altitude_cm)
+{
+    const vario_settings_t *settings;
+
+    settings = Vario_Settings_Get();
+    if (out_altitude_cm == NULL)
+    {
+        return false;
+    }
+
+    return vario_state_select_source_altitude_cm(&s_vario_state.runtime.altitude,
+                                                 settings,
+                                                 out_altitude_cm);
 }
 
 void Vario_State_ResetAccumulatedGain(void)

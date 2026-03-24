@@ -139,12 +139,20 @@ typedef struct
     /*                                                                          */
     /*  alt1_absolute_m                                                         */
     /*  - Flytec ALT1 개념: absolute altitude                                   */
+    /*  - 중요: meter 숫자를 다시 feet로 바꾸기 위한 "표시 전용 양자화값" 이   */
+    /*    아니라, canonical centimeter source를 그대로 meter float로 옮긴      */
+    /*    compatibility field다.                                               */
     /*                                                                          */
     /*  alt2_relative_m                                                         */
     /*  - ALT2 relative mode 의 backing field                                  */
+    /*  - alt2_reference_cm 과 selected altitude cm 의 차이를                  */
+    /*    먼저 centimeter 해상도로 계산한 뒤 meter float로 싣는다.             */
+    /*    따라서 feet 표시가 1m 계단에 묶이지 않는다.                          */
     /*                                                                          */
     /*  pressure_altitude_std_m                                                 */
     /*  - 1013.25 hPa 기준 pressure altitude                                   */
+    /*  - APP_ALTITUDE가 publish한 alt_pressure_std_cm 을                      */
+    /*    compatibility 용 meter float로 옮긴 값이다.                          */
     /*  - ALT2 를 FL mode 로 쓸 때 renderer 가 이 값을 사용한다.               */
     /*                                                                          */
     /*  alt3_accum_gain_m                                                       */
@@ -253,6 +261,9 @@ void Vario_State_MoveQuickSetCursor(int8_t direction);
 void Vario_State_MoveValueSettingCursor(int8_t direction);
 
 const vario_runtime_t *Vario_State_GetRuntime(void);
+
+/* 현재 altitude_source 기준 absolute altitude를 cm source-of-truth로 반환 */
+bool Vario_State_GetSelectedAltitudeCm(int32_t *out_altitude_cm);
 
 /* -------------------------------------------------------------------------- */
 /*  누적치 / 비행 상태 reset API                                              */
