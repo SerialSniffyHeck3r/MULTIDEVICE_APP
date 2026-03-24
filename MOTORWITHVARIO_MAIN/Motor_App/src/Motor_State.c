@@ -22,6 +22,21 @@ static uint16_t motor_state_mmps_to_kmh_x10(int32_t mmps)
     return (uint16_t)((mmps * 36) / 100);
 }
 
+static void motor_state_refresh_settings_snapshot(void)
+{
+    const motor_settings_t *settings;
+
+    /* ---------------------------------------------------------------------- */
+    /*  Motor_State.settings 의 canonical owner는 Motor_Settings 저장소다.     */
+    /*  따라서 runtime copy를 갱신할 때도 항상 그 저장소에서 다시 복사한다.   */
+    /* ---------------------------------------------------------------------- */
+    settings = Motor_Settings_Get();
+    if (settings != 0)
+    {
+        memcpy(&s_motor_state.settings, settings, sizeof(s_motor_state.settings));
+    }
+}
+
 void Motor_State_Init(void)
 {
     memset(&s_motor_state, 0, sizeof(s_motor_state));
@@ -47,7 +62,6 @@ void Motor_State_Init(void)
 
 void Motor_State_Task(uint32_t now_ms)
 {
-    const motor_settings_t *settings;
     const gps_fix_basic_t *fix;
     const app_altitude_state_t *alt;
 
@@ -59,12 +73,7 @@ void Motor_State_Task(uint32_t now_ms)
     /*  뿐이다. 이후 모든 상위 앱 계산은 이 로컬 snapshot만 참조한다.          */
     /* ---------------------------------------------------------------------- */
     APP_STATE_CopySnapshot(&s_motor_state.snapshot);
-
-    settings = Motor_Settings_Get();
-    if (settings != 0)
-    {
-        memcpy(&s_motor_state.settings, settings, sizeof(s_motor_state.settings));
-    }
+    motor_state_refresh_settings_snapshot();
 
     fix = &s_motor_state.snapshot.gps.fix;
     alt = &s_motor_state.snapshot.altitude;
@@ -120,6 +129,11 @@ const motor_state_t *Motor_State_Get(void)
 motor_state_t *Motor_State_GetMutable(void)
 {
     return &s_motor_state;
+}
+
+void Motor_State_RefreshSettingsSnapshot(void)
+{
+    motor_state_refresh_settings_snapshot();
 }
 
 void Motor_State_RequestRedraw(void)

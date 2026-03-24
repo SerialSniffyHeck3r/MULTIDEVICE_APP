@@ -1,6 +1,7 @@
 
 #include "Motor_Maintenance.h"
 
+#include "Motor_Settings.h"
 #include "Motor_State.h"
 
 #include <string.h>
@@ -29,19 +30,37 @@ void Motor_Maintenance_Init(void)
 
 void Motor_Maintenance_ResetService(uint8_t service_index)
 {
-    motor_state_t *state;
+    const motor_state_t        *state;
+    motor_settings_t           *settings;
+    motor_service_item_config_t *cfg;
 
-    state = Motor_State_GetMutable();
-    if ((state == 0) || (service_index >= MOTOR_SERVICE_ITEM_COUNT))
+    state = Motor_State_Get();
+    settings = Motor_Settings_GetMutable();
+    if ((state == 0) || (settings == 0) || (service_index >= MOTOR_SERVICE_ITEM_COUNT))
     {
         return;
     }
 
-    state->settings.maintenance.items[service_index].last_service_odo_m = state->maintenance.odo_total_m;
-    state->settings.maintenance.items[service_index].last_service_engine_seconds = state->maintenance.engine_on_seconds_total;
-    state->settings.maintenance.items[service_index].last_service_year = state->snapshot.clock.local.year;
-    state->settings.maintenance.items[service_index].last_service_month = state->snapshot.clock.local.month;
-    state->settings.maintenance.items[service_index].last_service_day = state->snapshot.clock.local.day;
+    /* ---------------------------------------------------------------------- */
+    /*  persistent maintenance 기준점은 runtime copy(state.settings)가 아니라  */
+    /*  Motor_Settings canonical store를 수정해야 한다.                        */
+    /* ---------------------------------------------------------------------- */
+    cfg = &settings->maintenance.items[service_index];
+
+    cfg->last_service_odo_m = state->maintenance.odo_total_m;
+    cfg->last_service_engine_seconds = state->maintenance.engine_on_seconds_total;
+    cfg->last_service_year = state->snapshot.clock.local.year;
+    cfg->last_service_month = state->snapshot.clock.local.month;
+    cfg->last_service_day = state->snapshot.clock.local.day;
+
+    Motor_Settings_Commit();
+
+    /* ---------------------------------------------------------------------- */
+    /*  이번 프레임의 runtime settings copy도 즉시 다시 맞춰 두면             */
+    /*  다음 Motor_State_Task()까지 한 프레임 stale 상태로 남지 않는다.        */
+    /* ---------------------------------------------------------------------- */
+    Motor_State_RefreshSettingsSnapshot();
+    Motor_State_RequestRedraw();
     Motor_State_ShowToast("SERVICE RESET", 1000u);
 }
 

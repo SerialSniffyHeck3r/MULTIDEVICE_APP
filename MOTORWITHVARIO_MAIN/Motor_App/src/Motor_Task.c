@@ -108,7 +108,7 @@ void Motor_App_OnBoardDebugButtonIrq(uint32_t now_ms)
 void Motor_App_Task(void)
 {
     uint32_t now_ms;
-    motor_state_t *state;
+    const motor_state_t *state;
 
     now_ms = HAL_GetTick();
 
@@ -130,7 +130,7 @@ void Motor_App_Task(void)
 
     /* APP_STATE snapshot -> Motor runtime snapshot */
     Motor_State_Task(now_ms);
-    state = Motor_State_GetMutable();
+    state = Motor_State_Get();
     if (state == 0)
     {
         return;
