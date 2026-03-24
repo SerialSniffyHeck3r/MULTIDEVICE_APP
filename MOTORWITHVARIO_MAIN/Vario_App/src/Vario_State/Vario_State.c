@@ -405,8 +405,18 @@ static float vario_state_pick_slow_vario_mps(const app_altitude_state_t *alt,
 /* altitude / vario measurement selection                                      */
 /*                                                                            */
 /* 화면용 고도는 반드시 APP_STATE 고수준 결과를 기반으로 한다.                */
-/* 단, Flytec 스타일의 manual QNH 고도를 위해 pressure_filt_hpa_x100 을       */
-/* 이용한 재계산 경로를 허용한다.                                              */
+/* manual QNH 경로도 예외가 아니다.                                           */
+/*                                                                            */
+/* 이전 구현은 VARIO local settings에 저장된 QNH로 다시 pressure->altitude    */
+/* 재계산을 수행했다.                                                         */
+/* 그 방식은 low-level APP_ALTITUDE가 실제로 쓰는                             */
+/* APP_STATE.settings.altitude.manual_qnh_hpa_x100 과                         */
+/* upper VARIO local mirror가 어긋나면 split-brain을 만들 수 있었다.          */
+/*                                                                            */
+/* 그래서 이제 manual QNH source도                                            */
+/*   APP_STATE.altitude.alt_qnh_manual_cm                                     */
+/* 을 그대로 사용한다.                                                        */
+/* 즉, "manual QNH로 계산된 결과" 의 canonical owner 역시 APP_ALTITUDE다.    */
 /* -------------------------------------------------------------------------- */
 static bool vario_state_select_measurement(float *out_altitude_m, float *out_vario_mps)
 {
@@ -440,14 +450,12 @@ static bool vario_state_select_measurement(float *out_altitude_m, float *out_var
     {
         case VARIO_ALT_SOURCE_QNH_MANUAL:
             if ((alt->baro_valid == false) ||
-                (alt->pressure_filt_hpa_x100 <= 0) ||
-                (settings->qnh_hpa_x100 <= 0))
+                (alt->qnh_manual_hpa_x100 <= 0))
             {
                 return false;
             }
 
-            altitude_m = vario_state_pressure_to_altitude_m(((float)alt->pressure_filt_hpa_x100) * 0.01f,
-                                                            ((float)settings->qnh_hpa_x100) * 0.01f);
+            altitude_m = ((float)alt->alt_qnh_manual_cm) * 0.01f;
             *out_altitude_m = altitude_m;
             *out_vario_mps = (fast_vario_mps * (1.0f - slow_weight)) + (slow_vario_mps * slow_weight);
             return true;

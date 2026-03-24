@@ -2131,128 +2131,225 @@ static void vario_display_draw_vario_side_bar(u8g2_t *u8g2,
                                               float instant_vario_mps,
                                               float average_vario_mps)
 {
-    const vario_settings_t *settings;
-    uint8_t                 level;
-    uint8_t                 skip_slots;
-    uint8_t                 active_slots;
-    uint8_t                 instant_steps;
-    uint8_t                 avg_steps;
-    int16_t                 slot_y;
-    int16_t                 slot_h;
-    int16_t                 left_bar_x;
-    int16_t                 instant_x;
-    int16_t                 avg_x;
-    int16_t                 tick_x;
-    int16_t                 center_y;
-    int16_t                 zero_top_y;
-    uint8_t                 thick_i;
-    uint8_t                 top_scale_mps;
-    float                   top_scale;
-    float                   instant_abs;
-    float                   avg_abs;
-    bool                    instant_positive;
-    bool                    avg_positive;
+    uint8_t tick_halfstep_index;
+    int16_t left_bar_x;
+    int16_t instant_x;
+    int16_t avg_x;
+    int16_t tick_x;
+    int16_t center_y;
+    int16_t zero_top_y;
+    int16_t zero_bottom_y;
+    int16_t top_limit_y;
+    int16_t bottom_limit_y;
+    int16_t top_span_px;
+    int16_t bottom_span_px;
+    int16_t instant_fill_px;
+    int16_t avg_fill_px;
+    float clamped_instant;
+    float clamped_average;
+    uint8_t thick_i;
 
     if ((u8g2 == NULL) || (v == NULL))
     {
         return;
     }
 
-    settings = Vario_Settings_Get();
-    top_scale_mps = 4u;
-    if (settings != NULL)
-    {
-        top_scale_mps = (uint8_t)(settings->vario_range_mps_x10 / 10u);
-        if (top_scale_mps < 4u)
-        {
-            top_scale_mps = 4u;
-        }
-        else if (top_scale_mps > 8u)
-        {
-            top_scale_mps = 8u;
-        }
-    }
-    skip_slots = (top_scale_mps > 4u) ? (uint8_t)(top_scale_mps - 4u) : 0u;
-    if (skip_slots > 4u)
-    {
-        skip_slots = 4u;
-    }
-    active_slots = (uint8_t)(VARIO_UI_VARIO_HALFSTEP_COUNT - skip_slots);
-    if (active_slots == 0u)
-    {
-        active_slots = 1u;
-    }
-    top_scale = (float)top_scale_mps;
-
     left_bar_x = v->x;
-    instant_x = (int16_t)(left_bar_x + 1);
-    avg_x = (int16_t)(left_bar_x + 10);
+    instant_x  = (int16_t)(left_bar_x + 1);   /* 기존 instant bar X 유지 */
+    avg_x      = (int16_t)(left_bar_x + 10);  /* 기존 average bar X 유지 */
+    tick_x     = left_bar_x;                  /* 기존 tick 시작 X 유지 */
 
-    for (level = 0u; level < VARIO_UI_VARIO_HALFSTEP_COUNT; ++level)
+    /* ----------------------------------------------------------------------
+     * Y 스케일 기준은 viewport 가 아니라 실제 LCD 전체 높이로 고정
+     * - +5.0 tick  -> 화면 맨 위(y=0)
+     * - -5.0 tick  -> 화면 맨 아래(y=127)
+     * - X 위치와 tick 길이, instant/avg bar X 는 그대로 유지
+     * ---------------------------------------------------------------------- */
+    center_y      = (int16_t)(VARIO_LCD_H / 2);
+    zero_top_y    = (int16_t)(center_y - 1);
+    zero_bottom_y = (int16_t)(center_y + 1);
+
+    top_limit_y    = 0;
+    bottom_limit_y = (int16_t)(VARIO_LCD_H - 1);
+    /* +5.0 -> top_limit, -5.0 -> bottom_limit 이 되도록 실제 사용 가능한 span 계산 */
+    top_span_px    = (int16_t)(zero_top_y - top_limit_y);
+    bottom_span_px = (int16_t)(bottom_limit_y - zero_bottom_y);
+
+    if (top_span_px < 0)
+    {
+        top_span_px = 0;
+    }
+
+    if (bottom_span_px < 0)
+    {
+        bottom_span_px = 0;
+    }
+
+    /* ----------------------------------------------------------------------
+     * VARIO BAR / TICK SCALE
+     * - full scale : -5.0 ~ +5.0 m/s
+     * - tick count : 각 방향 10개 (0.5, 1.0, 1.5 ... 5.0)
+     * - x.5 : small tick
+     * - x.0 : major tick
+     * - tick X / tick width / instant X / avg X 는 기존 그대로 유지
+     * - tick Y 는 bar fill 과 같은 환산식을 써서 정확히 같은 스케일에 올라가게 한다
+     * ---------------------------------------------------------------------- */
+    for (tick_halfstep_index = 1u; tick_halfstep_index <= 10u; ++tick_halfstep_index)
     {
         uint8_t tick_w;
+        int16_t up_offset_px;
+        int16_t down_offset_px;
+        int16_t up_y;
+        int16_t down_y;
 
-        tick_w = ((level % 2u) != 0u) ? VARIO_UI_SCALE_MAJOR_W : VARIO_UI_SCALE_MINOR_W;
-        tick_x = left_bar_x;
+        tick_w = ((tick_halfstep_index % 2u) == 0u) ? VARIO_UI_SCALE_MAJOR_W
+                                                    : VARIO_UI_SCALE_MINOR_W;
 
-        vario_display_get_vario_slot_rect(v, true, level, &slot_y, &slot_h);
-        u8g2_DrawHLine(u8g2, tick_x, slot_y, tick_w);
+        up_offset_px = (int16_t)lroundf((((float)tick_halfstep_index) / 10.0f) * (float)top_span_px);
+        down_offset_px = (int16_t)lroundf((((float)tick_halfstep_index) / 10.0f) * (float)bottom_span_px);
 
-        vario_display_get_vario_slot_rect(v, false, level, &slot_y, &slot_h);
-        u8g2_DrawHLine(u8g2, tick_x, slot_y, tick_w);
+        up_y = (int16_t)(zero_top_y - up_offset_px);
+        down_y = (int16_t)(zero_bottom_y + down_offset_px);
+
+        if (up_y < top_limit_y)
+        {
+            up_y = top_limit_y;
+        }
+        if (up_y > bottom_limit_y)
+        {
+            up_y = bottom_limit_y;
+        }
+
+        if (down_y < top_limit_y)
+        {
+            down_y = top_limit_y;
+        }
+        if (down_y > bottom_limit_y)
+        {
+            down_y = bottom_limit_y;
+        }
+
+        u8g2_DrawHLine(u8g2, tick_x, up_y, tick_w);
+        u8g2_DrawHLine(u8g2, tick_x, down_y, tick_w);
     }
 
-    instant_positive = (instant_vario_mps >= 0.0f) ? true : false;
-    avg_positive = (average_vario_mps >= 0.0f) ? true : false;
-    instant_abs = vario_display_absf(vario_display_clampf(instant_vario_mps, -top_scale, top_scale));
-    avg_abs = vario_display_absf(vario_display_clampf(average_vario_mps, -top_scale, top_scale));
+    clamped_instant = vario_display_clampf(instant_vario_mps, -5.0f, 5.0f);
+    clamped_average = vario_display_clampf(average_vario_mps, -5.0f, 5.0f);
 
-    instant_steps = (uint8_t)ceilf((instant_abs / top_scale) * (float)active_slots);
-    avg_steps = (uint8_t)ceilf((avg_abs / top_scale) * (float)active_slots);
-
-    if ((instant_abs > 0.0f) && (instant_steps == 0u))
+    /* +5.0m/s 는 위 끝, -5.0m/s 는 아래 끝에 닿도록 동적 스케일 */
+    if (clamped_instant >= 0.0f)
     {
-        instant_steps = 1u;
+        instant_fill_px = (int16_t)lroundf((vario_display_absf(clamped_instant) / 5.0f) * (float)top_span_px);
     }
-    if ((avg_abs > 0.0f) && (avg_steps == 0u))
+    else
     {
-        avg_steps = 1u;
+        instant_fill_px = (int16_t)lroundf((vario_display_absf(clamped_instant) / 5.0f) * (float)bottom_span_px);
     }
-    if (instant_steps > active_slots)
+
+    if (clamped_average >= 0.0f)
     {
-        instant_steps = active_slots;
+        avg_fill_px = (int16_t)lroundf((vario_display_absf(clamped_average) / 5.0f) * (float)top_span_px);
     }
-    if (avg_steps > active_slots)
+    else
     {
-        avg_steps = active_slots;
+        avg_fill_px = (int16_t)lroundf((vario_display_absf(clamped_average) / 5.0f) * (float)bottom_span_px);
     }
 
-    for (level = 0u; level < instant_steps; ++level)
+    /* 아주 작은 값도 0이 아니면 1px는 보이게 유지 */
+    if ((vario_display_absf(clamped_instant) > 0.0f) && (instant_fill_px <= 0))
     {
-        uint8_t slot_level;
-
-        slot_level = (uint8_t)(skip_slots + level);
-        vario_display_get_vario_slot_rect(v, instant_positive, slot_level, &slot_y, &slot_h);
-        u8g2_DrawBox(u8g2, instant_x, slot_y, VARIO_UI_GAUGE_INSTANT_W, slot_h);
+        instant_fill_px = 1;
     }
 
-    for (level = 0u; level < avg_steps; ++level)
+    if ((vario_display_absf(clamped_average) > 0.0f) && (avg_fill_px <= 0))
     {
-        uint8_t slot_level;
-
-        slot_level = (uint8_t)(skip_slots + level);
-        vario_display_get_vario_slot_rect(v, avg_positive, slot_level, &slot_y, &slot_h);
-        u8g2_DrawBox(u8g2, avg_x, slot_y, VARIO_UI_GAUGE_AVG_W, slot_h);
+        avg_fill_px = 1;
     }
 
-    center_y = (int16_t)(v->y + (v->h / 2));
-    zero_top_y = (int16_t)(center_y - (VARIO_UI_VARIO_ZERO_LINE_THICKNESS / 2));
+    /* instant bar */
+    if (clamped_instant > 0.0f)
+    {
+        int16_t y;
+        int16_t h;
 
+        y = (int16_t)(zero_top_y - instant_fill_px);
+        if (y < top_limit_y)
+        {
+            y = top_limit_y;
+        }
+
+        h = (int16_t)(zero_top_y - y);
+        if (h > 0)
+        {
+            u8g2_DrawBox(u8g2, instant_x, y, VARIO_UI_GAUGE_INSTANT_W, h);
+        }
+    }
+    else if (clamped_instant < 0.0f)
+    {
+        int16_t y;
+        int16_t h;
+
+        y = (int16_t)(zero_bottom_y + 1);
+        h = instant_fill_px;
+
+        if ((y + h - 1) > bottom_limit_y)
+        {
+            h = (int16_t)(bottom_limit_y - y + 1);
+        }
+
+        if (h > 0)
+        {
+            u8g2_DrawBox(u8g2, instant_x, y, VARIO_UI_GAUGE_INSTANT_W, h);
+        }
+    }
+
+    /* average bar */
+    if (clamped_average > 0.0f)
+    {
+        int16_t y;
+        int16_t h;
+
+        y = (int16_t)(zero_top_y - avg_fill_px);
+        if (y < top_limit_y)
+        {
+            y = top_limit_y;
+        }
+
+        h = (int16_t)(zero_top_y - y);
+        if (h > 0)
+        {
+            u8g2_DrawBox(u8g2, avg_x, y, VARIO_UI_GAUGE_AVG_W, h);
+        }
+    }
+    else if (clamped_average < 0.0f)
+    {
+        int16_t y;
+        int16_t h;
+
+        y = (int16_t)(zero_bottom_y + 1);
+        h = avg_fill_px;
+
+        if ((y + h - 1) > bottom_limit_y)
+        {
+            h = (int16_t)(bottom_limit_y - y + 1);
+        }
+
+        if (h > 0)
+        {
+            u8g2_DrawBox(u8g2, avg_x, y, VARIO_UI_GAUGE_AVG_W, h);
+        }
+    }
+
+    /* center zero line 은 fill 후 다시 덮어 그려 기준선이 항상 살아 있게 유지 */
     for (thick_i = 0u; thick_i < VARIO_UI_VARIO_ZERO_LINE_THICKNESS; ++thick_i)
     {
         int16_t zero_y;
+
         zero_y = (int16_t)(zero_top_y + (int16_t)thick_i);
-        u8g2_DrawHLine(u8g2, left_bar_x, zero_y, VARIO_UI_VARIO_ZERO_LINE_W);
+        if ((zero_y >= top_limit_y) && (zero_y <= bottom_limit_y))
+        {
+            u8g2_DrawHLine(u8g2, left_bar_x, zero_y, VARIO_UI_VARIO_ZERO_LINE_W);
+        }
     }
 }
 

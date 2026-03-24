@@ -225,7 +225,7 @@ static void vario_task_apply_platform_settings(void)
 /* -------------------------------------------------------------------------- */
 static void vario_task_run_legacy_profile(uint32_t now_ms)
 {
-    APP_ALTITUDE_DebugSetUiActive(false, now_ms);
+    Audio_App_ReleaseVariometer(now_ms);
     UI_Engine_RequestRedraw();
     UI_Engine_Task(now_ms);
 }
@@ -400,7 +400,7 @@ void Vario_App_Task(void)
         /* 전원 오버레이가 LCD / 버튼 queue 를 점유하는 동안에는                */
         /* VARIO tone ownership 을 반드시 해제한다.                            */
         /* ------------------------------------------------------------------ */
-        APP_ALTITUDE_DebugSetUiActive(false, now_ms);
+        Audio_App_ReleaseVariometer(now_ms);
     }
     else if (UI_Engine_IsLegacyBootMode() != 0u)
     {

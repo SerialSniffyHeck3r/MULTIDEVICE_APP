@@ -2,11 +2,34 @@
 
 #include "../Vario_State/Vario_State.h"
 
+#include "APP_STATE.h"
+
 #include <math.h>
 #include <stddef.h>
 #include <stdio.h>
 
 static vario_settings_t s_vario_settings;
+
+/* -------------------------------------------------------------------------- */
+/*  Manual QNH compatibility / ownership policy                               */
+/*                                                                            */
+/*  canonical owner                                                            */
+/*    APP_STATE.settings.altitude.manual_qnh_hpa_x100                         */
+/*                                                                            */
+/*  local mirror                                                               */
+/*    s_vario_settings.qnh_hpa_x100                                           */
+/*                                                                            */
+/*  이유                                                                       */
+/*  - 기존 상위 VARIO UI 코드가 settings pointer를 통해 QNH를 읽는 구조를      */
+/*    한 번에 깨지 않고                                                       */
+/*  - 실제 low-level altitude 서비스와의 source-of-truth는 APP_STATE로         */
+/*    통일하기 위해서다.                                                      */
+/* -------------------------------------------------------------------------- */
+#define VARIO_SETTINGS_QNH_DEFAULT_HPA_X100       101325
+#define VARIO_SETTINGS_QNH_RUNTIME_MIN_HPA_X100    95000
+#define VARIO_SETTINGS_QNH_RUNTIME_MAX_HPA_X100   105500
+#define VARIO_SETTINGS_QNH_SNAPSHOT_MIN_HPA_X100   80000
+#define VARIO_SETTINGS_QNH_SNAPSHOT_MAX_HPA_X100  110000
 
 typedef enum
 {
@@ -116,6 +139,62 @@ static int32_t vario_settings_clamp_s32(int32_t value, int32_t min_v, int32_t ma
     }
 
     return value;
+}
+
+static int32_t vario_settings_clamp_manual_qnh_x100(int32_t qnh_hpa_x100)
+{
+    return vario_settings_clamp_s32(qnh_hpa_x100,
+                                    VARIO_SETTINGS_QNH_RUNTIME_MIN_HPA_X100,
+                                    VARIO_SETTINGS_QNH_RUNTIME_MAX_HPA_X100);
+}
+
+static int32_t vario_settings_read_manual_qnh_from_app_state(void)
+{
+    app_settings_t shared_settings;
+    int32_t        qnh_hpa_x100;
+
+    APP_STATE_CopySettingsSnapshot(&shared_settings);
+    qnh_hpa_x100 = shared_settings.altitude.manual_qnh_hpa_x100;
+
+    if ((qnh_hpa_x100 < VARIO_SETTINGS_QNH_SNAPSHOT_MIN_HPA_X100) ||
+        (qnh_hpa_x100 > VARIO_SETTINGS_QNH_SNAPSHOT_MAX_HPA_X100))
+    {
+        /* ------------------------------------------------------------------ */
+        /*  cold boot / partially initialized state 방어                       */
+        /*                                                                    */
+        /*  APP_STATE가 아직 기본값을 싣지 못했거나, 저장된 값이 비정상 범위면  */
+        /*  local mirror의 기존 값 또는 안전 기본값으로 복귀한다.             */
+        /* ------------------------------------------------------------------ */
+        if ((s_vario_settings.qnh_hpa_x100 >= VARIO_SETTINGS_QNH_RUNTIME_MIN_HPA_X100) &&
+            (s_vario_settings.qnh_hpa_x100 <= VARIO_SETTINGS_QNH_RUNTIME_MAX_HPA_X100))
+        {
+            return s_vario_settings.qnh_hpa_x100;
+        }
+
+        return VARIO_SETTINGS_QNH_DEFAULT_HPA_X100;
+    }
+
+    return vario_settings_clamp_manual_qnh_x100(qnh_hpa_x100);
+}
+
+static void vario_settings_store_manual_qnh_to_app_state(int32_t qnh_hpa_x100)
+{
+    app_settings_t shared_settings;
+    int32_t        clamped_qnh_hpa_x100;
+
+    clamped_qnh_hpa_x100 = vario_settings_clamp_manual_qnh_x100(qnh_hpa_x100);
+
+    APP_STATE_CopySettingsSnapshot(&shared_settings);
+    if (shared_settings.altitude.manual_qnh_hpa_x100 != clamped_qnh_hpa_x100)
+    {
+        shared_settings.altitude.manual_qnh_hpa_x100 = clamped_qnh_hpa_x100;
+        APP_STATE_StoreSettingsSnapshot(&shared_settings);
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /*  legacy 화면 코드 호환용 local mirror 동기화                            */
+    /* ---------------------------------------------------------------------- */
+    s_vario_settings.qnh_hpa_x100 = clamped_qnh_hpa_x100;
 }
 
 static uint16_t vario_settings_clamp_u16(uint16_t value, uint16_t min_v, uint16_t max_v)
@@ -547,7 +626,12 @@ static void vario_settings_format_alt2_ref(char *buf, size_t buf_len, int32_t al
 
 void Vario_Settings_Init(void)
 {
-    s_vario_settings.qnh_hpa_x100                  = 101325;
+    /* ---------------------------------------------------------------------- */
+    /*  QNH는 local struct가 아니라 APP_STATE.settings가 canonical owner다.   */
+    /*  init 시에는 current snapshot 값을 읽어 local compatibility mirror만   */
+    /*  맞춰 둔다.                                                             */
+    /* ---------------------------------------------------------------------- */
+    s_vario_settings.qnh_hpa_x100                  = vario_settings_read_manual_qnh_from_app_state();
     s_vario_settings.alt2_reference_cm             = 0;
     s_vario_settings.altitude_unit                 = VARIO_ALT_UNIT_METER;
     s_vario_settings.alt2_unit                     = VARIO_ALT_UNIT_FEET;
@@ -592,7 +676,23 @@ void Vario_Settings_Init(void)
 
 const vario_settings_t *Vario_Settings_Get(void)
 {
+    /* ---------------------------------------------------------------------- */
+    /*  legacy 코드가 settings->qnh_hpa_x100 를 그대로 읽더라도               */
+    /*  stale mirror를 보지 않도록 getter 진입 시점에 동기화해 둔다.          */
+    /* ---------------------------------------------------------------------- */
+    s_vario_settings.qnh_hpa_x100 = vario_settings_read_manual_qnh_from_app_state();
     return &s_vario_settings;
+}
+
+int32_t Vario_Settings_GetManualQnhHpaX100(void)
+{
+    s_vario_settings.qnh_hpa_x100 = vario_settings_read_manual_qnh_from_app_state();
+    return s_vario_settings.qnh_hpa_x100;
+}
+
+void Vario_Settings_SetManualQnhHpaX100(int32_t qnh_hpa_x100)
+{
+    vario_settings_store_manual_qnh_to_app_state(qnh_hpa_x100);
 }
 
 void Vario_Settings_AdjustQuickSet(vario_quickset_item_t item, int8_t direction)
@@ -606,10 +706,8 @@ void Vario_Settings_AdjustQuickSet(vario_quickset_item_t item, int8_t direction)
     switch (item)
     {
         case VARIO_QUICKSET_ITEM_QNH:
-            s_vario_settings.qnh_hpa_x100 =
-                vario_settings_clamp_s32(s_vario_settings.qnh_hpa_x100 + ((int32_t)direction * qnh_step_x100),
-                                         95000,
-                                         105500);
+            Vario_Settings_SetManualQnhHpaX100(Vario_Settings_GetManualQnhHpaX100() +
+                                               ((int32_t)direction * qnh_step_x100));
             break;
 
         case VARIO_QUICKSET_ITEM_ALT_UNIT:
@@ -874,7 +972,7 @@ float Vario_Settings_TemperatureCToDisplayFloat(float temperature_c)
 
 float Vario_Settings_GetQnhDisplayFloat(void)
 {
-    return Vario_Settings_PressureHpaToDisplayFloat(((float)s_vario_settings.qnh_hpa_x100) * 0.01f);
+    return Vario_Settings_PressureHpaToDisplayFloat(((float)Vario_Settings_GetManualQnhHpaX100()) * 0.01f);
 }
 
 void Vario_Settings_FormatQnhText(char *buf, size_t buf_len)

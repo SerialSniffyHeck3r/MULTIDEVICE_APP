@@ -112,7 +112,7 @@ typedef enum
 /*  ALT source                                                                */
 /*                                                                            */
 /*  DISPLAY      : APP_ALTITUDE 가 최종 UI용으로 공개한 alt_display_cm         */
-/*  QNH_MANUAL   : APP_STATE pressure_filt + VARIO 수동 QNH 로 재계산          */
+/*  QNH_MANUAL   : APP_ALTITUDE가 APP_STATE에 publish한 manual-QNH 결과 사용    */
 /*  FUSED_NOIMU  : IMU 미사용 fused altitude                                  */
 /*  FUSED_IMU    : IMU 보조 fused altitude                                    */
 /*  GPS_HMSL     : GPS hMSL                                                    */
@@ -203,6 +203,15 @@ typedef struct
     /*  수동 QNH                                                               */
     /*  - 단위 : 0.01 hPa                                                      */
     /*  - 예   : 1013.25 hPa -> 101325                                         */
+    /*                                                                        */
+    /*  중요: canonical owner는                                                */
+    /*        APP_STATE.settings.altitude.manual_qnh_hpa_x100 이다.           */
+    /*                                                                        */
+    /*  이 필드는 기존 화면/설정 코드가 그대로 컴파일되도록 남겨 둔            */
+    /*  compatibility mirror다.                                                */
+    /*  새 코드는 이 멤버를 직접 믿지 말고                                    */
+    /*  Vario_Settings_GetManualQnhHpaX100() /                                */
+    /*  Vario_Settings_SetManualQnhHpaX100() 를 사용한다.                     */
     /* ---------------------------------------------------------------------- */
     int32_t qnh_hpa_x100;
 
@@ -281,6 +290,17 @@ typedef struct
 
 void Vario_Settings_Init(void);
 const vario_settings_t *Vario_Settings_Get(void);
+
+/* -------------------------------------------------------------------------- */
+/*  Manual QNH canonical access                                               */
+/*                                                                            */
+/*  upper VARIO layer는 더 이상 local mirror를 source-of-truth로 쓰지 않고    */
+/*  APP_STATE.settings.altitude.manual_qnh_hpa_x100 을 통해 접근한다.         */
+/*  이 API는 기존 구조를 크게 깨지 않으면서 single-source-of-truth를           */
+/*  회복하기 위한 얇은 호환 계층이다.                                         */
+/* -------------------------------------------------------------------------- */
+int32_t Vario_Settings_GetManualQnhHpaX100(void);
+void    Vario_Settings_SetManualQnhHpaX100(int32_t qnh_hpa_x100);
 
 void Vario_Settings_AdjustQuickSet(vario_quickset_item_t item, int8_t direction);
 void Vario_Settings_AdjustValue(vario_value_item_t item, int8_t direction);

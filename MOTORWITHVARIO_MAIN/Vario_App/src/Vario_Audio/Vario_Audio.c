@@ -1,7 +1,6 @@
 #include "Vario_Audio.h"
 
-#include "APP_ALTITUDE.h"
-#include "Audio_Driver.h"
+#include "Audio_App.h"
 #include "Vario_Settings.h"
 #include "Vario_State.h"
 
@@ -104,11 +103,10 @@ void Vario_Audio_Init(void)
     settings = Vario_Settings_Get();
     volume_percent = vario_audio_clamp_percent(settings->audio_volume_percent);
 
-    Audio_Driver_SetVolumePercent(volume_percent);
+    Audio_App_SetVolumePercent(volume_percent);
     s_vario_audio_last_applied_volume = volume_percent;
 
-    APP_ALTITUDE_DebugSetUiActive(false, 0u);
-    APP_ALTITUDE_DebugSetAudioVarioOverride(false, 0, 0u);
+    Audio_App_ReleaseVariometer(0u);
 }
 
 void Vario_Audio_Task(uint32_t now_ms)
@@ -127,7 +125,7 @@ void Vario_Audio_Task(uint32_t now_ms)
     volume_percent = vario_audio_clamp_percent(settings->audio_volume_percent);
     if (volume_percent != s_vario_audio_last_applied_volume)
     {
-        Audio_Driver_SetVolumePercent(volume_percent);
+        Audio_App_SetVolumePercent(volume_percent);
         s_vario_audio_last_applied_volume = volume_percent;
     }
 
@@ -143,8 +141,7 @@ void Vario_Audio_Task(uint32_t now_ms)
         audio_vario_cms = vario_audio_round_mps_to_cms(rt->fast_vario_bar_mps);
     }
 
-    APP_ALTITUDE_DebugSetUiActive(audio_active, now_ms);
-    APP_ALTITUDE_DebugSetAudioVarioOverride(audio_active,
-                                            audio_vario_cms,
-                                            now_ms);
+    Audio_App_SetVariometerState(audio_active,
+                                 audio_vario_cms,
+                                 now_ms);
 }
