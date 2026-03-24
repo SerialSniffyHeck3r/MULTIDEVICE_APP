@@ -1,5 +1,6 @@
 #include "Audio_App.h"
 
+#include "APP_ALTITUDE.h"
 #include "Audio_Driver.h"
 #include "Audio_Presets.h"
 
@@ -41,6 +42,16 @@ static void Audio_App_PlayMonoPreset(audio_note_preset_id_t note_preset_id)
                                              note_preset_id);
 }
 
+static uint8_t Audio_App_ClampPercent(uint8_t volume_percent)
+{
+    if (volume_percent > 100u)
+    {
+        return 100u;
+    }
+
+    return volume_percent;
+}
+
 /* -------------------------------------------------------------------------- */
 /*  공개 API: init                                                             */
 /*                                                                            */
@@ -73,6 +84,47 @@ void Audio_App_Task(uint32_t now_ms)
     /*  같은 앱 정책 로직이 들어올 수 있다.                                     */
     /* ---------------------------------------------------------------------- */
     (void)now_ms;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Upper-app convenience wrappers                                            */
+/* -------------------------------------------------------------------------- */
+void Audio_App_SetVolumePercent(uint8_t volume_percent)
+{
+    /* ---------------------------------------------------------------------- */
+    /*  현재 시점의 canonical volume sink는 Audio_Driver다.                    */
+    /*  upper layer는 clamp/전달만 Audio_App를 통해 수행한다.                 */
+    /* ---------------------------------------------------------------------- */
+    Audio_Driver_SetVolumePercent(Audio_App_ClampPercent(volume_percent));
+}
+
+void Audio_App_SetVariometerState(bool active, int32_t vario_cms, uint32_t now_ms)
+{
+    if (active == false)
+    {
+        Audio_App_ReleaseVariometer(now_ms);
+        return;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /*  현재 variometer tone transport는 legacy APP_ALTITUDE debug audio path  */
+    /*  위에 얹혀 있다.                                                        */
+    /*  upper VARIO 앱이 그 사실을 직접 알 필요 없도록                        */
+    /*  façade 안에서만 우회 경로를 유지한다.                                  */
+    /* ---------------------------------------------------------------------- */
+    APP_ALTITUDE_DebugSetUiActive(true, now_ms);
+    APP_ALTITUDE_DebugSetAudioVarioOverride(true, vario_cms, now_ms);
+}
+
+void Audio_App_ReleaseVariometer(uint32_t now_ms)
+{
+    /* ---------------------------------------------------------------------- */
+    /*  tone ownership 해제는 항상 "UI inactive"를 먼저 알린다.              */
+    /*  APP_ALTITUDE 쪽이 자기 소유 tone만 안전하게 정지하고                   */
+    /*  stale override latch까지 같이 지운다.                                 */
+    /* ---------------------------------------------------------------------- */
+    APP_ALTITUDE_DebugSetUiActive(false, now_ms);
+    APP_ALTITUDE_DebugSetAudioVarioOverride(false, 0, now_ms);
 }
 
 /* -------------------------------------------------------------------------- */
