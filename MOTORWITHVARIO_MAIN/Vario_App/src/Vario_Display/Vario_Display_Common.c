@@ -852,6 +852,32 @@ static void vario_display_format_altitude_with_unit(char *buf,
              (long)Vario_Settings_AltitudeMetersToDisplayRoundedWithUnit(altitude_m, unit));
 }
 
+static void vario_display_format_filtered_selected_altitude(char *buf,
+                                                            size_t buf_len,
+                                                            const vario_runtime_t *rt,
+                                                            vario_alt_unit_t unit)
+{
+    if ((buf == NULL) || (buf_len == 0u) || (rt == NULL))
+    {
+        return;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* 큰 ALT1 숫자는 APP_STATE unit bank를 그대로 다시 읽지 않고,             */
+    /* Vario_State가 5Hz cadence로 publish한 "표시 전용 고도 숫자"를 쓴다.     */
+    /*                                                                        */
+    /* 이유                                                                   */
+    /* - low-level source selection은 그대로 존중한다.                         */
+    /* - 하지만 화면에 보이는 큰 숫자만은 upper layer의 단순 필터/hysteresis   */
+    /*   결과를 사용해서 과도한 떨림 없이 읽기 쉽게 만든다.                    */
+    /* - feet/meter 환산은 기존 helper를 그대로 사용한다.                      */
+    /* ---------------------------------------------------------------------- */
+    vario_display_format_altitude_with_unit(buf,
+                                            buf_len,
+                                            rt->baro_altitude_m,
+                                            unit);
+}
+
 static void vario_display_format_speed_value(char *buf, size_t buf_len, float speed_kmh)
 {
     float display_value;
@@ -1209,8 +1235,6 @@ static void vario_display_get_bar_display_values(const vario_runtime_t *rt,
     float target_gs_kmh;
     uint32_t now_ms;
     float dt_s;
-    float innovation;
-    float tau_s;
     float alpha;
 
     if ((out_vario_bar_mps == NULL) || (out_avg_vario_mps == NULL) ||
@@ -1233,75 +1257,42 @@ static void vario_display_get_bar_display_values(const vario_runtime_t *rt,
     target_gs_kmh = vario_display_clampf(rt->gs_bar_speed_kmh, 0.0f, 120.0f);
     now_ms = (rt->last_task_ms != 0u) ? rt->last_task_ms : rt->last_publish_ms;
 
+    /* ---------------------------------------------------------------------- */
+    /* 좌측 VARIO bar는 더 이상 display layer에서 다시 필터링하지 않는다.      */
+    /*                                                                        */
+    /* source                                                                  */
+    /* - rt->fast_vario_bar_mps = Vario_State가 low-level fast path를           */
+    /*   그대로 라우팅한 값                                                     */
+    /*                                                                        */
+    /* 이유                                                                   */
+    /* - legacy debug에서 이미 sound / instant bar 체감이 충분히 좋은데         */
+    /*   화면 렌더러가 여기서 attack/release와 zero latch를 또 얹으면            */
+    /*   손맛이 죽고 반응이 느려진다.                                           */
+    /*                                                                        */
+    /* 따라서 이 함수의 역할은                                                 */
+    /* - vario bar : 단순 clamp / 전달                                          */
+    /* - GS bar    : 기존처럼 가벼운 smoothing 유지                             */
+    /* 로 제한한다.                                                             */
+    /* ---------------------------------------------------------------------- */
+    *out_vario_bar_mps = target_vario_mps;
+
     if ((s_vario_ui_dynamic.last_bar_update_ms == 0u) || (now_ms == 0u))
     {
-        s_vario_ui_dynamic.filtered_vario_bar_mps = target_vario_mps;
         s_vario_ui_dynamic.filtered_gs_bar_kmh = target_gs_kmh;
-        s_vario_ui_dynamic.vario_bar_zero_latched =
-            (vario_display_absf(target_vario_mps) < 0.08f) ? true : false;
         s_vario_ui_dynamic.last_bar_update_ms = now_ms;
     }
     else if (now_ms != s_vario_ui_dynamic.last_bar_update_ms)
     {
-        /* ------------------------------------------------------------------ */
-        /* side bar 는 숫자와 별도 경로                                        */
-        /* - 10 Hz 주기로만 갱신해서 프레임마다 덜 흔들리게 하고                */
-        /* - fast vario path 에 attack/release + zero hysteresis 를 추가한다.   */
-        /* ------------------------------------------------------------------ */
-        if ((now_ms - s_vario_ui_dynamic.last_bar_update_ms) >= 100u)
-        {
-            dt_s = ((float)(now_ms - s_vario_ui_dynamic.last_bar_update_ms)) * 0.001f;
-            dt_s = vario_display_clampf(dt_s, 0.010f, 0.250f);
-
-            innovation = target_vario_mps - s_vario_ui_dynamic.filtered_vario_bar_mps;
-            if (((target_vario_mps >= 0.0f) && (s_vario_ui_dynamic.filtered_vario_bar_mps >= 0.0f) &&
-                 (target_vario_mps > s_vario_ui_dynamic.filtered_vario_bar_mps)) ||
-                ((target_vario_mps <= 0.0f) && (s_vario_ui_dynamic.filtered_vario_bar_mps <= 0.0f) &&
-                 (target_vario_mps < s_vario_ui_dynamic.filtered_vario_bar_mps)))
-            {
-                tau_s = 0.045f;
-            }
-            else
-            {
-                tau_s = 0.110f;
-            }
-
-            alpha = dt_s / (tau_s + dt_s);
-            s_vario_ui_dynamic.filtered_vario_bar_mps += alpha * innovation;
-
-            if (s_vario_ui_dynamic.vario_bar_zero_latched != false)
-            {
-                if (vario_display_absf(target_vario_mps) > 0.18f)
-                {
-                    s_vario_ui_dynamic.vario_bar_zero_latched = false;
-                }
-                else
-                {
-                    s_vario_ui_dynamic.filtered_vario_bar_mps = 0.0f;
-                }
-            }
-            else if ((vario_display_absf(target_vario_mps) < 0.06f) &&
-                     (vario_display_absf(s_vario_ui_dynamic.filtered_vario_bar_mps) < 0.12f))
-            {
-                s_vario_ui_dynamic.vario_bar_zero_latched = true;
-                s_vario_ui_dynamic.filtered_vario_bar_mps = 0.0f;
-            }
-
-            dt_s = ((float)(now_ms - s_vario_ui_dynamic.last_bar_update_ms)) * 0.001f;
-            dt_s = vario_display_clampf(dt_s, 0.010f, 0.250f);
-            alpha = dt_s / (0.12f + dt_s);
-            s_vario_ui_dynamic.filtered_gs_bar_kmh += alpha *
-                (target_gs_kmh - s_vario_ui_dynamic.filtered_gs_bar_kmh);
-
-            s_vario_ui_dynamic.filtered_vario_bar_mps =
-                vario_display_clampf(s_vario_ui_dynamic.filtered_vario_bar_mps, -8.0f, 8.0f);
-            s_vario_ui_dynamic.filtered_gs_bar_kmh =
-                vario_display_clampf(s_vario_ui_dynamic.filtered_gs_bar_kmh, 0.0f, 120.0f);
-            s_vario_ui_dynamic.last_bar_update_ms = now_ms;
-        }
+        dt_s = ((float)(now_ms - s_vario_ui_dynamic.last_bar_update_ms)) * 0.001f;
+        dt_s = vario_display_clampf(dt_s, 0.010f, 0.250f);
+        alpha = dt_s / (0.12f + dt_s);
+        s_vario_ui_dynamic.filtered_gs_bar_kmh += alpha *
+            (target_gs_kmh - s_vario_ui_dynamic.filtered_gs_bar_kmh);
+        s_vario_ui_dynamic.filtered_gs_bar_kmh =
+            vario_display_clampf(s_vario_ui_dynamic.filtered_gs_bar_kmh, 0.0f, 120.0f);
+        s_vario_ui_dynamic.last_bar_update_ms = now_ms;
     }
 
-    *out_vario_bar_mps = s_vario_ui_dynamic.filtered_vario_bar_mps;
     *out_avg_vario_mps = average_vario_mps;
     *out_gs_bar_kmh = s_vario_ui_dynamic.filtered_gs_bar_kmh;
     *out_avg_speed_kmh = average_speed_kmh;
@@ -1969,7 +1960,6 @@ static void vario_display_format_alt2_text(char *value_buf,
                                            const vario_runtime_t *rt,
                                            const vario_settings_t *settings)
 {
-    const app_altitude_linear_units_t *absolute_units;
     const app_altitude_linear_units_t *gps_units;
     long                               fl_value;
 
@@ -1979,16 +1969,22 @@ static void vario_display_format_alt2_text(char *value_buf,
         return;
     }
 
-    absolute_units = vario_display_get_selected_absolute_unit_bank(rt, settings);
     gps_units = &rt->altitude.units.alt_gps_hmsl;
 
     switch (settings->alt2_mode)
     {
         case VARIO_ALT2_MODE_ABSOLUTE:
-            vario_display_format_altitude_from_unit_bank(value_buf,
-                                                         value_len,
-                                                         absolute_units,
-                                                         settings->alt2_unit);
+            /* ------------------------------------------------------------------ */
+            /* ALT2가 absolute mode일 때도 ALT1과 같은 5Hz filtered absolute       */
+            /* 숫자를 사용한다.                                                    */
+            /*                                                                    */
+            /* source 선택 자체는 여전히 Vario_State 쪽 altitude_source 규칙을      */
+            /* 따른다. 여기서는 오직 "표시 숫자"만 같은 cadence로 맞춘다.        */
+            /* ------------------------------------------------------------------ */
+            vario_display_format_filtered_selected_altitude(value_buf,
+                                                            value_len,
+                                                            rt,
+                                                            settings->alt2_unit);
             snprintf(unit_buf,
                      unit_len,
                      "%s",
@@ -2090,10 +2086,10 @@ static void vario_display_draw_top_right_altitudes(u8g2_t *u8g2,
 
     right_limit_x = (int16_t)(v->x + v->w - VARIO_UI_SIDE_BAR_W - VARIO_UI_TOP_RIGHT_PAD_X);
 
-    vario_display_format_altitude_from_unit_bank(alt1_text,
-                                                sizeof(alt1_text),
-                                                vario_display_get_selected_absolute_unit_bank(rt, settings),
-                                                settings->altitude_unit);
+    vario_display_format_filtered_selected_altitude(alt1_text,
+                                                    sizeof(alt1_text),
+                                                    rt,
+                                                    settings->altitude_unit);
     vario_display_format_alt2_text(alt2_text, sizeof(alt2_text), alt2_unit_buf, sizeof(alt2_unit_buf), rt, settings);
     vario_display_format_altitude_with_unit(alt3_text, sizeof(alt3_text), rt->alt3_accum_gain_m, settings->altitude_unit);
     alt1_unit = Vario_Settings_GetAltitudeUnitTextForUnit(settings->altitude_unit);
