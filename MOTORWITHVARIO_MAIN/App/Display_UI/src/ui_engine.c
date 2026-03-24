@@ -12,6 +12,8 @@
 #include "ui_screen_vario.h"
 #include "ui_debug_legacy.h"
 
+#include "Vario_State.h"
+
 #include "APP_STATE.h"
 #include "button.h"
 #include "u8g2_uc1608_stm32.h"
@@ -62,6 +64,19 @@ static uint8_t s_force_redraw = 1u;
 static ui_screen_id_t s_return_screen_from_gps = UI_SCREEN_TEST;
 
 /* -------------------------------------------------------------------------- */
+/* Last drawn frame snapshot                                                   */
+/*                                                                            */
+/* redraw gate 가 도입된 뒤에는 "직전 실제로 그린 프레임" 과 현재 상태를 비교해  */
+/* draw 필요성을 판정해야 한다.                                                */
+/* -------------------------------------------------------------------------- */
+static uint8_t s_last_draw_valid = 0u;
+static ui_screen_id_t s_last_draw_screen = UI_SCREEN_COUNT;
+static uint32_t s_last_draw_pressed_mask = 0u;
+static ui_statusbar_model_t s_last_draw_status_model;
+static bool s_last_draw_fast_toggle = false;
+static bool s_last_draw_slow_toggle = false;
+
+/* -------------------------------------------------------------------------- */
 /* Legacy debug F1 long-press return tracking                                  */
 /* -------------------------------------------------------------------------- */
 static uint32_t s_debug_f1_hold_start_ms = 0u;
@@ -104,6 +119,9 @@ static void ui_engine_handle_gps_screen_action(ui_screen_gps_action_t action);
 static void ui_engine_update_debug_f1_hold_return(uint32_t now_ms);
 
 static void ui_engine_build_status_model(ui_statusbar_model_t *out_model);
+static bool ui_engine_status_model_changed(const ui_statusbar_model_t *status_model);
+static bool ui_engine_should_draw(const ui_engine_compose_plan_t *plan, const ui_statusbar_model_t *status_model);
+static void ui_engine_capture_draw_snapshot(const ui_engine_compose_plan_t *plan, const ui_statusbar_model_t *status_model);
 static void ui_engine_build_compose_plan(uint32_t now_ms, ui_engine_compose_plan_t *out_plan);
 static int16_t ui_engine_get_statusbar_body_top_y(u8g2_t *u8g2, bool statusbar_visible);
 static int16_t ui_engine_get_fixed_bottom_body_bottom_y(void);
@@ -329,6 +347,12 @@ void UI_Engine_Init(void)
     s_pressed_mask = Button_GetPressedMask();
     s_force_redraw = 1u;
     s_return_screen_from_gps = ui_engine_get_default_screen_for_boot_mode();
+    s_last_draw_valid = 0u;
+    s_last_draw_screen = UI_SCREEN_COUNT;
+    s_last_draw_pressed_mask = 0u;
+    memset(&s_last_draw_status_model, 0, sizeof(s_last_draw_status_model));
+    s_last_draw_fast_toggle = false;
+    s_last_draw_slow_toggle = false;
 
     ui_engine_reset_debug_f1_hold();
 
@@ -462,17 +486,19 @@ void UI_Engine_OnBoardDebugButtonIrq(uint32_t now_ms)
 /* -------------------------------------------------------------------------- */
 static void ui_engine_process_vario_screen(uint32_t now_ms)
 {
-    (void)now_ms;
-
     s_pressed_mask = Button_GetPressedMask();
     UI_ScreenVario_Task(now_ms);
     s_pressed_mask = Button_GetPressedMask();
 
     /* ---------------------------------------------------------------------- */
-    /* VARIO 화면은 baro/GS/altitude 등 실시간 값이 계속 변하므로               */
-    /* 현재 구조에서는 매 프레임 redraw request 를 유지한다.                    */
+    /* VARIO draw cadence ownership                                            */
+    /*                                                                          */
+    /* - fast / slow presentation 주기는 Vario_State_Task() 가 관리한다.       */
+    /* - mode 변경, 설정 이동, publish 5Hz 갱신 등은                           */
+    /*   Vario_State_RequestRedraw() 경로로 올라온다.                          */
+    /* - 여기서는 pressed-mask 동기화와 screen bridge task 만 수행한다.         */
     /* ---------------------------------------------------------------------- */
-    s_force_redraw = 1u;
+    (void)now_ms;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -663,9 +689,118 @@ static void ui_engine_update_debug_f1_hold_return(uint32_t now_ms)
     }
 }
 
+
+static bool ui_engine_status_model_changed(const ui_statusbar_model_t *status_model)
+{
+    if (status_model == NULL)
+    {
+        return false;
+    }
+
+    if (s_last_draw_valid == 0u)
+    {
+        return true;
+    }
+
+    if (memcmp(&s_last_draw_status_model, status_model, sizeof(*status_model)) != 0)
+    {
+        return true;
+    }
+
+    return false;
+}
+
+static bool ui_engine_should_draw(const ui_engine_compose_plan_t *plan,
+                                  const ui_statusbar_model_t *status_model)
+{
+    if (plan == NULL)
+    {
+        return false;
+    }
+
+    if (s_force_redraw != 0u)
+    {
+        return true;
+    }
+
+    if (s_last_draw_valid == 0u)
+    {
+        return true;
+    }
+
+    if (s_current_screen != s_last_draw_screen)
+    {
+        return true;
+    }
+
+    if ((plan->draw_bottombar != false) && (s_pressed_mask != s_last_draw_pressed_mask))
+    {
+        return true;
+    }
+
+    if ((plan->draw_statusbar != false) && (ui_engine_status_model_changed(status_model) != false))
+    {
+        return true;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* blink phase 는 status bar / legacy root screen 들이 공유하는 전역 위상. */
+    /* 따라서 위상이 바뀌면 다음 프레임 redraw 후보가 된다.                    */
+    /* ---------------------------------------------------------------------- */
+    /* ---------------------------------------------------------------------- */
+    /* legacy root family 는 20Hz 기반 blink phase 를 화면 갱신 이유로 쓴다.   */
+    /*                                                                          */
+    /* normal VARIO profile 에서는 이 위상 변화만으로 redraw 를 일으키지 않는다.*/
+    /* 그렇지 않으면 상태 publish/redraw cadence 와 무관하게                    */
+    /* 5Hz / 2Hz redraw 가 다시 살아나기 때문이다.                             */
+    /* ---------------------------------------------------------------------- */
+    if ((s_current_screen != UI_SCREEN_VARIO) &&
+        ((FastToggle5Hz != s_last_draw_fast_toggle) ||
+         (SlowToggle2Hz != s_last_draw_slow_toggle)))
+    {
+        return true;
+    }
+
+    if ((s_current_screen == UI_SCREEN_VARIO) &&
+        (Vario_State_IsRedrawRequested() != false))
+    {
+        return true;
+    }
+
+    return false;
+}
+
+static void ui_engine_capture_draw_snapshot(const ui_engine_compose_plan_t *plan,
+                                            const ui_statusbar_model_t *status_model)
+{
+    if (plan == NULL)
+    {
+        return;
+    }
+
+    s_last_draw_valid = 1u;
+    s_last_draw_screen = s_current_screen;
+    s_last_draw_pressed_mask = s_pressed_mask;
+    s_last_draw_fast_toggle = FastToggle5Hz;
+    s_last_draw_slow_toggle = SlowToggle2Hz;
+
+    if ((plan->draw_statusbar != false) && (status_model != NULL))
+    {
+        s_last_draw_status_model = *status_model;
+    }
+    else
+    {
+        memset(&s_last_draw_status_model, 0, sizeof(s_last_draw_status_model));
+    }
+}
+
 void UI_Engine_Task(uint32_t now_ms)
 {
     u8g2_t *u8g2;
+    ui_engine_compose_plan_t plan;
+    ui_statusbar_model_t status_model;
+    bool popup_visible_before;
+    bool toast_visible_before;
 
     switch (s_current_screen)
     {
@@ -695,8 +830,34 @@ void UI_Engine_Task(uint32_t now_ms)
         break;
     }
 
+    popup_visible_before = UI_Popup_IsVisible();
+    toast_visible_before = UI_Toast_IsVisible();
+
     UI_Popup_Task(now_ms);
     UI_Toast_Task(now_ms);
+
+    if (popup_visible_before != UI_Popup_IsVisible())
+    {
+        s_force_redraw = 1u;
+    }
+    if (toast_visible_before != UI_Toast_IsVisible())
+    {
+        s_force_redraw = 1u;
+    }
+
+    memset(&plan, 0, sizeof(plan));
+    ui_engine_build_compose_plan(now_ms, &plan);
+
+    memset(&status_model, 0, sizeof(status_model));
+    if (plan.draw_statusbar != false)
+    {
+        ui_engine_build_status_model(&status_model);
+    }
+
+    if (ui_engine_should_draw(&plan, &status_model) == false)
+    {
+        return;
+    }
 
     if (U8G2_UC1608_TryAcquireFrameToken() == 0u)
     {
@@ -722,6 +883,7 @@ void UI_Engine_Task(uint32_t now_ms)
     }
 
     U8G2_UC1608_CommitBuffer();
+    ui_engine_capture_draw_snapshot(&plan, &status_model);
     s_force_redraw = 0u;
 }
 
