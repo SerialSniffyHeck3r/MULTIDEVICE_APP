@@ -32,17 +32,17 @@ typedef enum
 /*  SETTING root menu item                                                    */
 /*                                                                            */
 /*  root settings 화면은 즉시 조절 가능한 대시보드 역할을 맡는다.              */
-/*  - BRIGHTNESS : live backlight bar                                          */
-/*  - VOLUME     : audio volume bar                                            */
-/*  - DAMPING    : vario response bar                                          */
-/*  - ALT2       : ALT2 의미 전환                                              */
+/*  - BRIGHTNESS   : live backlight bar                                        */
+/*  - VOLUME       : audio volume bar                                          */
+/*  - RESPONSE     : 실제 바리오 response knob                                 */
+/*  - CLIMB START  : 상승음 시작 임계값                                        */
 /* -------------------------------------------------------------------------- */
 typedef enum
 {
     VARIO_SETTING_MENU_BRIGHTNESS = 0u,
     VARIO_SETTING_MENU_VOLUME,
-    VARIO_SETTING_MENU_DAMPING,
-    VARIO_SETTING_MENU_ALT2,
+    VARIO_SETTING_MENU_RESPONSE,
+    VARIO_SETTING_MENU_CLIMB_START,
     VARIO_SETTING_MENU_COUNT
 } vario_setting_menu_item_t;
 

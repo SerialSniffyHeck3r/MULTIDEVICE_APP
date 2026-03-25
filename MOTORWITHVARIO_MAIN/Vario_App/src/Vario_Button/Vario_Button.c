@@ -86,12 +86,12 @@ static void vario_button_handle_setting(const button_event_t *event)
                     Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_AUDIO_VOLUME, direction);
                     break;
 
-                case VARIO_SETTING_MENU_DAMPING:
+                case VARIO_SETTING_MENU_RESPONSE:
                     Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_VARIO_DAMPING, direction);
                     break;
 
-                case VARIO_SETTING_MENU_ALT2:
-                    Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_ALT2_MODE, direction);
+                case VARIO_SETTING_MENU_CLIMB_START:
+                    Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_CLIMB_TONE_THRESHOLD, direction);
                     break;
 
                 case VARIO_SETTING_MENU_COUNT:
@@ -117,11 +117,14 @@ static void vario_button_handle_setting(const button_event_t *event)
                     category = VARIO_SETTINGS_CATEGORY_AUDIO;
                     break;
 
-                case VARIO_SETTING_MENU_DAMPING:
-                    category = VARIO_SETTINGS_CATEGORY_FLIGHT;
+                case VARIO_SETTING_MENU_RESPONSE:
+                    category = VARIO_SETTINGS_CATEGORY_AUDIO;
                     break;
 
-                case VARIO_SETTING_MENU_ALT2:
+                case VARIO_SETTING_MENU_CLIMB_START:
+                    category = VARIO_SETTINGS_CATEGORY_AUDIO;
+                    break;
+
                 case VARIO_SETTING_MENU_COUNT:
                 default:
                     category = VARIO_SETTINGS_CATEGORY_SYSTEM;

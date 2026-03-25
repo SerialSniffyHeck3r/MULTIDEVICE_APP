@@ -166,6 +166,7 @@ typedef enum
     VARIO_QUICKSET_ITEM_VARIO_AVG_SECONDS,
     VARIO_QUICKSET_ITEM_CLIMB_TONE_THRESHOLD,
     VARIO_QUICKSET_ITEM_SINK_TONE_THRESHOLD,
+    VARIO_QUICKSET_ITEM_SINK_CONT_THRESHOLD,
     VARIO_QUICKSET_ITEM_FLIGHT_START_SPEED,
     VARIO_QUICKSET_ITEM_BEEP_ONLY_WHEN_FLYING,
     VARIO_QUICKSET_ITEM_AUDIO_ENABLE,
@@ -255,12 +256,31 @@ typedef struct
     uint8_t                display_temp_compensation;
 
     /* ---------------------------------------------------------------------- */
-    /*  디지털 표시/오디오용 필터 튜닝값                                       */
+    /*  디지털 표시/오디오용 필터 및 바리오 임계값                              */
+    /*                                                                        */
+    /*  vario_damping_level                                                   */
+    /*  - 현재 제품 동작에서는 "표시 damping" 전용이 아니라                  */
+    /*    실제 fast vario / 오디오 attack/release / 저수준 tau mirror까지      */
+    /*    함께 움직이는 response knob 역할을 한다.                            */
+    /*                                                                        */
+    /*  climb_tone_threshold_cms                                              */
+    /*  - 상승음이 처음 살아나는 임계값                                        */
+    /*                                                                        */
+    /*  sink_tone_threshold_cms                                               */
+    /*  - 하강음이 처음 살아나는 임계값                                        */
+    /*                                                                        */
+    /*  sink_continuous_threshold_cms                                         */
+    /*  - 이 값보다 더 큰 sink(더 음수)에서는                                  */
+    /*    Digifly 스타일의 짧은 sink chirp band를 지나                        */
+    /*    연속 sink saw tone으로 넘어간다.                                    */
+    /*  - sink_tone_threshold_cms와 같게 두면                                  */
+    /*    sink chirp band를 사실상 끌 수 있다.                                */
     /* ---------------------------------------------------------------------- */
     uint8_t  vario_damping_level;
     uint8_t  digital_vario_average_seconds;
     int16_t  climb_tone_threshold_cms;
     int16_t  sink_tone_threshold_cms;
+    int16_t  sink_continuous_threshold_cms;
     uint16_t flight_start_speed_kmh_x10;
 
     /* ---------------------------------------------------------------------- */

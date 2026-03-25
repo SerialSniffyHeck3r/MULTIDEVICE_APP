@@ -62,6 +62,60 @@ static void vario_task_run_legacy_profile(uint32_t now_ms);
 static void vario_task_run_mode_state_machine(uint32_t now_ms);
 static void vario_task_apply_platform_settings(void);
 
+static float vario_task_clampf(float value, float min_v, float max_v)
+{
+    if (value < min_v)
+    {
+        return min_v;
+    }
+
+    if (value > max_v)
+    {
+        return max_v;
+    }
+
+    return value;
+}
+
+static uint16_t vario_task_lerp_u16(uint16_t slow_value,
+                                    uint16_t fast_value,
+                                    float response_norm)
+{
+    float value;
+
+    response_norm = vario_task_clampf(response_norm, 0.0f, 1.0f);
+    value = ((float)slow_value) + (((float)fast_value - (float)slow_value) * response_norm);
+
+    if (value < 0.0f)
+    {
+        return 0u;
+    }
+
+    return (uint16_t)(value + 0.5f);
+}
+
+static float vario_task_response_norm_from_settings(const vario_settings_t *settings)
+{
+    uint8_t response_level;
+
+    if (settings == NULL)
+    {
+        return 0.6667f;
+    }
+
+    response_level = settings->vario_damping_level;
+    if (response_level < 1u)
+    {
+        response_level = 1u;
+    }
+    else if (response_level > 10u)
+    {
+        response_level = 10u;
+    }
+
+    return ((float)(response_level - 1u)) / 9.0f;
+}
+
 /* -------------------------------------------------------------------------- */
 /* 공용 플랫폼 서비스 구간                                                     */
 /*                                                                            */
@@ -115,6 +169,15 @@ static void vario_task_apply_platform_settings(void)
     uint8_t                 bt_autoping;
     uint8_t                 platform_settings_dirty;
     uint8_t                 uc1608_dirty;
+    float                   response_norm;
+    uint16_t                fast_tau_ms;
+    uint16_t                baro_vario_tau_ms;
+    uint16_t                baro_vario_noise_cms;
+    uint16_t                audio_deadband_cms;
+    uint16_t                audio_min_freq_hz;
+    uint16_t                audio_max_freq_hz;
+    uint16_t                audio_repeat_ms;
+    uint16_t                audio_beep_ms;
 
     settings = Vario_Settings_Get();
     if (settings == NULL)
@@ -163,6 +226,109 @@ static void vario_task_apply_platform_settings(void)
         platform_settings.uc1608.temperature_compensation = settings->display_temp_compensation;
         platform_settings_dirty = 1u;
         uc1608_dirty = 1u;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /*  VARIO high-level settings -> APP_STATE low-level mirror               */
+    /*                                                                        */
+    /*  APP_STATE는 low-level 자료창고이고,                                   */
+    /*  Vario_Settings는 사용자 의도 저장소다.                                */
+    /*                                                                        */
+    /*  따라서 여기서는 "상위 사용자의 의도"를                               */
+    /*  - low-level fast/slow tau                                              */
+    /*  - debug/audio snapshot                                                 */
+    /*  - driver-adjacent mirror 값                                            */
+    /*  으로 번역해서 APP_STATE에 보관만 한다.                                 */
+    /*                                                                        */
+    /*  실제 제품용 바리오 오디오는 Vario_Audio가 직접 settings를 읽어         */
+    /*  Audio_App를 호출하지만, APP_STATE mirror를 같이 맞춰 두면             */
+    /*  - debug page                                                          */
+    /*  - snapshot dump                                                       */
+    /*  - 향후 하위 레이어 진단                                               */
+    /*  이 전부 같은 값을 보게 된다.                                          */
+    /* ---------------------------------------------------------------------- */
+    response_norm = vario_task_response_norm_from_settings(settings);
+    fast_tau_ms = vario_task_lerp_u16(170u, 70u, response_norm);
+    baro_vario_tau_ms = vario_task_lerp_u16(95u, 38u, response_norm);
+    baro_vario_noise_cms = vario_task_lerp_u16(72u, 50u, response_norm);
+
+    audio_deadband_cms = (uint16_t)((settings->climb_tone_threshold_cms > 0) ?
+                                    settings->climb_tone_threshold_cms :
+                                    8);
+    if (audio_deadband_cms < 8u)
+    {
+        audio_deadband_cms = 8u;
+    }
+    else if (audio_deadband_cms > 25u)
+    {
+        audio_deadband_cms = 25u;
+    }
+
+    audio_min_freq_hz = 225u;
+    audio_max_freq_hz = 1820u;
+    audio_repeat_ms   = vario_task_lerp_u16(310u, 140u, response_norm);
+    audio_beep_ms     = vario_task_lerp_u16(105u, 78u, response_norm);
+
+    if (platform_settings.altitude.vario_fast_tau_ms != fast_tau_ms)
+    {
+        platform_settings.altitude.vario_fast_tau_ms = fast_tau_ms;
+        platform_settings_dirty = 1u;
+    }
+
+    if (platform_settings.altitude.baro_vario_lpf_tau_ms != baro_vario_tau_ms)
+    {
+        platform_settings.altitude.baro_vario_lpf_tau_ms = baro_vario_tau_ms;
+        platform_settings_dirty = 1u;
+    }
+
+    if (platform_settings.altitude.baro_vario_measurement_noise_cms != baro_vario_noise_cms)
+    {
+        platform_settings.altitude.baro_vario_measurement_noise_cms = baro_vario_noise_cms;
+        platform_settings_dirty = 1u;
+    }
+
+    if (platform_settings.altitude.debug_audio_enabled != ((settings->audio_enabled != 0u) ? 1u : 0u))
+    {
+        platform_settings.altitude.debug_audio_enabled = (settings->audio_enabled != 0u) ? 1u : 0u;
+        platform_settings_dirty = 1u;
+    }
+
+    if (platform_settings.altitude.debug_audio_source !=
+        ((settings->altitude_source == VARIO_ALT_SOURCE_FUSED_IMU) ? 1u : 0u))
+    {
+        platform_settings.altitude.debug_audio_source =
+            (settings->altitude_source == VARIO_ALT_SOURCE_FUSED_IMU) ? 1u : 0u;
+        platform_settings_dirty = 1u;
+    }
+
+    if (platform_settings.altitude.audio_deadband_cms != audio_deadband_cms)
+    {
+        platform_settings.altitude.audio_deadband_cms = audio_deadband_cms;
+        platform_settings_dirty = 1u;
+    }
+
+    if (platform_settings.altitude.audio_min_freq_hz != audio_min_freq_hz)
+    {
+        platform_settings.altitude.audio_min_freq_hz = audio_min_freq_hz;
+        platform_settings_dirty = 1u;
+    }
+
+    if (platform_settings.altitude.audio_max_freq_hz != audio_max_freq_hz)
+    {
+        platform_settings.altitude.audio_max_freq_hz = audio_max_freq_hz;
+        platform_settings_dirty = 1u;
+    }
+
+    if (platform_settings.altitude.audio_repeat_ms != audio_repeat_ms)
+    {
+        platform_settings.altitude.audio_repeat_ms = audio_repeat_ms;
+        platform_settings_dirty = 1u;
+    }
+
+    if (platform_settings.altitude.audio_beep_ms != audio_beep_ms)
+    {
+        platform_settings.altitude.audio_beep_ms = audio_beep_ms;
+        platform_settings_dirty = 1u;
     }
 
     if (platform_settings_dirty != 0u)

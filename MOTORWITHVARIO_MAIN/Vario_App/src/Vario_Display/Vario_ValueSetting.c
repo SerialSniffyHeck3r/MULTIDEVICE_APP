@@ -20,7 +20,7 @@ static const char *vario_valuesetting_get_subtitle(vario_settings_category_t cat
             return "PANEL / BAR";
 
         case VARIO_SETTINGS_CATEGORY_AUDIO:
-            return "TONE / VOLUME";
+            return "LIVE VARIO";
 
         case VARIO_SETTINGS_CATEGORY_LOG:
             return "PLOT / TRAIL";

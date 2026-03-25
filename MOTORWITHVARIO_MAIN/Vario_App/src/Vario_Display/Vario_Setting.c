@@ -12,7 +12,8 @@ void Vario_Setting_Render(u8g2_t *u8g2, const vario_buttonbar_t *buttonbar)
     const vario_settings_t *settings;
     char                    brightness_text[24];
     char                    volume_text[24];
-    char                    damping_text[24];
+    char                    response_text[24];
+    char                    climb_text[24];
     char                    qnh_text[32];
 
     (void)buttonbar;
@@ -51,10 +52,16 @@ void Vario_Setting_Render(u8g2_t *u8g2, const vario_buttonbar_t *buttonbar)
              Vario_Settings_GetAudioOnOffText(),
              (unsigned)settings->audio_volume_percent);
 
-    snprintf(damping_text,
-             sizeof(damping_text),
+    snprintf(response_text,
+             sizeof(response_text),
              "%u/10",
              (unsigned)settings->vario_damping_level);
+
+    snprintf(climb_text,
+             sizeof(climb_text),
+             "%+.1f %s",
+             (double)Vario_Settings_VSpeedMpsToDisplayFloat(((float)settings->climb_tone_threshold_cms) * 0.01f),
+             Vario_Settings_GetVSpeedUnitText());
 
     Vario_Settings_FormatQnhText(qnh_text, sizeof(qnh_text));
 
@@ -79,17 +86,17 @@ void Vario_Setting_Render(u8g2_t *u8g2, const vario_buttonbar_t *buttonbar)
     Vario_Display_DrawBarRow(u8g2,
                              v,
                              (int16_t)(v->y + 60),
-                             (Vario_State_GetSettingsCursor() == VARIO_SETTING_MENU_DAMPING),
-                             "Damping",
-                             damping_text,
+                             (Vario_State_GetSettingsCursor() == VARIO_SETTING_MENU_RESPONSE),
+                             "Response",
+                             response_text,
                              (uint8_t)(settings->vario_damping_level * 10u));
 
     Vario_Display_DrawMenuRow(u8g2,
                               v,
                               (int16_t)(v->y + 90),
-                              (Vario_State_GetSettingsCursor() == VARIO_SETTING_MENU_ALT2),
-                              "ALT2 Mode",
-                              Vario_Settings_GetAlt2ModeText());
+                              (Vario_State_GetSettingsCursor() == VARIO_SETTING_MENU_CLIMB_START),
+                              "Climb Start",
+                              climb_text);
 
     u8g2_SetFont(u8g2, u8g2_font_5x8_tr);
     u8g2_DrawStr(u8g2,

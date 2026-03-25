@@ -59,6 +59,7 @@ typedef enum
     VARIO_MENU_ITEM_BEEP_GATE,
     VARIO_MENU_ITEM_CLIMB_TONE,
     VARIO_MENU_ITEM_SINK_TONE,
+    VARIO_MENU_ITEM_SINK_CONT,
     VARIO_MENU_ITEM_LOG_ENABLE,
     VARIO_MENU_ITEM_LOG_INTERVAL,
     VARIO_MENU_ITEM_DAMPING,
@@ -96,8 +97,10 @@ static const vario_menu_item_t s_vario_category_audio_items[] = {
     VARIO_MENU_ITEM_AUDIO_ENABLE,
     VARIO_MENU_ITEM_AUDIO_VOLUME,
     VARIO_MENU_ITEM_BEEP_GATE,
+    VARIO_MENU_ITEM_DAMPING,
     VARIO_MENU_ITEM_CLIMB_TONE,
     VARIO_MENU_ITEM_SINK_TONE,
+    VARIO_MENU_ITEM_SINK_CONT,
 };
 
 static const vario_menu_item_t s_vario_category_log_items[] = {
@@ -113,7 +116,6 @@ static const vario_menu_item_t s_vario_category_flight_items[] = {
     VARIO_MENU_ITEM_ALT2_UNIT,
     VARIO_MENU_ITEM_ALT_SOURCE,
     VARIO_MENU_ITEM_HEADING_SOURCE,
-    VARIO_MENU_ITEM_DAMPING,
     VARIO_MENU_ITEM_INT_AVG,
     VARIO_MENU_ITEM_FLIGHT_START,
     VARIO_MENU_ITEM_VARIO_SCALE,
@@ -226,6 +228,27 @@ static uint8_t vario_settings_clamp_u8(uint8_t value, uint8_t min_v, uint8_t max
     }
 
     return value;
+}
+
+static void vario_settings_sanitize_sink_audio_band(void)
+{
+    /* ---------------------------------------------------------------------- */
+    /*  sink audio band 계약                                                   */
+    /*                                                                        */
+    /*  sink_tone_threshold_cms        : sink audio가 처음 살아나는 지점       */
+    /*  sink_continuous_threshold_cms  : 이 값 아래(더 음수)부터               */
+    /*                                   연속 sink saw tone으로 전환           */
+    /*                                                                        */
+    /*  따라서 연속 sink 전환점은 항상                                         */
+    /*      sink_continuous_threshold_cms <= sink_tone_threshold_cms          */
+    /*  를 만족해야 한다.                                                      */
+    /*                                                                        */
+    /*  두 값이 같으면 sink chirp band를 사실상 끈 것으로 해석한다.           */
+    /* ---------------------------------------------------------------------- */
+    if (s_vario_settings.sink_continuous_threshold_cms > s_vario_settings.sink_tone_threshold_cms)
+    {
+        s_vario_settings.sink_continuous_threshold_cms = s_vario_settings.sink_tone_threshold_cms;
+    }
 }
 
 static uint8_t vario_settings_snap_vario_range_x10(uint8_t value_x10)
@@ -663,10 +686,19 @@ void Vario_Settings_Init(void)
     s_vario_settings.display_brightness_percent    = 70u;
     s_vario_settings.display_contrast_raw          = 160u;
     s_vario_settings.display_temp_compensation     = 1u;
-    s_vario_settings.vario_damping_level           = 5u;
+    /* ------------------------------------------------------------------ */
+    /*  default response / tone thresholds                                  */
+    /*                                                                      */
+    /*  - response 7/10 : 구형 둔한 기본값보다 더 즉응적                      */
+    /*  - climb +0.15 m/s : 들어 올리는 순간 바로 살아나는 쪽으로 시작       */
+    /*  - sink start -1.00 m/s : 완전 무풍 잡음까지 울리지 않게 절충         */
+    /*  - sink continuous -2.50 m/s : 그 위 대역은 Digifly식 짧은 sink chirp */
+    /* ------------------------------------------------------------------ */
+    s_vario_settings.vario_damping_level           = 7u;
     s_vario_settings.digital_vario_average_seconds = 5u;
-    s_vario_settings.climb_tone_threshold_cms      = 20;
-    s_vario_settings.sink_tone_threshold_cms       = -150;
+    s_vario_settings.climb_tone_threshold_cms      = 15;
+    s_vario_settings.sink_tone_threshold_cms       = -100;
+    s_vario_settings.sink_continuous_threshold_cms = -250;
     s_vario_settings.flight_start_speed_kmh_x10    = 50u;
     s_vario_settings.log_enabled                   = 1u;
     s_vario_settings.log_interval_seconds          = 1u;
@@ -684,6 +716,8 @@ void Vario_Settings_Init(void)
     s_vario_settings.show_flight_time              = 1u;
     s_vario_settings.show_max_vario                = 1u;
     s_vario_settings.show_gs_bar                   = 1u;
+
+    vario_settings_sanitize_sink_audio_band();
 }
 
 const vario_settings_t *Vario_Settings_Get(void)
@@ -785,7 +819,7 @@ void Vario_Settings_AdjustQuickSet(vario_quickset_item_t item, int8_t direction)
         case VARIO_QUICKSET_ITEM_CLIMB_TONE_THRESHOLD:
             s_vario_settings.climb_tone_threshold_cms =
                 (int16_t)vario_settings_clamp_s32((int32_t)s_vario_settings.climb_tone_threshold_cms +
-                                                  ((int32_t)direction * 10),
+                                                  ((int32_t)direction * 5),
                                                   0,
                                                   300);
             break;
@@ -796,6 +830,16 @@ void Vario_Settings_AdjustQuickSet(vario_quickset_item_t item, int8_t direction)
                                                   ((int32_t)direction * 10),
                                                   -500,
                                                   0);
+            vario_settings_sanitize_sink_audio_band();
+            break;
+
+        case VARIO_QUICKSET_ITEM_SINK_CONT_THRESHOLD:
+            s_vario_settings.sink_continuous_threshold_cms =
+                (int16_t)vario_settings_clamp_s32((int32_t)s_vario_settings.sink_continuous_threshold_cms +
+                                                  ((int32_t)direction * 10),
+                                                  -800,
+                                                  0);
+            vario_settings_sanitize_sink_audio_band();
             break;
 
         case VARIO_QUICKSET_ITEM_FLIGHT_START_SPEED:
@@ -1543,13 +1587,20 @@ void Vario_Settings_GetCategoryItemText(vario_settings_category_t category,
             break;
 
         case VARIO_MENU_ITEM_CLIMB_TONE:
-            snprintf(out_label, label_len, "Climb Tone");
+            snprintf(out_label, label_len, "Climb Start");
             vario_settings_format_vspeed_threshold(out_value, value_len, settings->climb_tone_threshold_cms);
             break;
 
         case VARIO_MENU_ITEM_SINK_TONE:
-            snprintf(out_label, label_len, "Sink Tone");
+            snprintf(out_label, label_len, "Sink Start");
             vario_settings_format_vspeed_threshold(out_value, value_len, settings->sink_tone_threshold_cms);
+            break;
+
+        case VARIO_MENU_ITEM_SINK_CONT:
+            snprintf(out_label, label_len, "Sink Cont");
+            vario_settings_format_vspeed_threshold(out_value,
+                                                   value_len,
+                                                   settings->sink_continuous_threshold_cms);
             break;
 
         case VARIO_MENU_ITEM_LOG_ENABLE:
@@ -1563,7 +1614,7 @@ void Vario_Settings_GetCategoryItemText(vario_settings_category_t category,
             break;
 
         case VARIO_MENU_ITEM_DAMPING:
-            snprintf(out_label, label_len, "Damping");
+            snprintf(out_label, label_len, "Response");
             snprintf(out_value, value_len, "%u/10", (unsigned)settings->vario_damping_level);
             break;
 
@@ -1752,6 +1803,10 @@ void Vario_Settings_AdjustCategoryItem(vario_settings_category_t category,
 
         case VARIO_MENU_ITEM_SINK_TONE:
             Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_SINK_TONE_THRESHOLD, direction);
+            break;
+
+        case VARIO_MENU_ITEM_SINK_CONT:
+            Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_SINK_CONT_THRESHOLD, direction);
             break;
 
         case VARIO_MENU_ITEM_LOG_ENABLE:

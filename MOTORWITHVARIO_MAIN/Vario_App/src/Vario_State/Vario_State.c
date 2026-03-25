@@ -92,6 +92,30 @@
 #define VARIO_STATE_FAST_BAR_RAW_WINDOW 3u
 #endif
 
+#ifndef VARIO_STATE_FAST_BAR_ATTACK_TAU_FAST_S
+#define VARIO_STATE_FAST_BAR_ATTACK_TAU_FAST_S 0.045f
+#endif
+
+#ifndef VARIO_STATE_FAST_BAR_ATTACK_TAU_SLOW_S
+#define VARIO_STATE_FAST_BAR_ATTACK_TAU_SLOW_S 0.090f
+#endif
+
+#ifndef VARIO_STATE_FAST_BAR_RELEASE_TAU_S
+#define VARIO_STATE_FAST_BAR_RELEASE_TAU_S 0.180f
+#endif
+
+#ifndef VARIO_STATE_FAST_BAR_INNOVATION_FAST_MPS
+#define VARIO_STATE_FAST_BAR_INNOVATION_FAST_MPS 0.80f
+#endif
+
+#ifndef VARIO_STATE_FAST_BAR_ZERO_ENTER_MPS
+#define VARIO_STATE_FAST_BAR_ZERO_ENTER_MPS 0.06f
+#endif
+
+#ifndef VARIO_STATE_FAST_BAR_ZERO_EXIT_MPS
+#define VARIO_STATE_FAST_BAR_ZERO_EXIT_MPS 0.14f
+#endif
+
 /* -------------------------------------------------------------------------- */
 /* fast vario bar 전용 고속 필터                                               */
 /*                                                                            */
@@ -159,6 +183,20 @@ static struct
     /* ---------------------------------------------------------------------- */
     uint32_t last_fast_present_ms;
     uint32_t last_slow_present_ms;
+
+    /* ---------------------------------------------------------------------- */
+    /* altitude source tracking                                                */
+    /*                                                                        */
+    /* altitude source 전환은 사용자의 quickset/setting 입력으로 즉시 일어날    */
+    /* 수 있다. 이때 display filter가 이전 source의 상태를 그대로 끌고 가면    */
+    /* QNH 모드 진입 직후 한 번 꺼졌다 튀어오르는 딥/팝 현상이 생길 수 있다.    */
+    /*                                                                        */
+    /* 그래서 source가 바뀌는 순간 app-layer altitude / vario presentation    */
+    /* filter를 현재 측정값으로 재기준화(rebase)하기 위한 private tracking만     */
+    /* 여기서 유지한다.                                                        */
+    /* ---------------------------------------------------------------------- */
+    bool altitude_source_tracking_valid;
+    vario_alt_source_t last_altitude_source;
 } s_vario_state;
 
 static float vario_state_absf(float value)
@@ -234,17 +272,6 @@ static float vario_state_wrap_pm180(float deg)
     }
 
     return deg;
-}
-
-static float vario_state_pressure_to_altitude_m(float pressure_hpa, float qnh_hpa)
-{
-    if ((pressure_hpa <= 0.0f) || (qnh_hpa <= 0.0f))
-    {
-        return 0.0f;
-    }
-
-    return VARIO_STATE_PRESSURE_TO_ALT_FACTOR_M *
-           (1.0f - powf((pressure_hpa / qnh_hpa), VARIO_STATE_PRESSURE_TO_ALT_EXPONENT));
 }
 
 static float vario_state_deg_to_rad(float deg)
@@ -349,71 +376,62 @@ static void vario_state_update_sensor_caches(void)
 static float vario_state_pick_fast_vario_mps(const app_altitude_state_t *alt,
                                              const vario_settings_t *settings)
 {
-    if ((alt == NULL) || (settings == NULL))
+    (void)settings;
+
+    if (alt == NULL)
     {
         return 0.0f;
     }
 
-    switch (settings->altitude_source)
+    /* ---------------------------------------------------------------------- */
+    /* vario source는 altitude source와 완전히 분리한다.                       */
+    /*                                                                        */
+    /* 저수준 APP_ALTITUDE가                                                   */
+    /* - vario_fast_noimu_cms : 전통적인 pressure/GPS anchor 기반 바리오       */
+    /* - vario_fast_imu_cms   : quaternion INS + baro anchor sensor-fusion    */
+    /*   출력                                                                  */
+    /* 을 이미 만들어 둔다.                                                   */
+    /*                                                                        */
+    /* 그리고 IMU aid가 꺼져 있거나 신뢰도가 낮으면 low-level에서              */
+    /* vario_fast_imu_cms를 자동으로 no-IMU anchor 쪽으로 되돌린다.            */
+    /*                                                                        */
+    /* 따라서 상위 Vario_State는 altitude source를 보지 않고                   */
+    /* "sensor-fusion fast vario 하나"만 읽으면 된다.                         */
+    /* ---------------------------------------------------------------------- */
+    if (alt->initialized == false)
     {
-        case VARIO_ALT_SOURCE_FUSED_NOIMU:
-            return ((float)alt->vario_fast_noimu_cms) * 0.01f;
-
-        case VARIO_ALT_SOURCE_FUSED_IMU:
-            if (alt->imu_vector_valid != false)
-            {
-                return ((float)alt->vario_fast_imu_cms) * 0.01f;
-            }
-            return ((float)alt->vario_fast_noimu_cms) * 0.01f;
-
-        case VARIO_ALT_SOURCE_QNH_MANUAL:
-            return ((float)alt->vario_fast_noimu_cms) * 0.01f;
-
-        case VARIO_ALT_SOURCE_DISPLAY:
-        case VARIO_ALT_SOURCE_GPS_HMSL:
-        case VARIO_ALT_SOURCE_COUNT:
-        default:
-            if (alt->imu_vector_valid != false)
-            {
-                return ((float)alt->vario_fast_imu_cms) * 0.01f;
-            }
-            return ((float)alt->vario_fast_noimu_cms) * 0.01f;
+        return ((float)alt->vario_fast_noimu_cms) * 0.01f;
     }
+
+    return ((float)alt->vario_fast_imu_cms) * 0.01f;
 }
 
 static float vario_state_pick_slow_vario_mps(const app_altitude_state_t *alt,
                                              const vario_settings_t *settings)
 {
-    if ((alt == NULL) || (settings == NULL))
+    (void)settings;
+
+    if (alt == NULL)
     {
         return 0.0f;
     }
 
-    switch (settings->altitude_source)
+    /* ---------------------------------------------------------------------- */
+    /* 숫자 current vario 역시 altitude source와 연결하지 않는다.              */
+    /*                                                                        */
+    /* 이 경로는 저수준 센서퓨전 엔진이 만든 "장기적으로 안정된 slow vario"를  */
+    /* 그대로 받는다.                                                          */
+    /*                                                                        */
+    /* 결과적으로                                                              */
+    /* - altitude source는 ALT 숫자만 바꾸고                                   */
+    /* - vario source는 IMU on/off 및 센서 신뢰도에만 반응한다.                */
+    /* ---------------------------------------------------------------------- */
+    if (alt->initialized == false)
     {
-        case VARIO_ALT_SOURCE_FUSED_NOIMU:
-            return ((float)alt->vario_slow_noimu_cms) * 0.01f;
-
-        case VARIO_ALT_SOURCE_FUSED_IMU:
-            if (alt->imu_vector_valid != false)
-            {
-                return ((float)alt->vario_slow_imu_cms) * 0.01f;
-            }
-            return ((float)alt->vario_slow_noimu_cms) * 0.01f;
-
-        case VARIO_ALT_SOURCE_QNH_MANUAL:
-            return ((float)alt->vario_slow_noimu_cms) * 0.01f;
-
-        case VARIO_ALT_SOURCE_DISPLAY:
-        case VARIO_ALT_SOURCE_GPS_HMSL:
-        case VARIO_ALT_SOURCE_COUNT:
-        default:
-            if (alt->imu_vector_valid != false)
-            {
-                return ((float)alt->vario_slow_imu_cms) * 0.01f;
-            }
-            return ((float)alt->vario_slow_noimu_cms) * 0.01f;
+        return ((float)alt->vario_slow_noimu_cms) * 0.01f;
     }
+
+    return ((float)alt->vario_slow_imu_cms) * 0.01f;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -619,22 +637,14 @@ static float vario_state_fast_bar_update(vario_fast_bar_filter_t *filter,
                                          uint32_t timestamp_ms)
 {
     float   hist[VARIO_STATE_FAST_BAR_RAW_WINDOW];
+    float   median_input_mps;
+    float   innovation_mps;
+    float   abs_innovation_mps;
+    float   dt_s;
+    float   tau_s;
+    float   alpha;
     uint8_t i;
 
-    /* ---------------------------------------------------------------------- */
-    /* 과거 구현은 여기서 3-sample median + attack/release + zero latch를      */
-    /* 또 한 번 적용했다.                                                     */
-    /*                                                                        */
-    /* 이번 수정에서는 fast path를 "저수준 APP_ALTITUDE가 이미 만든 값"으로     */
-    /* 그대로 올리기 위해, 이 helper를 실질적인 pass-through wrapper로 바꾼다. */
-    /*                                                                        */
-    /* 남겨 둔 이유                                                           */
-    /* - Vario_State 내부 초기화 흐름을 크게 흔들지 않기 위해                  */
-    /* - 기존 state struct / reset 경로를 그대로 재사용하기 위해               */
-    /* - 필요시 debug에서 마지막 raw history를 들여다볼 여지를 남기기 위해      */
-    /*                                                                        */
-    /* 즉, history buffer는 유지하되 출력에는 개입하지 않는다.                 */
-    /* ---------------------------------------------------------------------- */
     if (filter == NULL)
     {
         return vario_state_clampf(input_mps, -20.0f, 20.0f);
@@ -648,22 +658,82 @@ static float vario_state_fast_bar_update(vario_fast_bar_filter_t *filter,
         return filter->output_mps;
     }
 
-    if (timestamp_ms != filter->last_update_ms)
+    if (timestamp_ms == filter->last_update_ms)
     {
-        vario_state_fast_bar_push(filter, input_mps);
-        for (i = 0u; i < filter->hist_count; ++i)
-        {
-            hist[i] = filter->raw_hist_mps[i];
-        }
-        if (filter->hist_count != 0u)
-        {
-            (void)vario_state_median_small(hist, filter->hist_count);
-        }
-
-        filter->output_mps = input_mps;
-        filter->last_update_ms = timestamp_ms;
+        return filter->output_mps;
     }
 
+    dt_s = ((float)(timestamp_ms - filter->last_update_ms)) * 0.001f;
+    dt_s = vario_state_clampf(dt_s, VARIO_STATE_MIN_DT_S, 0.200f);
+
+    /* ---------------------------------------------------------------------- */
+    /* fast UI path 전용 robust filter                                         */
+    /*                                                                        */
+    /* 1) median-3 : 단발 spike 제거                                           */
+    /* 2) adaptive attack / release LPF : 상승/하강 진입은 빠르게,             */
+    /*    잔떨림 감소는 더 천천히                                              */
+    /* 3) zero latch hysteresis : 0 근처 bar chatter 제거                      */
+    /*                                                                        */
+    /* 목적은 "숫자 current vario보다 빠르되, raw spike는 덜 타는"            */
+    /* 상용기 fast bar 느낌에 가깝게 만드는 것이다.                            */
+    /* ---------------------------------------------------------------------- */
+    vario_state_fast_bar_push(filter, input_mps);
+    for (i = 0u; i < filter->hist_count; ++i)
+    {
+        hist[i] = filter->raw_hist_mps[i];
+    }
+
+    median_input_mps = input_mps;
+    if (filter->hist_count != 0u)
+    {
+        median_input_mps = vario_state_median_small(hist, filter->hist_count);
+    }
+
+    innovation_mps = median_input_mps - filter->output_mps;
+    abs_innovation_mps = vario_state_absf(innovation_mps);
+
+    if (abs_innovation_mps >= VARIO_STATE_FAST_BAR_INNOVATION_FAST_MPS)
+    {
+        tau_s = VARIO_STATE_FAST_BAR_ATTACK_TAU_FAST_S;
+    }
+    else if (vario_state_absf(median_input_mps) > vario_state_absf(filter->output_mps))
+    {
+        tau_s = VARIO_STATE_FAST_BAR_ATTACK_TAU_SLOW_S;
+    }
+    else
+    {
+        tau_s = VARIO_STATE_FAST_BAR_RELEASE_TAU_S;
+    }
+
+    alpha = vario_state_lpf_alpha(dt_s, tau_s);
+    filter->output_mps += alpha * innovation_mps;
+
+    if (filter->zero_latched != false)
+    {
+        if (vario_state_absf(median_input_mps) >= VARIO_STATE_FAST_BAR_ZERO_EXIT_MPS)
+        {
+            filter->zero_latched = false;
+        }
+        else
+        {
+            filter->output_mps = 0.0f;
+        }
+    }
+
+    if (filter->zero_latched == false)
+    {
+        if ((vario_state_absf(filter->output_mps) < VARIO_STATE_FAST_BAR_ZERO_ENTER_MPS) &&
+            (vario_state_absf(median_input_mps) < VARIO_STATE_FAST_BAR_ZERO_EXIT_MPS))
+        {
+            filter->zero_latched = true;
+            filter->output_mps = 0.0f;
+        }
+    }
+
+    filter->output_mps = vario_state_clampf(filter->output_mps,
+                                            -VARIO_STATE_MAX_VARIO_MPS,
+                                            VARIO_STATE_MAX_VARIO_MPS);
+    filter->last_update_ms = timestamp_ms;
     return filter->output_mps;
 }
 
@@ -815,12 +885,52 @@ static void vario_state_update_heading(uint32_t now_ms)
 /*                                                                            */
 /* 설계 분리                                                                   */
 /* 1) altitude                                                                 */
-/*    - observer 기반 altitude filter 유지                                    */
+/*    - selected source의 absolute altitude 만 부드럽게 표시                  */
 /* 2) current vario                                                            */
-/*    - slow vario -> robust UI filter -> 5Hz publish                         */
+/*    - 저수준 sensor-fusion slow vario -> UI 숫자 필터                       */
 /* 3) fast vario side bar                                                      */
-/*    - fast vario -> fast_bar_filter -> raw-ish high update                  */
+/*    - 저수준 sensor-fusion fast vario -> fast bar 전용 robust filter        */
+/*                                                                            */
+/* 중요한 변경점                                                              */
+/* - altitude source 전환 시 필터를 즉시 rebase 한다.                         */
+/* - 따라서 QNH 진입/복귀 시 이전 source 상태를 끌고 가며 생기던               */
+/*   dip / pop 현상을 상위 presentation 계층에서 차단한다.                    */
 /* -------------------------------------------------------------------------- */
+static void vario_state_rebase_display_paths(float altitude_m,
+                                             float slow_vario_input_mps,
+                                             float fast_vario_input_mps,
+                                             uint32_t filter_timestamp_ms,
+                                             uint32_t altitude_update_ms,
+                                             vario_alt_source_t altitude_source)
+{
+    uint32_t effective_altitude_update_ms;
+
+    effective_altitude_update_ms = (altitude_update_ms != 0u) ?
+                                   altitude_update_ms :
+                                   filter_timestamp_ms;
+
+    s_vario_state.runtime.filtered_altitude_m = altitude_m;
+    s_vario_state.runtime.filtered_vario_mps = slow_vario_input_mps;
+    s_vario_state.runtime.observer_velocity_mps = slow_vario_input_mps;
+    s_vario_state.runtime.last_measured_altitude_m = altitude_m;
+    s_vario_state.runtime.last_accum_altitude_m = altitude_m;
+    s_vario_state.runtime.last_altitude_update_ms = effective_altitude_update_ms;
+    s_vario_state.runtime.derived_valid = true;
+
+    Vario_UiVarioFilter_Reset(&s_vario_state.ui_vario_filter,
+                              slow_vario_input_mps,
+                              filter_timestamp_ms);
+    vario_state_fast_bar_reset(&s_vario_state.fast_bar_filter,
+                               fast_vario_input_mps,
+                               filter_timestamp_ms);
+
+    s_vario_state.runtime.fast_vario_bar_mps = s_vario_state.fast_bar_filter.output_mps;
+    s_vario_state.last_fast_present_ms = filter_timestamp_ms;
+    s_vario_state.last_slow_present_ms = filter_timestamp_ms;
+    s_vario_state.altitude_source_tracking_valid = true;
+    s_vario_state.last_altitude_source = altitude_source;
+}
+
 static void vario_state_update_display_filter(uint32_t now_ms)
 {
     const vario_settings_t     *settings;
@@ -834,6 +944,8 @@ static void vario_state_update_display_filter(uint32_t now_ms)
     float                       average_norm;
     float                       altitude_tau_s;
     float                       altitude_alpha;
+    bool                        source_changed;
+    bool                        altitude_jump;
 
     settings = Vario_Settings_Get();
     alt = &s_vario_state.runtime.altitude;
@@ -852,42 +964,36 @@ static void vario_state_update_display_filter(uint32_t now_ms)
     s_vario_state.runtime.raw_selected_altitude_m = measured_altitude_m;
     s_vario_state.runtime.raw_selected_vario_mps = slow_vario_input_mps;
 
-    if ((s_vario_state.runtime.last_altitude_update_ms != 0u) &&
-        (alt->last_update_ms == s_vario_state.runtime.last_altitude_update_ms))
+    source_changed = (s_vario_state.altitude_source_tracking_valid == false) ||
+                     (settings->altitude_source != s_vario_state.last_altitude_source);
+    altitude_jump = false;
+
+    if ((s_vario_state.runtime.derived_valid != false) &&
+        (source_changed == false) &&
+        (vario_state_absf(measured_altitude_m - s_vario_state.runtime.filtered_altitude_m) >=
+         VARIO_STATE_ALTITUDE_JUMP_LIMIT_M))
     {
-        return;
+        altitude_jump = true;
     }
 
     if ((s_vario_state.runtime.derived_valid == false) ||
         (s_vario_state.runtime.last_altitude_update_ms == 0u) ||
-        (alt->last_update_ms == 0u))
+        (alt->last_update_ms == 0u) ||
+        (source_changed != false) ||
+        (altitude_jump != false))
     {
-        s_vario_state.runtime.filtered_altitude_m = measured_altitude_m;
-        s_vario_state.runtime.filtered_vario_mps = slow_vario_input_mps;
-        s_vario_state.runtime.fast_vario_bar_mps =
-            vario_state_fast_bar_update(&s_vario_state.fast_bar_filter,
-                                        fast_vario_input_mps,
-                                        filter_timestamp_ms);
+        vario_state_rebase_display_paths(measured_altitude_m,
+                                         slow_vario_input_mps,
+                                         fast_vario_input_mps,
+                                         filter_timestamp_ms,
+                                         alt->last_update_ms,
+                                         settings->altitude_source);
+        return;
+    }
 
-        /* ------------------------------------------------------------------ */
-        /* observer_velocity_mps는 예전 observer의 잔재 필드다.                 */
-        /* 이번 변경에서는 별도 상태방정식을 돌리지 않고,                       */
-        /* 현재 slow display vario를 그대로 넣어 compatibility만 유지한다.     */
-        /* ------------------------------------------------------------------ */
-        s_vario_state.runtime.observer_velocity_mps = slow_vario_input_mps;
-        s_vario_state.runtime.last_measured_altitude_m = measured_altitude_m;
-        s_vario_state.runtime.last_accum_altitude_m = measured_altitude_m;
-        s_vario_state.runtime.last_altitude_update_ms = alt->last_update_ms;
-        s_vario_state.runtime.derived_valid = true;
-        s_vario_state.last_fast_present_ms = filter_timestamp_ms;
-        s_vario_state.last_slow_present_ms = filter_timestamp_ms;
-
-        Vario_UiVarioFilter_Reset(&s_vario_state.ui_vario_filter,
-                                  slow_vario_input_mps,
-                                  filter_timestamp_ms);
-        vario_state_fast_bar_reset(&s_vario_state.fast_bar_filter,
-                                   fast_vario_input_mps,
-                                   filter_timestamp_ms);
+    if ((s_vario_state.runtime.last_altitude_update_ms != 0u) &&
+        (alt->last_update_ms == s_vario_state.runtime.last_altitude_update_ms))
+    {
         return;
     }
 
@@ -898,34 +1004,26 @@ static void vario_state_update_display_filter(uint32_t now_ms)
     average_norm = ((float)(vario_state_clamp_u8(settings->digital_vario_average_seconds, 1u, 8u) - 1u)) / 7.0f;
 
     /* ---------------------------------------------------------------------- */
-    /* altitude 숫자용 app-layer 필터는 observer / residual 주입을 완전히 제거 */
-    /* 하고, 단일 1차 저역통과만 사용한다.                                     */
+    /* altitude 숫자용 app-layer 필터는 단일 1차 저역통과만 사용한다.            */
     /*                                                                        */
-    /* 이유                                                                   */
-    /* - selected altitude source 자체는 이미 APP_ALTITUDE에서 정리되어 있다.   */
-    /* - 여기서 속도 상태를 재적분하면 fast path와 slow path가 서로 끌어당기며    */
-    /*   체감 지연과 순간 스파이크를 만들 수 있다.                            */
-    /* - 숫자 고도는 "약간만 부드럽게" 보이면 충분하므로                       */
-    /*   간단한 EMA + publish hysteresis면 목적을 달성한다.                    */
+    /* selected altitude source는 이미 APP_ALTITUDE에서 canonical path 로       */
+    /* 계산되며, 여기서는 숫자 presentation만 담당한다.                         */
     /* ---------------------------------------------------------------------- */
     altitude_tau_s = 0.18f + (0.20f * damping_norm) + (0.28f * average_norm);
     altitude_alpha = vario_state_lpf_alpha(dt_s, altitude_tau_s);
     s_vario_state.runtime.filtered_altitude_m +=
         altitude_alpha * (measured_altitude_m - s_vario_state.runtime.filtered_altitude_m);
 
-    /* 아주 작은 오차는 남기지 말고 바로 측정값에 붙여 숫자 흔들림을 줄인다. */
     if (vario_state_absf(measured_altitude_m - s_vario_state.runtime.filtered_altitude_m) < 0.03f)
     {
         s_vario_state.runtime.filtered_altitude_m = measured_altitude_m;
     }
 
-    /* fast path는 추가 app-layer 필터 없이 즉시 전달한다. */
     s_vario_state.runtime.fast_vario_bar_mps =
         vario_state_fast_bar_update(&s_vario_state.fast_bar_filter,
                                     fast_vario_input_mps,
                                     filter_timestamp_ms);
 
-    /* current vario 숫자용 slow path는 단순 UI filter 하나만 통과시킨다. */
     s_vario_state.runtime.filtered_vario_mps =
         Vario_UiVarioFilter_Update(&s_vario_state.ui_vario_filter,
                                    slow_vario_input_mps,
@@ -936,9 +1034,12 @@ static void vario_state_update_display_filter(uint32_t now_ms)
     s_vario_state.runtime.observer_velocity_mps = s_vario_state.runtime.filtered_vario_mps;
     s_vario_state.runtime.last_measured_altitude_m = measured_altitude_m;
     s_vario_state.runtime.last_altitude_update_ms = alt->last_update_ms;
+    s_vario_state.altitude_source_tracking_valid = true;
+    s_vario_state.last_altitude_source = settings->altitude_source;
 }
 
 static void vario_state_update_flight_logic(uint32_t now_ms)
+
 {
     const vario_settings_t *settings;
     float                   start_speed_kmh;
