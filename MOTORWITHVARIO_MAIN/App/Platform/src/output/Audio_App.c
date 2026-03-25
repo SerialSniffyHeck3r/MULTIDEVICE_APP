@@ -1,6 +1,5 @@
 #include "Audio_App.h"
 
-#include "APP_ALTITUDE.h"
 #include "Audio_Driver.h"
 #include "Audio_Presets.h"
 
@@ -92,39 +91,55 @@ void Audio_App_Task(uint32_t now_ms)
 void Audio_App_SetVolumePercent(uint8_t volume_percent)
 {
     /* ---------------------------------------------------------------------- */
-    /*  현재 시점의 canonical volume sink는 Audio_Driver다.                    */
-    /*  upper layer는 clamp/전달만 Audio_App를 통해 수행한다.                 */
+    /*  canonical volume sink는 Audio_Driver다.                               */
+    /*  upper layer는 clamp 후 전달만 수행한다.                               */
     /* ---------------------------------------------------------------------- */
     Audio_Driver_SetVolumePercent(Audio_App_ClampPercent(volume_percent));
 }
 
-void Audio_App_SetVariometerState(bool active, int32_t vario_cms, uint32_t now_ms)
+HAL_StatusTypeDef Audio_App_VariometerStart(app_audio_waveform_t waveform,
+                                            uint32_t initial_freq_hz,
+                                            uint16_t initial_level_permille)
 {
-    if (active == false)
-    {
-        Audio_App_ReleaseVariometer(now_ms);
-        return;
-    }
+    /* ---------------------------------------------------------------------- */
+    /*  제품용 바리오는 여기서 곧바로 Audio_Driver의 연속-톤 전용 API로 간다. */
+    /*  더 이상 APP_ALTITUDE debug audio 경로를 경유하지 않는다.             */
+    /* ---------------------------------------------------------------------- */
+    return Audio_Driver_VarioStart(waveform,
+                                   initial_freq_hz,
+                                   initial_level_permille);
+}
 
-    /* ---------------------------------------------------------------------- */
-    /*  현재 variometer tone transport는 legacy APP_ALTITUDE debug audio path  */
-    /*  위에 얹혀 있다.                                                        */
-    /*  upper VARIO 앱이 그 사실을 직접 알 필요 없도록                        */
-    /*  façade 안에서만 우회 경로를 유지한다.                                  */
-    /* ---------------------------------------------------------------------- */
-    APP_ALTITUDE_DebugSetUiActive(true, now_ms);
-    APP_ALTITUDE_DebugSetAudioVarioOverride(true, vario_cms, now_ms);
+HAL_StatusTypeDef Audio_App_VariometerSetTarget(uint32_t target_freq_hz,
+                                                uint16_t target_level_permille,
+                                                uint32_t glide_time_ms)
+{
+    return Audio_Driver_VarioSetTarget(target_freq_hz,
+                                       target_level_permille,
+                                       glide_time_ms);
+}
+
+HAL_StatusTypeDef Audio_App_VariometerStop(uint32_t release_time_ms)
+{
+    return Audio_Driver_VarioStop(release_time_ms);
+}
+
+bool Audio_App_IsVariometerActive(void)
+{
+    return Audio_Driver_IsVarioActive();
 }
 
 void Audio_App_ReleaseVariometer(uint32_t now_ms)
 {
     /* ---------------------------------------------------------------------- */
-    /*  tone ownership 해제는 항상 "UI inactive"를 먼저 알린다.              */
-    /*  APP_ALTITUDE 쪽이 자기 소유 tone만 안전하게 정지하고                   */
-    /*  stale override latch까지 같이 지운다.                                 */
+    /*  now_ms 파라미터는 기존 상위 호출부와의 함수 시그니처 호환용으로만      */
+    /*  유지한다.                                                              */
+    /*                                                                        */
+    /*  제품용 바리오 ownership 해제는 드라이버 전용 release path로 곧바로     */
+    /*  연결한다.                                                              */
     /* ---------------------------------------------------------------------- */
-    APP_ALTITUDE_DebugSetUiActive(false, now_ms);
-    APP_ALTITUDE_DebugSetAudioVarioOverride(false, 0, now_ms);
+    (void)now_ms;
+    (void)Audio_Driver_VarioStop(48u);
 }
 
 /* -------------------------------------------------------------------------- */

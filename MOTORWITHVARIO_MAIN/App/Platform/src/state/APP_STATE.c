@@ -272,10 +272,10 @@ static void APP_STATE_ApplyDefaultSettingsUnlocked(void)
         /*                            투어링 컴퓨터 응답성은 유지                   */
         /*  - GNSS bias tau 4.0s  : GNSS는 저주파 anchor로만 천천히 먹인다.        */
         /* ---------------------------------------------------------------------- */
-        g_app_state.settings.bike.enabled                        = 1u;
+        g_app_state.settings.bike.enabled                        = 0u;
         g_app_state.settings.bike.auto_zero_on_boot              = 0u;
         g_app_state.settings.bike.gnss_aid_enabled               = 1u;
-        g_app_state.settings.bike.obd_aid_enabled                = 1u;
+        g_app_state.settings.bike.obd_aid_enabled                = 0u;
 
         g_app_state.settings.bike.mount_forward_axis             = (uint8_t)APP_BIKE_AXIS_POS_X;
         g_app_state.settings.bike.mount_left_axis                = (uint8_t)APP_BIKE_AXIS_POS_Y;

@@ -152,6 +152,62 @@
 #define APP_ALTITUDE_IMU_STALE_TIMEOUT_MS 80u
 #endif
 
+#ifndef APP_ALTITUDE_IMU_ACCEL_HP_TAU_MS
+#define APP_ALTITUDE_IMU_ACCEL_HP_TAU_MS 90u
+#endif
+
+#ifndef APP_ALTITUDE_IMU_VIBRATION_RMS_TAU_MS
+#define APP_ALTITUDE_IMU_VIBRATION_RMS_TAU_MS 240u
+#endif
+
+#ifndef APP_ALTITUDE_IMU_VIBRATION_TRUST_FULL_MG
+#define APP_ALTITUDE_IMU_VIBRATION_TRUST_FULL_MG 180.0f
+#endif
+
+#ifndef APP_ALTITUDE_IMU_GYRO_TRUST_FULL_DPS
+#define APP_ALTITUDE_IMU_GYRO_TRUST_FULL_DPS 180.0f
+#endif
+
+#ifndef APP_ALTITUDE_IMU_TEMP_TRUST_FULL_C
+#define APP_ALTITUDE_IMU_TEMP_TRUST_FULL_C 45.0f
+#endif
+
+#ifndef APP_ALTITUDE_IMU_MAHONY_BASE_GAIN
+#define APP_ALTITUDE_IMU_MAHONY_BASE_GAIN 0.40f
+#endif
+
+#ifndef APP_ALTITUDE_IMU_MAHONY_MAX_GAIN
+#define APP_ALTITUDE_IMU_MAHONY_MAX_GAIN 4.00f
+#endif
+
+#ifndef APP_ALTITUDE_IMU_GYRO_BIAS_TAU_MS
+#define APP_ALTITUDE_IMU_GYRO_BIAS_TAU_MS 8000u
+#endif
+
+#ifndef APP_ALTITUDE_IMU_ACCEL_BIAS_TAU_MS
+#define APP_ALTITUDE_IMU_ACCEL_BIAS_TAU_MS 10000u
+#endif
+
+#ifndef APP_ALTITUDE_IMU_ACCEL_TEMP_TAU_MS
+#define APP_ALTITUDE_IMU_ACCEL_TEMP_TAU_MS 140000u
+#endif
+
+#ifndef APP_ALTITUDE_IMU_BLEND_DISAGREE_TAU_MS
+#define APP_ALTITUDE_IMU_BLEND_DISAGREE_TAU_MS 380u
+#endif
+
+#ifndef APP_ALTITUDE_IMU_BLEND_FAST_DIFF_CMS
+#define APP_ALTITUDE_IMU_BLEND_FAST_DIFF_CMS 420.0f
+#endif
+
+#ifndef APP_ALTITUDE_IMU_BLEND_SLOW_DIFF_CMS
+#define APP_ALTITUDE_IMU_BLEND_SLOW_DIFF_CMS 260.0f
+#endif
+
+#ifndef APP_ALTITUDE_IMU_REST_ACCEL_ERROR_MG
+#define APP_ALTITUDE_IMU_REST_ACCEL_ERROR_MG 20.0f
+#endif
+
 #ifndef APP_ALTITUDE_AUDIO_SEGMENT_MARGIN_MS
 #define APP_ALTITUDE_AUDIO_SEGMENT_MARGIN_MS 4u
 #endif
@@ -457,8 +513,31 @@ typedef struct
 
     float imu_vertical_lp_cms2;        /* trust-gated vertical specific-force LPF */
     float imu_accel_norm_mg;           /* 현재 accel norm, mg                     */
-    float imu_attitude_trust_permille; /* accel norm 기반 attitude trust 0..1000  */
+    float imu_attitude_trust_permille; /* accel / vibration / gyro / temp trust   */
     float imu_predict_weight_permille; /* KF4 predict에 실제 적용된 weight        */
+    float imu_blend_weight_permille;   /* 최종 fast-vario blend 진단용 weight     */
+    float imu_vibration_rms_mg;        /* 고주파 진동 RMS, mg                     */
+    float imu_gyro_rms_dps;            /* 고주파 각속도 envelope, dps             */
+    float imu_vario_disagree_lp_cms;   /* IMU vs baro/no-IMU vario mismatch LPF   */
+    float imu_temp_c;                  /* 최근 MPU 온도, degC                     */
+    float imu_temp_ref_c;              /* temp compensation 기준 온도, degC       */
+    bool  imu_temp_ref_valid;          /* temp reference 유효 여부                */
+    float imu_quat_w;                  /* body->nav quaternion w                  */
+    float imu_quat_x;                  /* body->nav quaternion x                  */
+    float imu_quat_y;                  /* body->nav quaternion y                  */
+    float imu_quat_z;                  /* body->nav quaternion z                  */
+    float imu_gyro_bias_x_rps;         /* rest-learned gyro bias x                */
+    float imu_gyro_bias_y_rps;         /* rest-learned gyro bias y                */
+    float imu_gyro_bias_z_rps;         /* rest-learned gyro bias z                */
+    float imu_accel_bias_x_g;          /* rest-learned accel bias x               */
+    float imu_accel_bias_y_g;          /* rest-learned accel bias y               */
+    float imu_accel_bias_z_g;          /* rest-learned accel bias z               */
+    float imu_accel_temp_gain_x_g_per_c; /* accel bias temp slope x               */
+    float imu_accel_temp_gain_y_g_per_c; /* accel bias temp slope y               */
+    float imu_accel_temp_gain_z_g_per_c; /* accel bias temp slope z               */
+    float imu_accel_lp_x_g;            /* vibration metric용 accel LP x           */
+    float imu_accel_lp_y_g;            /* vibration metric용 accel LP y           */
+    float imu_accel_lp_z_g;            /* vibration metric용 accel LP z           */
 
     /* ---------------------------------------------------------------------- */
     /*  Home / output smoothing states                                         */
@@ -742,25 +821,159 @@ static float APP_ALTITUDE_VectorNorm3F(float x, float y, float z)
     return sqrtf((x * x) + (y * y) + (z * z));
 }
 
-static bool APP_ALTITUDE_NormalizeVec3(float *x, float *y, float *z)
+static bool APP_ALTITUDE_QuaternionNormalize(float *qw,
+                                            float *qx,
+                                            float *qy,
+                                            float *qz)
 {
     float norm;
 
-    if ((x == 0) || (y == 0) || (z == 0))
+    if ((qw == 0) || (qx == 0) || (qy == 0) || (qz == 0))
     {
         return false;
     }
 
-    norm = APP_ALTITUDE_VectorNorm3F(*x, *y, *z);
+    norm = sqrtf(((*qw) * (*qw)) + ((*qx) * (*qx)) + ((*qy) * (*qy)) + ((*qz) * (*qz)));
     if (norm < 0.000001f)
     {
         return false;
     }
 
-    *x /= norm;
-    *y /= norm;
-    *z /= norm;
+    *qw /= norm;
+    *qx /= norm;
+    *qy /= norm;
+    *qz /= norm;
     return true;
+}
+
+static void APP_ALTITUDE_QuaternionRotateBodyToNav(float qw,
+                                                   float qx,
+                                                   float qy,
+                                                   float qz,
+                                                   float bx,
+                                                   float by,
+                                                   float bz,
+                                                   float *nx,
+                                                   float *ny,
+                                                   float *nz)
+{
+    if ((nx == 0) || (ny == 0) || (nz == 0))
+    {
+        return;
+    }
+
+    *nx = ((1.0f - (2.0f * ((qy * qy) + (qz * qz)))) * bx) +
+          ((2.0f * ((qx * qy) - (qw * qz))) * by) +
+          ((2.0f * ((qx * qz) + (qw * qy))) * bz);
+
+    *ny = ((2.0f * ((qx * qy) + (qw * qz))) * bx) +
+          ((1.0f - (2.0f * ((qx * qx) + (qz * qz)))) * by) +
+          ((2.0f * ((qy * qz) - (qw * qx))) * bz);
+
+    *nz = ((2.0f * ((qx * qz) - (qw * qy))) * bx) +
+          ((2.0f * ((qy * qz) + (qw * qx))) * by) +
+          ((1.0f - (2.0f * ((qx * qx) + (qy * qy)))) * bz);
+}
+
+static void APP_ALTITUDE_QuaternionRotateNavToBody(float qw,
+                                                   float qx,
+                                                   float qy,
+                                                   float qz,
+                                                   float nx,
+                                                   float ny,
+                                                   float nz,
+                                                   float *bx,
+                                                   float *by,
+                                                   float *bz)
+{
+    APP_ALTITUDE_QuaternionRotateBodyToNav(qw,
+                                           -qx,
+                                           -qy,
+                                           -qz,
+                                           nx,
+                                           ny,
+                                           nz,
+                                           bx,
+                                           by,
+                                           bz);
+}
+
+static bool APP_ALTITUDE_QuaternionInitFromAccel(float ax_unit,
+                                                 float ay_unit,
+                                                 float az_unit,
+                                                 float *qw,
+                                                 float *qx,
+                                                 float *qy,
+                                                 float *qz)
+{
+    float cross_x;
+    float cross_y;
+    float cross_z;
+    float dot;
+    float scale;
+
+    if ((qw == 0) || (qx == 0) || (qy == 0) || (qz == 0))
+    {
+        return false;
+    }
+
+    dot = az_unit;
+    if (dot <= -0.9999f)
+    {
+        *qw = 0.0f;
+        *qx = 1.0f;
+        *qy = 0.0f;
+        *qz = 0.0f;
+        return true;
+    }
+
+    cross_x = ay_unit;
+    cross_y = -ax_unit;
+    cross_z = 0.0f;
+
+    scale = sqrtf((1.0f + dot) * 2.0f);
+    if (scale < 0.000001f)
+    {
+        return false;
+    }
+
+    *qw = 0.5f * scale;
+    *qx = cross_x / scale;
+    *qy = cross_y / scale;
+    *qz = cross_z / scale;
+    return APP_ALTITUDE_QuaternionNormalize(qw, qx, qy, qz);
+}
+
+static bool APP_ALTITUDE_QuaternionIntegrateBodyRates(float *qw,
+                                                      float *qx,
+                                                      float *qy,
+                                                      float *qz,
+                                                      float wx_rps,
+                                                      float wy_rps,
+                                                      float wz_rps,
+                                                      float dt_s)
+{
+    float dq_w;
+    float dq_x;
+    float dq_y;
+    float dq_z;
+
+    if ((qw == 0) || (qx == 0) || (qy == 0) || (qz == 0))
+    {
+        return false;
+    }
+
+    dq_w = -0.5f * (((*qx) * wx_rps) + ((*qy) * wy_rps) + ((*qz) * wz_rps));
+    dq_x =  0.5f * (((*qw) * wx_rps) + ((*qy) * wz_rps) - ((*qz) * wy_rps));
+    dq_y =  0.5f * (((*qw) * wy_rps) - ((*qx) * wz_rps) + ((*qz) * wx_rps));
+    dq_z =  0.5f * (((*qw) * wz_rps) + ((*qx) * wy_rps) - ((*qy) * wx_rps));
+
+    *qw += dq_w * dt_s;
+    *qx += dq_x * dt_s;
+    *qy += dq_y * dt_s;
+    *qz += dq_z * dt_s;
+
+    return APP_ALTITUDE_QuaternionNormalize(qw, qx, qy, qz);
 }
 
 static float APP_ALTITUDE_Median3F(float a, float b, float c)
@@ -1644,15 +1857,31 @@ static bool APP_ALTITUDE_IsImuInputEnabled(const app_altitude_settings_t *settin
 static void APP_ALTITUDE_ResetImuRuntimeForUnavailableInput(void)
 {
     /* ---------------------------------------------------------------------- */
-    /*  IMU가 의도적으로 꺼졌거나 stale sample만 남아 있는 경우                 */
-    /*  gravity / trust / predict weight를 모두 0으로 내려                     */
-    /*  stale acceleration이 KF4 predict에 반복 주입되는 일을 막는다.          */
+    /*  IMU 입력이 꺼졌거나 stale sample만 남은 경우                            */
+    /*                                                                        */
+    /*  중요한 정책                                                            */
+    /*  1) 자세/수직가속 freshness와 직접 관련된 상태만 즉시 무효화한다.        */
+    /*  2) bias / temp slope 같은 장기 학습값은 그대로 남겨                    */
+    /*     warm-up 이후 다시 살아났을 때 바로 도움을 주게 한다.               */
+    /*  3) vario blend 가속 통로는 0으로 내려                                  */
+    /*     stale accel 이 KF4 예측에 반복 주입되는 일을 막는다.               */
     /* ---------------------------------------------------------------------- */
     s_altitude_runtime.gravity_est_valid = false;
+    s_altitude_runtime.gravity_est_x = 0.0f;
+    s_altitude_runtime.gravity_est_y = 0.0f;
+    s_altitude_runtime.gravity_est_z = 1.0f;
+
+    s_altitude_runtime.imu_quat_w = 1.0f;
+    s_altitude_runtime.imu_quat_x = 0.0f;
+    s_altitude_runtime.imu_quat_y = 0.0f;
+    s_altitude_runtime.imu_quat_z = 0.0f;
+
     s_altitude_runtime.imu_vertical_lp_cms2 = 0.0f;
     s_altitude_runtime.imu_accel_norm_mg = 0.0f;
     s_altitude_runtime.imu_attitude_trust_permille = 0.0f;
     s_altitude_runtime.imu_predict_weight_permille = 0.0f;
+    s_altitude_runtime.imu_blend_weight_permille = 0.0f;
+    s_altitude_runtime.imu_vario_disagree_lp_cms = 0.0f;
 }
 
 static float APP_ALTITUDE_GetDebugAudioSourceVarioCms(const app_altitude_settings_t *settings)
@@ -1977,57 +2206,79 @@ static void APP_ALTITUDE_Kf4_Predict(float x[4],
 /* -------------------------------------------------------------------------- */
 /*  IMU 수직 가속 추정                                                         */
 /*                                                                            */
-/*  자세 센서/쿼터니언이 없는 현재 하드웨어에서는                              */
-/*  accelerometer의 저주파 성분을 gravity vector로 보고,                       */
-/*  현재 accel에서 gravity LPF를 뺀 뒤                                         */
-/*  그 차이를 gravity 방향으로 projection 해서                                 */
-/*  수직 specific-force를 근사한다.                                            */
+/*  새 엔진의 핵심                                                             */
+/*  - quaternion 기반 6-axis attitude observer                                */
+/*  - rest 구간에서 gyro / accel bias를 천천히 학습                           */
+/*  - bias의 온도 기울기도 아주 느리게 적응                                   */
+/*  - vibration / gyro activity / accel-norm / temperature를 함께 보아        */
+/*    IMU trust 와 predict weight를 연속값으로 산출                           */
 /*                                                                            */
-/*  장점                                                                       */
-/*  - 기기 장착 방향이 꼭 Z-up이 아니어도                                      */
-/*    정적 gravity 방향을 자동으로 따라간다.                                   */
-/*                                                                            */
-/*  주의                                                                       */
-/*  - 급한 자세 변화 / 큰 횡가속이 많으면                                      */
-/*    순수 AHRS보다 부정확할 수 있다.                                           */
-/*  - 그래서 이 결과는 no-IMU 결과와 병렬로 함께 보관한다.                     */
+/*  설계 철학                                                                 */
+/*  1) INS는 fast response를 주는 보조 엔진이다.                               */
+/*  2) baro/GPS는 long-term truth anchor 다.                                   */
+/*  3) 따라서 여기서는 "좋은 IMU면 과감하게 빠르게",                          */
+/*     "나쁜 IMU면 조용히 물러나기" 를 구현한다.                               */
 /* -------------------------------------------------------------------------- */
 static float APP_ALTITUDE_UpdateImuVerticalAccelCms2(const app_altitude_settings_t *settings,
-                                                      const app_gy86_mpu_raw_t *mpu,
-                                                      uint32_t now_ms,
-                                                      float task_dt_s,
-                                                      bool *out_vector_valid)
+                                                     const app_gy86_mpu_raw_t *mpu,
+                                                     uint32_t now_ms,
+                                                     float task_dt_s,
+                                                     bool *out_vector_valid)
 {
     float imu_dt_s;
     float accel_lsb_per_g;
     float gyro_lsb_per_dps;
+    float ax_raw_g;
+    float ay_raw_g;
+    float az_raw_g;
     float ax_g;
     float ay_g;
     float az_g;
-    float accel_norm_g;
-    float accel_norm_mg;
-    float a_hat_x;
-    float a_hat_y;
-    float a_hat_z;
-    float g_pred_x;
-    float g_pred_y;
-    float g_pred_z;
     float gx_rad_s;
     float gy_rad_s;
     float gz_rad_s;
-    float dg_x;
-    float dg_y;
-    float dg_z;
-    float accel_gate_mg;
+    float accel_norm_g;
+    float accel_norm_mg;
     float accel_error_mg;
+    float a_hat_x;
+    float a_hat_y;
+    float a_hat_z;
+    float gravity_body_x;
+    float gravity_body_y;
+    float gravity_body_z;
+    float vib_res_x;
+    float vib_res_y;
+    float vib_res_z;
+    float vib_mg;
+    float gyro_norm_dps;
+    float trust_acc;
+    float trust_vib_raw;
+    float trust_gyro_raw;
+    float trust_temp_raw;
+    float trust_vib;
+    float trust_gyro;
+    float trust_temp;
     float attitude_trust;
-    float correction_alpha;
-    float sign_f;
-    float predict_weight;
-    float vertical_total_g;
+    float mahony_gain;
+    float err_x;
+    float err_y;
+    float err_z;
+    float corrected_gx_rad_s;
+    float corrected_gy_rad_s;
+    float corrected_gz_rad_s;
+    float nav_ax_g;
+    float nav_ay_g;
+    float nav_az_g;
     float vertical_dyn_g;
     float deadband_g;
     float clip_g;
+    float sign_f;
+    float predict_weight;
+    float min_trust;
+    float temp_c;
+    float delta_temp_c;
+    float rest_vertical_mg;
+    bool  rest_candidate;
 
     if (out_vector_valid != 0)
     {
@@ -2039,21 +2290,12 @@ static float APP_ALTITUDE_UpdateImuVerticalAccelCms2(const app_altitude_settings
         return 0.0f;
     }
 
-    /* ------------------------------------------------------------------ */
-    /*  settings에서 IMU input을 꺼 둔 경우                                   */
-    /*  stale sample을 다시 쓰지 않도록 즉시 predict 입력을 0으로 만든다.     */
-    /* ------------------------------------------------------------------ */
     if (APP_ALTITUDE_IsImuInputEnabled(settings) == false)
     {
         APP_ALTITUDE_ResetImuRuntimeForUnavailableInput();
         return 0.0f;
     }
 
-    /* ------------------------------------------------------------------ */
-    /*  bus 차단 / freeze / 통신 정지 등으로                                  */
-    /*  MPU timestamp가 오래 멈춘 경우에도                                     */
-    /*  마지막 accel 값을 매 task마다 재사용하지 않도록 stale guard를 둔다.   */
-    /* ------------------------------------------------------------------ */
     if ((mpu->sample_count == 0u) ||
         (mpu->timestamp_ms == 0u) ||
         ((uint32_t)(now_ms - mpu->timestamp_ms) > APP_ALTITUDE_IMU_STALE_TIMEOUT_MS))
@@ -2062,11 +2304,6 @@ static float APP_ALTITUDE_UpdateImuVerticalAccelCms2(const app_altitude_settings
         return 0.0f;
     }
 
-    /* ------------------------------------------------------------------ */
-    /*  같은 raw sample을 두 번 이상 적분하지 않도록 sample_count를 본다.   */
-    /*  task loop가 sensor rate보다 빠른 경우에도                             */
-    /*  실제 MPU sample cadence 기준으로만 IMU estimator가 전진한다.         */
-    /* ------------------------------------------------------------------ */
     if ((mpu->sample_count != 0u) && (mpu->sample_count == s_altitude_runtime.last_mpu_sample_count))
     {
         if (out_vector_valid != 0)
@@ -2078,8 +2315,7 @@ static float APP_ALTITUDE_UpdateImuVerticalAccelCms2(const app_altitude_settings
     }
 
     imu_dt_s = task_dt_s;
-    if ((mpu->sample_count != 0u) &&
-        (mpu->timestamp_ms != 0u) &&
+    if ((mpu->timestamp_ms != 0u) &&
         (s_altitude_runtime.last_mpu_timestamp_ms != 0u) &&
         (mpu->timestamp_ms > s_altitude_runtime.last_mpu_timestamp_ms))
     {
@@ -2092,9 +2328,66 @@ static float APP_ALTITUDE_UpdateImuVerticalAccelCms2(const app_altitude_settings
     s_altitude_runtime.last_mpu_timestamp_ms = mpu->timestamp_ms;
 
     accel_lsb_per_g = (float)settings->imu_accel_lsb_per_g;
-    ax_g = ((float)mpu->accel_x_raw) / accel_lsb_per_g;
-    ay_g = ((float)mpu->accel_y_raw) / accel_lsb_per_g;
-    az_g = ((float)mpu->accel_z_raw) / accel_lsb_per_g;
+    gyro_lsb_per_dps = (settings->imu_gyro_lsb_per_dps > 0u) ?
+                       (float)settings->imu_gyro_lsb_per_dps :
+                       131.0f;
+
+    temp_c = ((float)mpu->temp_cdeg) * 0.01f;
+    s_altitude_runtime.imu_temp_c = temp_c;
+    if (s_altitude_runtime.imu_temp_ref_valid == false)
+    {
+        s_altitude_runtime.imu_temp_ref_c = temp_c;
+        s_altitude_runtime.imu_temp_ref_valid = true;
+    }
+    delta_temp_c = temp_c - s_altitude_runtime.imu_temp_ref_c;
+
+    ax_raw_g = ((float)mpu->accel_x_raw) / accel_lsb_per_g;
+    ay_raw_g = ((float)mpu->accel_y_raw) / accel_lsb_per_g;
+    az_raw_g = ((float)mpu->accel_z_raw) / accel_lsb_per_g;
+
+    ax_g = ax_raw_g - (s_altitude_runtime.imu_accel_bias_x_g +
+                       (s_altitude_runtime.imu_accel_temp_gain_x_g_per_c * delta_temp_c));
+    ay_g = ay_raw_g - (s_altitude_runtime.imu_accel_bias_y_g +
+                       (s_altitude_runtime.imu_accel_temp_gain_y_g_per_c * delta_temp_c));
+    az_g = az_raw_g - (s_altitude_runtime.imu_accel_bias_z_g +
+                       (s_altitude_runtime.imu_accel_temp_gain_z_g_per_c * delta_temp_c));
+
+    gx_rad_s = ((((float)mpu->gyro_x_raw) / gyro_lsb_per_dps) * ((float)M_PI / 180.0f));
+    gy_rad_s = ((((float)mpu->gyro_y_raw) / gyro_lsb_per_dps) * ((float)M_PI / 180.0f));
+    gz_rad_s = ((((float)mpu->gyro_z_raw) / gyro_lsb_per_dps) * ((float)M_PI / 180.0f));
+
+    s_altitude_runtime.imu_accel_lp_x_g = APP_ALTITUDE_LpfUpdate(s_altitude_runtime.imu_accel_lp_x_g,
+                                                                 ax_g,
+                                                                 APP_ALTITUDE_IMU_ACCEL_HP_TAU_MS,
+                                                                 imu_dt_s);
+    s_altitude_runtime.imu_accel_lp_y_g = APP_ALTITUDE_LpfUpdate(s_altitude_runtime.imu_accel_lp_y_g,
+                                                                 ay_g,
+                                                                 APP_ALTITUDE_IMU_ACCEL_HP_TAU_MS,
+                                                                 imu_dt_s);
+    s_altitude_runtime.imu_accel_lp_z_g = APP_ALTITUDE_LpfUpdate(s_altitude_runtime.imu_accel_lp_z_g,
+                                                                 az_g,
+                                                                 APP_ALTITUDE_IMU_ACCEL_HP_TAU_MS,
+                                                                 imu_dt_s);
+
+    vib_res_x = ax_g - s_altitude_runtime.imu_accel_lp_x_g;
+    vib_res_y = ay_g - s_altitude_runtime.imu_accel_lp_y_g;
+    vib_res_z = az_g - s_altitude_runtime.imu_accel_lp_z_g;
+    vib_mg = APP_ALTITUDE_VectorNorm3F(vib_res_x, vib_res_y, vib_res_z) * 1000.0f;
+
+    s_altitude_runtime.imu_vibration_rms_mg = APP_ALTITUDE_LpfUpdate(s_altitude_runtime.imu_vibration_rms_mg,
+                                                                     vib_mg,
+                                                                     APP_ALTITUDE_IMU_VIBRATION_RMS_TAU_MS,
+                                                                     imu_dt_s);
+
+    gyro_norm_dps = APP_ALTITUDE_VectorNorm3F(gx_rad_s - s_altitude_runtime.imu_gyro_bias_x_rps,
+                                              gy_rad_s - s_altitude_runtime.imu_gyro_bias_y_rps,
+                                              gz_rad_s - s_altitude_runtime.imu_gyro_bias_z_rps) *
+                    (180.0f / (float)M_PI);
+
+    s_altitude_runtime.imu_gyro_rms_dps = APP_ALTITUDE_LpfUpdate(s_altitude_runtime.imu_gyro_rms_dps,
+                                                                 gyro_norm_dps,
+                                                                 APP_ALTITUDE_IMU_VIBRATION_RMS_TAU_MS,
+                                                                 imu_dt_s);
 
     accel_norm_g = APP_ALTITUDE_VectorNorm3F(ax_g, ay_g, az_g);
     accel_norm_mg = accel_norm_g * 1000.0f;
@@ -2102,9 +2395,10 @@ static float APP_ALTITUDE_UpdateImuVerticalAccelCms2(const app_altitude_settings
 
     if (accel_norm_g < 0.25f)
     {
+        s_altitude_runtime.gravity_est_valid = false;
         s_altitude_runtime.imu_attitude_trust_permille = 0.0f;
         s_altitude_runtime.imu_predict_weight_permille = 0.0f;
-        s_altitude_runtime.gravity_est_valid = false;
+        s_altitude_runtime.imu_blend_weight_permille = 0.0f;
         return 0.0f;
     }
 
@@ -2114,131 +2408,117 @@ static float APP_ALTITUDE_UpdateImuVerticalAccelCms2(const app_altitude_settings
 
     if (s_altitude_runtime.gravity_est_valid == false)
     {
-        /* -------------------------------------------------------------- */
-        /*  첫 유효 샘플에서는 가속도 방향을 그대로 gravity estimate로 쓴다.*/
-        /*  이후부터는 gyro predict + accel correction 구조로 넘어간다.    */
-        /* -------------------------------------------------------------- */
-        s_altitude_runtime.gravity_est_x = a_hat_x;
-        s_altitude_runtime.gravity_est_y = a_hat_y;
-        s_altitude_runtime.gravity_est_z = a_hat_z;
+        if (APP_ALTITUDE_QuaternionInitFromAccel(a_hat_x,
+                                                 a_hat_y,
+                                                 a_hat_z,
+                                                 &s_altitude_runtime.imu_quat_w,
+                                                 &s_altitude_runtime.imu_quat_x,
+                                                 &s_altitude_runtime.imu_quat_y,
+                                                 &s_altitude_runtime.imu_quat_z) == false)
+        {
+            APP_ALTITUDE_ResetImuRuntimeForUnavailableInput();
+            return 0.0f;
+        }
+
         s_altitude_runtime.gravity_est_valid = true;
     }
-    else
+
+    APP_ALTITUDE_QuaternionRotateNavToBody(s_altitude_runtime.imu_quat_w,
+                                           s_altitude_runtime.imu_quat_x,
+                                           s_altitude_runtime.imu_quat_y,
+                                           s_altitude_runtime.imu_quat_z,
+                                           0.0f,
+                                           0.0f,
+                                           1.0f,
+                                           &gravity_body_x,
+                                           &gravity_body_y,
+                                           &gravity_body_z);
+
+    accel_error_mg = fabsf(accel_norm_mg - APP_ALTITUDE_IMU_ACCEL_NORM_REF_MG);
+    trust_acc = 1.0f - (accel_error_mg /
+                        APP_ALTITUDE_ClampF((float)settings->imu_attitude_accel_gate_mg, 15.0f, 2000.0f));
+    trust_acc = APP_ALTITUDE_Clamp01F(trust_acc);
+
+    trust_vib_raw = 1.0f - (s_altitude_runtime.imu_vibration_rms_mg /
+                            APP_ALTITUDE_IMU_VIBRATION_TRUST_FULL_MG);
+    trust_gyro_raw = 1.0f - (s_altitude_runtime.imu_gyro_rms_dps /
+                             APP_ALTITUDE_IMU_GYRO_TRUST_FULL_DPS);
+    trust_temp_raw = 1.0f - (fabsf(delta_temp_c) /
+                             APP_ALTITUDE_IMU_TEMP_TRUST_FULL_C);
+
+    trust_vib = APP_ALTITUDE_LerpF(0.40f, 1.0f, APP_ALTITUDE_Clamp01F(trust_vib_raw));
+    trust_gyro = APP_ALTITUDE_LerpF(0.50f, 1.0f, APP_ALTITUDE_Clamp01F(trust_gyro_raw));
+    trust_temp = APP_ALTITUDE_LerpF(0.60f, 1.0f, APP_ALTITUDE_Clamp01F(trust_temp_raw));
+
+    attitude_trust = trust_acc * trust_vib * trust_gyro * trust_temp;
+    attitude_trust = APP_ALTITUDE_Clamp01F(attitude_trust);
+    s_altitude_runtime.imu_attitude_trust_permille = attitude_trust * 1000.0f;
+
+    err_x = (a_hat_y * gravity_body_z) - (a_hat_z * gravity_body_y);
+    err_y = (a_hat_z * gravity_body_x) - (a_hat_x * gravity_body_z);
+    err_z = (a_hat_x * gravity_body_y) - (a_hat_y * gravity_body_x);
+
+    mahony_gain = APP_ALTITUDE_IMU_MAHONY_BASE_GAIN +
+                  ((APP_ALTITUDE_IMU_MAHONY_MAX_GAIN - APP_ALTITUDE_IMU_MAHONY_BASE_GAIN) * attitude_trust);
+
+    corrected_gx_rad_s = (gx_rad_s - s_altitude_runtime.imu_gyro_bias_x_rps) + (mahony_gain * err_x);
+    corrected_gy_rad_s = (gy_rad_s - s_altitude_runtime.imu_gyro_bias_y_rps) + (mahony_gain * err_y);
+    corrected_gz_rad_s = (gz_rad_s - s_altitude_runtime.imu_gyro_bias_z_rps) + (mahony_gain * err_z);
+
+    if (APP_ALTITUDE_QuaternionIntegrateBodyRates(&s_altitude_runtime.imu_quat_w,
+                                                  &s_altitude_runtime.imu_quat_x,
+                                                  &s_altitude_runtime.imu_quat_y,
+                                                  &s_altitude_runtime.imu_quat_z,
+                                                  corrected_gx_rad_s,
+                                                  corrected_gy_rad_s,
+                                                  corrected_gz_rad_s,
+                                                  imu_dt_s) == false)
     {
-        g_pred_x = s_altitude_runtime.gravity_est_x;
-        g_pred_y = s_altitude_runtime.gravity_est_y;
-        g_pred_z = s_altitude_runtime.gravity_est_z;
-
-        /* -------------------------------------------------------------- */
-        /*  gyro 적분 prediction                                          */
-        /*  g_body 는 body frame에서 본 중력 방향 unit vector이므로        */
-        /*  dg/dt = -omega x g 형태로 전진한다.                             */
-        /* -------------------------------------------------------------- */
-        if (settings->imu_gyro_lsb_per_dps > 0u)
+        if (APP_ALTITUDE_QuaternionInitFromAccel(a_hat_x,
+                                                 a_hat_y,
+                                                 a_hat_z,
+                                                 &s_altitude_runtime.imu_quat_w,
+                                                 &s_altitude_runtime.imu_quat_x,
+                                                 &s_altitude_runtime.imu_quat_y,
+                                                 &s_altitude_runtime.imu_quat_z) == false)
         {
-            gyro_lsb_per_dps = (float)settings->imu_gyro_lsb_per_dps;
-
-            gx_rad_s = (((float)mpu->gyro_x_raw) / gyro_lsb_per_dps) * ((float)M_PI / 180.0f);
-            gy_rad_s = (((float)mpu->gyro_y_raw) / gyro_lsb_per_dps) * ((float)M_PI / 180.0f);
-            gz_rad_s = (((float)mpu->gyro_z_raw) / gyro_lsb_per_dps) * ((float)M_PI / 180.0f);
-
-            dg_x = -((gy_rad_s * g_pred_z) - (gz_rad_s * g_pred_y));
-            dg_y = -((gz_rad_s * g_pred_x) - (gx_rad_s * g_pred_z));
-            dg_z = -((gx_rad_s * g_pred_y) - (gy_rad_s * g_pred_x));
-
-            g_pred_x += dg_x * imu_dt_s;
-            g_pred_y += dg_y * imu_dt_s;
-            g_pred_z += dg_z * imu_dt_s;
-
-            if (APP_ALTITUDE_NormalizeVec3(&g_pred_x, &g_pred_y, &g_pred_z) == false)
-            {
-                g_pred_x = a_hat_x;
-                g_pred_y = a_hat_y;
-                g_pred_z = a_hat_z;
-            }
-        }
-
-        /* -------------------------------------------------------------- */
-        /*  accel correction trust                                         */
-        /*  accel norm이 1g와 가까울수록 attitude correction을 허용한다.     */
-        /*  큰 선형가속 / 충격 구간에서는 trust를 자동으로 줄여              */
-        /*  accel이 gravity estimate를 오염시키지 못하게 한다.               */
-        /* -------------------------------------------------------------- */
-        accel_gate_mg = (float)settings->imu_attitude_accel_gate_mg;
-        if (accel_gate_mg <= 1.0f)
-        {
-            accel_gate_mg = 1.0f;
-        }
-
-        accel_error_mg = fabsf(accel_norm_mg - APP_ALTITUDE_IMU_ACCEL_NORM_REF_MG);
-        attitude_trust = 1.0f - (accel_error_mg / accel_gate_mg);
-        attitude_trust = APP_ALTITUDE_Clamp01F(attitude_trust);
-
-        correction_alpha = APP_ALTITUDE_LpfAlphaFromTauMs(settings->imu_gravity_tau_ms, imu_dt_s);
-        correction_alpha *= attitude_trust;
-
-        s_altitude_runtime.gravity_est_x = g_pred_x + (correction_alpha * (a_hat_x - g_pred_x));
-        s_altitude_runtime.gravity_est_y = g_pred_y + (correction_alpha * (a_hat_y - g_pred_y));
-        s_altitude_runtime.gravity_est_z = g_pred_z + (correction_alpha * (a_hat_z - g_pred_z));
-
-        if (APP_ALTITUDE_NormalizeVec3(&s_altitude_runtime.gravity_est_x,
-                                       &s_altitude_runtime.gravity_est_y,
-                                       &s_altitude_runtime.gravity_est_z) == false)
-        {
-            s_altitude_runtime.gravity_est_x = a_hat_x;
-            s_altitude_runtime.gravity_est_y = a_hat_y;
-            s_altitude_runtime.gravity_est_z = a_hat_z;
+            APP_ALTITUDE_ResetImuRuntimeForUnavailableInput();
+            return 0.0f;
         }
     }
 
-    /* ------------------------------------------------------------------ */
-    /*  predict weight                                                     */
-    /*  - attitude trust가 일정 threshold 아래로 내려가면                   */
-    /*    KF4 predict에 IMU 가속도를 거의 주지 않는다.                      */
-    /*  - "IMU는 반응은 빠르지만, 믿을 수 있을 때만 센다" 라는 정책이다.     */
-    /* ------------------------------------------------------------------ */
-    if (s_altitude_runtime.gravity_est_valid != false)
-    {
-        s_altitude_runtime.imu_attitude_trust_permille =
-            APP_ALTITUDE_ClampF((fabsf(accel_norm_mg - APP_ALTITUDE_IMU_ACCEL_NORM_REF_MG) <= (float)settings->imu_attitude_accel_gate_mg) ?
-                                (1000.0f * (1.0f - (fabsf(accel_norm_mg - APP_ALTITUDE_IMU_ACCEL_NORM_REF_MG) /
-                                                   APP_ALTITUDE_ClampF((float)settings->imu_attitude_accel_gate_mg, 1.0f, 2000.0f)))) :
-                                0.0f,
-                                0.0f,
-                                1000.0f);
-    }
-    else
-    {
-        s_altitude_runtime.imu_attitude_trust_permille = 0.0f;
-    }
+    APP_ALTITUDE_QuaternionRotateNavToBody(s_altitude_runtime.imu_quat_w,
+                                           s_altitude_runtime.imu_quat_x,
+                                           s_altitude_runtime.imu_quat_y,
+                                           s_altitude_runtime.imu_quat_z,
+                                           0.0f,
+                                           0.0f,
+                                           1.0f,
+                                           &gravity_body_x,
+                                           &gravity_body_y,
+                                           &gravity_body_z);
 
-    if (s_altitude_runtime.imu_attitude_trust_permille <= (float)settings->imu_predict_min_trust_permille)
-    {
-        predict_weight = 0.0f;
-    }
-    else
-    {
-        predict_weight = (s_altitude_runtime.imu_attitude_trust_permille -
-                          (float)settings->imu_predict_min_trust_permille) /
-                         APP_ALTITUDE_ClampF((1000.0f - (float)settings->imu_predict_min_trust_permille), 1.0f, 1000.0f);
-        predict_weight = APP_ALTITUDE_Clamp01F(predict_weight);
-    }
+    s_altitude_runtime.gravity_est_x = gravity_body_x;
+    s_altitude_runtime.gravity_est_y = gravity_body_y;
+    s_altitude_runtime.gravity_est_z = gravity_body_z;
+    s_altitude_runtime.gravity_est_valid = true;
 
-    s_altitude_runtime.imu_predict_weight_permille = predict_weight * 1000.0f;
-
-    /* ------------------------------------------------------------------ */
-    /*  gravity 방향 축으로 총 specific-force를 projection 하고             */
-    /*  1g 정적 성분을 제거해서 vertical dynamic component만 남긴다.         */
-    /* ------------------------------------------------------------------ */
-    vertical_total_g = (ax_g * s_altitude_runtime.gravity_est_x) +
-                       (ay_g * s_altitude_runtime.gravity_est_y) +
-                       (az_g * s_altitude_runtime.gravity_est_z);
+    APP_ALTITUDE_QuaternionRotateBodyToNav(s_altitude_runtime.imu_quat_w,
+                                           s_altitude_runtime.imu_quat_x,
+                                           s_altitude_runtime.imu_quat_y,
+                                           s_altitude_runtime.imu_quat_z,
+                                           ax_g,
+                                           ay_g,
+                                           az_g,
+                                           &nav_ax_g,
+                                           &nav_ay_g,
+                                           &nav_az_g);
 
     sign_f = (settings->imu_vertical_sign >= 0) ? 1.0f : -1.0f;
-    vertical_dyn_g = (vertical_total_g - 1.0f) * sign_f;
+    vertical_dyn_g = (nav_az_g - 1.0f) * sign_f;
 
     deadband_g = ((float)settings->imu_vertical_deadband_mg) * 0.001f;
-    clip_g     = ((float)settings->imu_vertical_clip_mg) * 0.001f;
+    clip_g = ((float)settings->imu_vertical_clip_mg) * 0.001f;
 
     if (fabsf(vertical_dyn_g) < deadband_g)
     {
@@ -2247,12 +2527,89 @@ static float APP_ALTITUDE_UpdateImuVerticalAccelCms2(const app_altitude_settings
 
     vertical_dyn_g = APP_ALTITUDE_ClampF(vertical_dyn_g, -clip_g, clip_g);
 
-    /* ------------------------------------------------------------------ */
-    /*  최종적으로 trust-based predict weight를 곱해                         */
-    /*  "가끔 혼자 뚜우우욱!" 하던 stationary burst를 줄인다.               */
-    /* ------------------------------------------------------------------ */
-    vertical_dyn_g *= predict_weight;
+    rest_vertical_mg = fabsf(vertical_dyn_g) * 1000.0f;
+    rest_candidate = ((s_altitude_runtime.imu_gyro_rms_dps < 2.5f) &&
+                      (accel_error_mg < APP_ALTITUDE_IMU_REST_ACCEL_ERROR_MG) &&
+                      (rest_vertical_mg < APP_ALTITUDE_ClampF((float)settings->rest_detect_accel_mg,
+                                                 12.0f,
+                                                 150.0f)));
 
+    if (rest_candidate != false)
+    {
+        s_altitude_runtime.imu_gyro_bias_x_rps = APP_ALTITUDE_LpfUpdate(s_altitude_runtime.imu_gyro_bias_x_rps,
+                                                                        gx_rad_s,
+                                                                        APP_ALTITUDE_IMU_GYRO_BIAS_TAU_MS,
+                                                                        imu_dt_s);
+        s_altitude_runtime.imu_gyro_bias_y_rps = APP_ALTITUDE_LpfUpdate(s_altitude_runtime.imu_gyro_bias_y_rps,
+                                                                        gy_rad_s,
+                                                                        APP_ALTITUDE_IMU_GYRO_BIAS_TAU_MS,
+                                                                        imu_dt_s);
+        s_altitude_runtime.imu_gyro_bias_z_rps = APP_ALTITUDE_LpfUpdate(s_altitude_runtime.imu_gyro_bias_z_rps,
+                                                                        gz_rad_s,
+                                                                        APP_ALTITUDE_IMU_GYRO_BIAS_TAU_MS,
+                                                                        imu_dt_s);
+
+        s_altitude_runtime.imu_accel_bias_x_g = APP_ALTITUDE_LpfUpdate(s_altitude_runtime.imu_accel_bias_x_g,
+                                                                       ax_raw_g - gravity_body_x,
+                                                                       APP_ALTITUDE_IMU_ACCEL_BIAS_TAU_MS,
+                                                                       imu_dt_s);
+        s_altitude_runtime.imu_accel_bias_y_g = APP_ALTITUDE_LpfUpdate(s_altitude_runtime.imu_accel_bias_y_g,
+                                                                       ay_raw_g - gravity_body_y,
+                                                                       APP_ALTITUDE_IMU_ACCEL_BIAS_TAU_MS,
+                                                                       imu_dt_s);
+        s_altitude_runtime.imu_accel_bias_z_g = APP_ALTITUDE_LpfUpdate(s_altitude_runtime.imu_accel_bias_z_g,
+                                                                       az_raw_g - gravity_body_z,
+                                                                       APP_ALTITUDE_IMU_ACCEL_BIAS_TAU_MS,
+                                                                       imu_dt_s);
+
+        if (fabsf(delta_temp_c) > 0.5f)
+        {
+            s_altitude_runtime.imu_accel_temp_gain_x_g_per_c =
+                APP_ALTITUDE_LpfUpdate(s_altitude_runtime.imu_accel_temp_gain_x_g_per_c,
+                                       ((ax_raw_g - gravity_body_x) - s_altitude_runtime.imu_accel_bias_x_g) /
+                                       delta_temp_c,
+                                       APP_ALTITUDE_IMU_ACCEL_TEMP_TAU_MS,
+                                       imu_dt_s);
+            s_altitude_runtime.imu_accel_temp_gain_y_g_per_c =
+                APP_ALTITUDE_LpfUpdate(s_altitude_runtime.imu_accel_temp_gain_y_g_per_c,
+                                       ((ay_raw_g - gravity_body_y) - s_altitude_runtime.imu_accel_bias_y_g) /
+                                       delta_temp_c,
+                                       APP_ALTITUDE_IMU_ACCEL_TEMP_TAU_MS,
+                                       imu_dt_s);
+            s_altitude_runtime.imu_accel_temp_gain_z_g_per_c =
+                APP_ALTITUDE_LpfUpdate(s_altitude_runtime.imu_accel_temp_gain_z_g_per_c,
+                                       ((az_raw_g - gravity_body_z) - s_altitude_runtime.imu_accel_bias_z_g) /
+                                       delta_temp_c,
+                                       APP_ALTITUDE_IMU_ACCEL_TEMP_TAU_MS,
+                                       imu_dt_s);
+        }
+    }
+
+    min_trust = ((float)settings->imu_predict_min_trust_permille) * 0.001f;
+    if (attitude_trust <= min_trust)
+    {
+        predict_weight = 0.0f;
+    }
+    else
+    {
+        predict_weight = (attitude_trust - min_trust) /
+                         APP_ALTITUDE_ClampF((1.0f - min_trust), 0.001f, 1.0f);
+        predict_weight = APP_ALTITUDE_Clamp01F(predict_weight);
+    }
+
+    predict_weight *= APP_ALTITUDE_Clamp01F(1.0f -
+                                            (s_altitude_runtime.imu_vibration_rms_mg /
+                                             (APP_ALTITUDE_IMU_VIBRATION_TRUST_FULL_MG * 1.15f)));
+    predict_weight *= APP_ALTITUDE_LerpF(0.35f,
+                                         1.0f,
+                                         APP_ALTITUDE_Clamp01F(1.0f -
+                                                               (s_altitude_runtime.imu_gyro_rms_dps /
+                                                                (APP_ALTITUDE_IMU_GYRO_TRUST_FULL_DPS * 1.10f))));
+    predict_weight = APP_ALTITUDE_Clamp01F(predict_weight);
+
+    s_altitude_runtime.imu_predict_weight_permille = predict_weight * 1000.0f;
+
+    vertical_dyn_g *= predict_weight;
     s_altitude_runtime.imu_vertical_lp_cms2 = APP_ALTITUDE_LpfUpdate(s_altitude_runtime.imu_vertical_lp_cms2,
                                                                      vertical_dyn_g * APP_ALTITUDE_GRAVITY_MPS2 * 100.0f,
                                                                      settings->imu_accel_tau_ms,
@@ -2299,9 +2656,17 @@ static void APP_ALTITUDE_EnsureFiltersInitialized(float baro_alt_qnh_cm,
 
     if (s_altitude_runtime.display_output_valid == false)
     {
-        s_altitude_runtime.display_alt_filt_cm    = initial_alt_cm;
-        s_altitude_runtime.display_alt_follow_cm  = initial_alt_cm;
-        s_altitude_runtime.display_alt_present_cm = initial_alt_cm;
+        /* ------------------------------------------------------------------ */
+        /*  표시용 altitude는 상용 vario 철학대로                               */
+        /*  "현재 manual QNH가 정의하는 barometric altitude" 를 canonical 로   */
+        /*  삼는다.                                                            */
+        /*                                                                    */
+        /*  즉 fused absolute filter의 GPS anchor 여부와 무관하게              */
+        /*  부팅 직후 숫자 고도는 baro/QNH 기준으로 시작한다.                  */
+        /* ------------------------------------------------------------------ */
+        s_altitude_runtime.display_alt_filt_cm    = baro_alt_qnh_cm;
+        s_altitude_runtime.display_alt_follow_cm  = baro_alt_qnh_cm;
+        s_altitude_runtime.display_alt_present_cm = baro_alt_qnh_cm;
         s_altitude_runtime.display_output_valid   = true;
     }
 }
@@ -3052,7 +3417,6 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
     bool gps_valid;
     bool imu_vector_valid;
     bool imu_input_enabled;
-    bool imu_display_enabled;
     bool core_rest_active;
     bool baro_rest_hint;
     uint16_t gps_quality_permille;
@@ -3074,6 +3438,12 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
     float imu_predict_weight;
     float imu_predict_cms2;
     float imu_predict_noise_cms2;
+    float imu_anchor_velocity_cms;
+    float imu_velocity_disagreement_cms;
+    float imu_blend_fast;
+    float imu_blend_slow;
+    float imu_fast_target_cms;
+    float imu_slow_target_cms;
     float display_target_cm;
     float display_source_vario_cms;
     uint32_t display_tau_ms;
@@ -3120,7 +3490,6 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
     gps_valid       = false;
     imu_vector_valid = false;
     imu_input_enabled = APP_ALTITUDE_IsImuInputEnabled(settings);
-    imu_display_enabled = false;
     core_rest_active = false;
     baro_rest_hint = false;
     gps_quality_permille = 0u;
@@ -3140,6 +3509,12 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
     imu_predict_weight = 0.0f;
     imu_predict_cms2 = 0.0f;
     imu_predict_noise_cms2 = (float)settings->imu_measurement_noise_cms2;
+    imu_anchor_velocity_cms = 0.0f;
+    imu_velocity_disagreement_cms = 0.0f;
+    imu_blend_fast = 0.0f;
+    imu_blend_slow = 0.0f;
+    imu_fast_target_cms = 0.0f;
+    imu_slow_target_cms = 0.0f;
     display_target_cm = 0.0f;
     display_source_vario_cms = 0.0f;
     display_tau_ms = settings->display_lpf_tau_ms;
@@ -3520,6 +3895,13 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
 
     if (s_altitude_runtime.kf_noimu.valid != false)
     {
+        /* ------------------------------------------------------------------ */
+        /*  전통적인 baro/GPS backed vario                                     */
+        /*                                                                    */
+        /*  이 경로는 INS와 무관하게 항상 유지된다.                             */
+        /*  즉, 상용 variometer가 갖는                                          */
+        /*  "조금 느려도 진실에 가까운 전통 baro vario" 역할을 맡는다.         */
+        /* ------------------------------------------------------------------ */
         s_altitude_runtime.vario_fast_noimu_cms = APP_ALTITUDE_LpfUpdate(s_altitude_runtime.vario_fast_noimu_cms,
                                                                          s_altitude_runtime.kf_noimu.x[1],
                                                                          settings->vario_fast_tau_ms,
@@ -3530,34 +3912,93 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
                                                                          dt_s);
     }
 
-    if (s_altitude_runtime.kf_imu.valid != false)
+    /* ---------------------------------------------------------------------- */
+    /*  sensor-fusion vario blend                                              */
+    /*                                                                          */
+    /*  중요한 재배선                                                          */
+    /*  - IMU on/off 는 altitude source 와 분리된다.                           */
+    /*  - vario_fast/slow_imu 는 이제 "raw IMU velocity" 가 아니라             */
+    /*    baro/no-IMU anchor 와 quaternion INS 를 연속 confidence 로 섞은      */
+    /*    sensor-fusion vario 출력이 된다.                                     */
+    /*                                                                          */
+    /*  따라서 상위 VARIO 앱은 altitude source 와 무관하게                     */
+    /*  이 fused vario 경로만 읽으면 된다.                                     */
+    /* ---------------------------------------------------------------------- */
+    imu_anchor_velocity_cms = s_altitude_runtime.kf_noimu.valid ?
+                              s_altitude_runtime.kf_noimu.x[1] :
+                              baro_velocity_meas_cms;
+    imu_fast_target_cms = imu_anchor_velocity_cms;
+    imu_slow_target_cms = imu_anchor_velocity_cms;
+    s_altitude_runtime.imu_blend_weight_permille = 0.0f;
+
+    if ((settings->imu_aid_enabled != 0u) &&
+        (imu_input_enabled != false) &&
+        (imu_vector_valid != false) &&
+        (s_altitude_runtime.kf_imu.valid != false))
     {
-        s_altitude_runtime.vario_fast_imu_cms = APP_ALTITUDE_LpfUpdate(s_altitude_runtime.vario_fast_imu_cms,
-                                                                       s_altitude_runtime.kf_imu.x[1],
-                                                                       settings->vario_fast_tau_ms,
-                                                                       dt_s);
-        s_altitude_runtime.vario_slow_imu_cms = APP_ALTITUDE_LpfUpdate(s_altitude_runtime.vario_slow_imu_cms,
-                                                                       s_altitude_runtime.vario_fast_imu_cms,
-                                                                       settings->vario_slow_tau_ms,
-                                                                       dt_s);
+        imu_velocity_disagreement_cms = fabsf(s_altitude_runtime.kf_imu.x[1] - imu_anchor_velocity_cms);
+        s_altitude_runtime.imu_vario_disagree_lp_cms = APP_ALTITUDE_LpfUpdate(s_altitude_runtime.imu_vario_disagree_lp_cms,
+                                                                              imu_velocity_disagreement_cms,
+                                                                              APP_ALTITUDE_IMU_BLEND_DISAGREE_TAU_MS,
+                                                                              dt_s);
+
+        imu_blend_fast = APP_ALTITUDE_Clamp01F(1.0f -
+                                               (s_altitude_runtime.imu_vario_disagree_lp_cms /
+                                                APP_ALTITUDE_IMU_BLEND_FAST_DIFF_CMS));
+        imu_blend_slow = APP_ALTITUDE_Clamp01F(1.0f -
+                                               (s_altitude_runtime.imu_vario_disagree_lp_cms /
+                                                APP_ALTITUDE_IMU_BLEND_SLOW_DIFF_CMS));
+
+        imu_blend_fast *= imu_predict_weight;
+        imu_blend_slow *= imu_predict_weight;
+
+        imu_blend_fast = sqrtf(APP_ALTITUDE_Clamp01F(imu_blend_fast));
+        imu_blend_slow = APP_ALTITUDE_Clamp01F(imu_blend_slow);
+
+        imu_fast_target_cms = imu_anchor_velocity_cms +
+                              (imu_blend_fast * (s_altitude_runtime.kf_imu.x[1] - imu_anchor_velocity_cms));
+        imu_slow_target_cms = imu_anchor_velocity_cms +
+                              (imu_blend_slow * (s_altitude_runtime.kf_imu.x[1] - imu_anchor_velocity_cms));
+
+        s_altitude_runtime.imu_blend_weight_permille = imu_blend_fast * 1000.0f;
+    }
+    else
+    {
+        s_altitude_runtime.imu_vario_disagree_lp_cms = APP_ALTITUDE_LpfUpdate(s_altitude_runtime.imu_vario_disagree_lp_cms,
+                                                                              0.0f,
+                                                                              APP_ALTITUDE_IMU_BLEND_DISAGREE_TAU_MS,
+                                                                              dt_s);
     }
 
-    imu_display_enabled = ((settings->imu_aid_enabled != 0u) &&
-                           (imu_input_enabled != false) &&
-                           (s_altitude_runtime.kf_imu.valid != false));
+    s_altitude_runtime.vario_fast_imu_cms = APP_ALTITUDE_LpfUpdate(s_altitude_runtime.vario_fast_imu_cms,
+                                                                   imu_fast_target_cms,
+                                                                   settings->vario_fast_tau_ms,
+                                                                   dt_s);
+    s_altitude_runtime.vario_slow_imu_cms = APP_ALTITUDE_LpfUpdate(s_altitude_runtime.vario_slow_imu_cms,
+                                                                   imu_slow_target_cms,
+                                                                   settings->vario_slow_tau_ms,
+                                                                   dt_s);
 
-    display_target_cm = imu_display_enabled ?
-                        s_altitude_runtime.kf_imu.x[0] :
+    /* ---------------------------------------------------------------------- */
+    /*  display altitude source 정리                                           */
+    /*                                                                          */
+    /*  display/QNH 숫자는 INS가 아니라 manual QNH 기반 barometric altitude 를 */
+    /*  사용한다.                                                              */
+    /*                                                                          */
+    /*  이유                                                                    */
+    /*  - 상용 vario의 ALT 숫자는 대개 QNH/baro canonical path 다.             */
+    /*  - GPS absolute anchor 와 instant INS vario 는 좋은 보조지만            */
+    /*    메인 숫자 고도를 흔들지 않는 편이 낫다.                              */
+    /* ---------------------------------------------------------------------- */
+    display_target_cm = (alt_prev->baro_valid != false) ? alt_qnh_cm :
                         (s_altitude_runtime.kf_noimu.valid ? s_altitude_runtime.kf_noimu.x[0] : alt_qnh_cm);
 
-    display_source_vario_cms = imu_display_enabled ?
-                               s_altitude_runtime.vario_slow_imu_cms :
-                               s_altitude_runtime.vario_slow_noimu_cms;
+    display_source_vario_cms = s_altitude_runtime.vario_slow_noimu_cms;
 
     display_rest_active = APP_ALTITUDE_IsDisplayRestActive(settings,
                                                            display_source_vario_cms,
-                                                           imu_vertical_cms2,
-                                                           imu_vector_valid);
+                                                           (imu_predict_weight > 0.35f) ? imu_vertical_cms2 : 0.0f,
+                                                           (imu_predict_weight > 0.35f) ? imu_vector_valid : false);
 
     if (display_rest_active != false)
     {
