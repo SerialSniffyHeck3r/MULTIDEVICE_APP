@@ -91,6 +91,34 @@ typedef enum
     VARIO_BACKLIGHT_MODE_COUNT
 } vario_backlight_mode_t;
 
+
+/* -------------------------------------------------------------------------- */
+/*  Acoustic profile                                                          */
+/*                                                                            */
+/*  상용기마다 threshold는 비슷해도 "귀맛" 이 다르다.                          */
+/*  본 enum은 그 차이를 코드에 숨겨 두지 않고                                 */
+/*  사용자가 profile 단위로 고를 수 있게 하기 위한 정책 스위치다.             */
+/* -------------------------------------------------------------------------- */
+typedef enum
+{
+    VARIO_AUDIO_PROFILE_SOFT_SPEAKER = 0u,
+    VARIO_AUDIO_PROFILE_FLYTEC_CLASSIC,
+    VARIO_AUDIO_PROFILE_BLUEFLY_SMOOTH,
+    VARIO_AUDIO_PROFILE_DIGIFLY_DG,
+    VARIO_AUDIO_PROFILE_COUNT
+} vario_audio_profile_t;
+
+/* -------------------------------------------------------------------------- */
+/*  Pre-thermal tone mode                                                     */
+/* -------------------------------------------------------------------------- */
+typedef enum
+{
+    VARIO_PRETHERMAL_MODE_OFF = 0u,
+    VARIO_PRETHERMAL_MODE_BUZZER,
+    VARIO_PRETHERMAL_MODE_SOFT_PULSE,
+    VARIO_PRETHERMAL_MODE_COUNT
+} vario_prethermal_mode_t;
+
 /* -------------------------------------------------------------------------- */
 /*  ALT2 mode                                                                 */
 /*                                                                            */
@@ -163,10 +191,21 @@ typedef enum
     VARIO_QUICKSET_ITEM_ALT_SOURCE,
     VARIO_QUICKSET_ITEM_HEADING_SOURCE,
     VARIO_QUICKSET_ITEM_VARIO_DAMPING,
+    VARIO_QUICKSET_ITEM_AUDIO_RESPONSE,
     VARIO_QUICKSET_ITEM_VARIO_AVG_SECONDS,
+    VARIO_QUICKSET_ITEM_AUDIO_PROFILE,
+    VARIO_QUICKSET_ITEM_AUDIO_UP_BASE_HZ,
+    VARIO_QUICKSET_ITEM_AUDIO_MOD_DEPTH,
+    VARIO_QUICKSET_ITEM_AUDIO_PITCH_CURVE,
     VARIO_QUICKSET_ITEM_CLIMB_TONE_THRESHOLD,
+    VARIO_QUICKSET_ITEM_CLIMB_TONE_OFF_THRESHOLD,
+    VARIO_QUICKSET_ITEM_PRETHERMAL_MODE,
+    VARIO_QUICKSET_ITEM_PRETHERMAL_THRESHOLD,
+    VARIO_QUICKSET_ITEM_PRETHERMAL_OFF_THRESHOLD,
     VARIO_QUICKSET_ITEM_SINK_TONE_THRESHOLD,
+    VARIO_QUICKSET_ITEM_SINK_TONE_OFF_THRESHOLD,
     VARIO_QUICKSET_ITEM_SINK_CONT_THRESHOLD,
+    VARIO_QUICKSET_ITEM_SINK_CONT_OFF_THRESHOLD,
     VARIO_QUICKSET_ITEM_FLIGHT_START_SPEED,
     VARIO_QUICKSET_ITEM_BEEP_ONLY_WHEN_FLYING,
     VARIO_QUICKSET_ITEM_AUDIO_ENABLE,
@@ -243,9 +282,19 @@ typedef struct
     /* ---------------------------------------------------------------------- */
     /*  오디오 / 사용자 경험                                                   */
     /* ---------------------------------------------------------------------- */
-    uint8_t audio_enabled;
-    uint8_t audio_volume_percent;
-    uint8_t beep_only_when_flying;
+    uint8_t                 audio_enabled;
+    uint8_t                 audio_volume_percent;
+    uint8_t                 beep_only_when_flying;
+    vario_audio_profile_t   audio_profile;
+    vario_prethermal_mode_t prethermal_mode;
+    uint8_t                 audio_response_level;
+
+    /* ---------------------------------------------------------------------- */
+    /*  acoustic fine tuning                                                  */
+    /* ---------------------------------------------------------------------- */
+    uint16_t audio_up_base_hz;
+    uint8_t  audio_modulation_depth_percent;
+    uint8_t  audio_pitch_curve_percent;
 
     /* ---------------------------------------------------------------------- */
     /*  디스플레이                                                             */
@@ -279,8 +328,13 @@ typedef struct
     uint8_t  vario_damping_level;
     uint8_t  digital_vario_average_seconds;
     int16_t  climb_tone_threshold_cms;
+    int16_t  climb_tone_off_threshold_cms;
+    int16_t  prethermal_threshold_cms;
+    int16_t  prethermal_off_threshold_cms;
     int16_t  sink_tone_threshold_cms;
+    int16_t  sink_tone_off_threshold_cms;
     int16_t  sink_continuous_threshold_cms;
+    int16_t  sink_continuous_off_threshold_cms;
     uint16_t flight_start_speed_kmh_x10;
 
     /* ---------------------------------------------------------------------- */
@@ -369,6 +423,10 @@ const char *Vario_Settings_GetVSpeedUnitText(void);
 const char *Vario_Settings_GetSpeedUnitText(void);
 const char *Vario_Settings_GetNavDistanceUnitText(void);
 const char *Vario_Settings_GetAudioOnOffText(void);
+const char *Vario_Settings_GetAudioProfileText(void);
+const char *Vario_Settings_GetAudioProfileTextForProfile(vario_audio_profile_t profile);
+const char *Vario_Settings_GetPrethermalModeText(void);
+const char *Vario_Settings_GetPrethermalModeTextForMode(vario_prethermal_mode_t mode);
 const char *Vario_Settings_GetAltitudeSourceText(void);
 const char *Vario_Settings_GetHeadingSourceText(void);
 const char *Vario_Settings_GetAlt2ModeText(void);

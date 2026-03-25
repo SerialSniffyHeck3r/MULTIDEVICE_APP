@@ -1,6 +1,6 @@
 #include "Vario_Settings.h"
 
-#include "../Vario_State/Vario_State.h"
+#include "../../inc/Vario_State.h"
 
 #include "APP_STATE.h"
 
@@ -57,9 +57,20 @@ typedef enum
     VARIO_MENU_ITEM_AUDIO_ENABLE,
     VARIO_MENU_ITEM_AUDIO_VOLUME,
     VARIO_MENU_ITEM_BEEP_GATE,
+    VARIO_MENU_ITEM_AUDIO_PROFILE,
+    VARIO_MENU_ITEM_AUDIO_RESPONSE,
+    VARIO_MENU_ITEM_AUDIO_UP_BASE,
+    VARIO_MENU_ITEM_AUDIO_MOD_DEPTH,
+    VARIO_MENU_ITEM_AUDIO_PITCH_CURVE,
     VARIO_MENU_ITEM_CLIMB_TONE,
+    VARIO_MENU_ITEM_CLIMB_TONE_OFF,
+    VARIO_MENU_ITEM_PRETHERMAL_MODE,
+    VARIO_MENU_ITEM_PRETHERMAL,
+    VARIO_MENU_ITEM_PRETHERMAL_OFF,
     VARIO_MENU_ITEM_SINK_TONE,
+    VARIO_MENU_ITEM_SINK_TONE_OFF,
     VARIO_MENU_ITEM_SINK_CONT,
+    VARIO_MENU_ITEM_SINK_CONT_OFF,
     VARIO_MENU_ITEM_LOG_ENABLE,
     VARIO_MENU_ITEM_LOG_INTERVAL,
     VARIO_MENU_ITEM_DAMPING,
@@ -97,10 +108,20 @@ static const vario_menu_item_t s_vario_category_audio_items[] = {
     VARIO_MENU_ITEM_AUDIO_ENABLE,
     VARIO_MENU_ITEM_AUDIO_VOLUME,
     VARIO_MENU_ITEM_BEEP_GATE,
-    VARIO_MENU_ITEM_DAMPING,
+    VARIO_MENU_ITEM_AUDIO_PROFILE,
+    VARIO_MENU_ITEM_AUDIO_RESPONSE,
+    VARIO_MENU_ITEM_AUDIO_UP_BASE,
+    VARIO_MENU_ITEM_AUDIO_MOD_DEPTH,
+    VARIO_MENU_ITEM_AUDIO_PITCH_CURVE,
     VARIO_MENU_ITEM_CLIMB_TONE,
+    VARIO_MENU_ITEM_CLIMB_TONE_OFF,
+    VARIO_MENU_ITEM_PRETHERMAL_MODE,
+    VARIO_MENU_ITEM_PRETHERMAL,
+    VARIO_MENU_ITEM_PRETHERMAL_OFF,
     VARIO_MENU_ITEM_SINK_TONE,
+    VARIO_MENU_ITEM_SINK_TONE_OFF,
     VARIO_MENU_ITEM_SINK_CONT,
+    VARIO_MENU_ITEM_SINK_CONT_OFF,
 };
 
 static const vario_menu_item_t s_vario_category_log_items[] = {
@@ -248,6 +269,41 @@ static void vario_settings_sanitize_sink_audio_band(void)
     if (s_vario_settings.sink_continuous_threshold_cms > s_vario_settings.sink_tone_threshold_cms)
     {
         s_vario_settings.sink_continuous_threshold_cms = s_vario_settings.sink_tone_threshold_cms;
+    }
+}
+
+
+static void vario_settings_sanitize_climb_audio_band(void)
+{
+    if (s_vario_settings.climb_tone_off_threshold_cms > s_vario_settings.climb_tone_threshold_cms)
+    {
+        s_vario_settings.climb_tone_off_threshold_cms = s_vario_settings.climb_tone_threshold_cms;
+    }
+
+    if (s_vario_settings.prethermal_threshold_cms > s_vario_settings.climb_tone_threshold_cms)
+    {
+        s_vario_settings.prethermal_threshold_cms = s_vario_settings.climb_tone_threshold_cms;
+    }
+
+    if (s_vario_settings.prethermal_off_threshold_cms > s_vario_settings.prethermal_threshold_cms)
+    {
+        s_vario_settings.prethermal_off_threshold_cms = s_vario_settings.prethermal_threshold_cms;
+    }
+}
+
+static void vario_settings_sanitize_audio_thresholds(void)
+{
+    vario_settings_sanitize_climb_audio_band();
+    vario_settings_sanitize_sink_audio_band();
+
+    if (s_vario_settings.sink_tone_off_threshold_cms < s_vario_settings.sink_tone_threshold_cms)
+    {
+        s_vario_settings.sink_tone_off_threshold_cms = s_vario_settings.sink_tone_threshold_cms;
+    }
+
+    if (s_vario_settings.sink_continuous_off_threshold_cms < s_vario_settings.sink_continuous_threshold_cms)
+    {
+        s_vario_settings.sink_continuous_off_threshold_cms = s_vario_settings.sink_continuous_threshold_cms;
     }
 }
 
@@ -403,6 +459,50 @@ static void vario_settings_cycle_coord_format(int8_t direction)
     }
 
     s_vario_settings.coord_format = (vario_coord_format_t)next;
+}
+
+static void vario_settings_cycle_audio_profile(int8_t direction)
+{
+    int32_t next;
+
+    if (direction == 0)
+    {
+        return;
+    }
+
+    next = (int32_t)s_vario_settings.audio_profile + ((direction > 0) ? 1 : -1);
+    if (next < 0)
+    {
+        next = (int32_t)VARIO_AUDIO_PROFILE_COUNT - 1;
+    }
+    else if (next >= (int32_t)VARIO_AUDIO_PROFILE_COUNT)
+    {
+        next = 0;
+    }
+
+    s_vario_settings.audio_profile = (vario_audio_profile_t)next;
+}
+
+static void vario_settings_cycle_prethermal_mode(int8_t direction)
+{
+    int32_t next;
+
+    if (direction == 0)
+    {
+        return;
+    }
+
+    next = (int32_t)s_vario_settings.prethermal_mode + ((direction > 0) ? 1 : -1);
+    if (next < 0)
+    {
+        next = (int32_t)VARIO_PRETHERMAL_MODE_COUNT - 1;
+    }
+    else if (next >= (int32_t)VARIO_PRETHERMAL_MODE_COUNT)
+    {
+        next = 0;
+    }
+
+    s_vario_settings.prethermal_mode = (vario_prethermal_mode_t)next;
 }
 
 static void vario_settings_cycle_backlight_mode(int8_t direction)
@@ -682,6 +782,12 @@ void Vario_Settings_Init(void)
     s_vario_settings.audio_enabled                 = 1u;
     s_vario_settings.audio_volume_percent          = 75u;
     s_vario_settings.beep_only_when_flying         = 1u;
+    s_vario_settings.audio_profile                 = VARIO_AUDIO_PROFILE_SOFT_SPEAKER;
+    s_vario_settings.prethermal_mode               = VARIO_PRETHERMAL_MODE_BUZZER;
+    s_vario_settings.audio_response_level          = 7u;
+    s_vario_settings.audio_up_base_hz              = 700u;
+    s_vario_settings.audio_modulation_depth_percent = 100u;
+    s_vario_settings.audio_pitch_curve_percent     = 100u;
     s_vario_settings.display_backlight_mode       = VARIO_BACKLIGHT_MODE_AUTO_CONTINUOUS;
     s_vario_settings.display_brightness_percent    = 70u;
     s_vario_settings.display_contrast_raw          = 160u;
@@ -697,8 +803,13 @@ void Vario_Settings_Init(void)
     s_vario_settings.vario_damping_level           = 7u;
     s_vario_settings.digital_vario_average_seconds = 5u;
     s_vario_settings.climb_tone_threshold_cms      = 15;
+    s_vario_settings.climb_tone_off_threshold_cms  = 7;
+    s_vario_settings.prethermal_threshold_cms      = 5;
+    s_vario_settings.prethermal_off_threshold_cms  = 0;
     s_vario_settings.sink_tone_threshold_cms       = -100;
+    s_vario_settings.sink_tone_off_threshold_cms   = -80;
     s_vario_settings.sink_continuous_threshold_cms = -250;
+    s_vario_settings.sink_continuous_off_threshold_cms = -180;
     s_vario_settings.flight_start_speed_kmh_x10    = 50u;
     s_vario_settings.log_enabled                   = 1u;
     s_vario_settings.log_interval_seconds          = 1u;
@@ -717,7 +828,7 @@ void Vario_Settings_Init(void)
     s_vario_settings.show_max_vario                = 1u;
     s_vario_settings.show_gs_bar                   = 1u;
 
-    vario_settings_sanitize_sink_audio_band();
+    vario_settings_sanitize_audio_thresholds();
 }
 
 const vario_settings_t *Vario_Settings_Get(void)
@@ -808,6 +919,14 @@ void Vario_Settings_AdjustQuickSet(vario_quickset_item_t item, int8_t direction)
                                         10u);
             break;
 
+        case VARIO_QUICKSET_ITEM_AUDIO_RESPONSE:
+            s_vario_settings.audio_response_level =
+                vario_settings_clamp_u8((uint8_t)((int32_t)s_vario_settings.audio_response_level +
+                                                  (int32_t)direction),
+                                        1u,
+                                        10u);
+            break;
+
         case VARIO_QUICKSET_ITEM_VARIO_AVG_SECONDS:
             s_vario_settings.digital_vario_average_seconds =
                 vario_settings_clamp_u8((uint8_t)((int32_t)s_vario_settings.digital_vario_average_seconds +
@@ -816,12 +935,72 @@ void Vario_Settings_AdjustQuickSet(vario_quickset_item_t item, int8_t direction)
                                         30u);
             break;
 
+        case VARIO_QUICKSET_ITEM_AUDIO_PROFILE:
+            vario_settings_cycle_audio_profile(direction);
+            break;
+
+        case VARIO_QUICKSET_ITEM_AUDIO_UP_BASE_HZ:
+            s_vario_settings.audio_up_base_hz =
+                vario_settings_clamp_u16((uint16_t)((int32_t)s_vario_settings.audio_up_base_hz +
+                                                    ((int32_t)direction * 20)),
+                                         450u,
+                                         1400u);
+            break;
+
+        case VARIO_QUICKSET_ITEM_AUDIO_MOD_DEPTH:
+            s_vario_settings.audio_modulation_depth_percent =
+                vario_settings_clamp_u8((uint8_t)((int32_t)s_vario_settings.audio_modulation_depth_percent +
+                                                  ((int32_t)direction * 5)),
+                                        50u,
+                                        150u);
+            break;
+
+        case VARIO_QUICKSET_ITEM_AUDIO_PITCH_CURVE:
+            s_vario_settings.audio_pitch_curve_percent =
+                vario_settings_clamp_u8((uint8_t)((int32_t)s_vario_settings.audio_pitch_curve_percent +
+                                                  ((int32_t)direction * 5)),
+                                        50u,
+                                        150u);
+            break;
+
         case VARIO_QUICKSET_ITEM_CLIMB_TONE_THRESHOLD:
             s_vario_settings.climb_tone_threshold_cms =
                 (int16_t)vario_settings_clamp_s32((int32_t)s_vario_settings.climb_tone_threshold_cms +
                                                   ((int32_t)direction * 5),
                                                   0,
                                                   300);
+            vario_settings_sanitize_audio_thresholds();
+            break;
+
+        case VARIO_QUICKSET_ITEM_CLIMB_TONE_OFF_THRESHOLD:
+            s_vario_settings.climb_tone_off_threshold_cms =
+                (int16_t)vario_settings_clamp_s32((int32_t)s_vario_settings.climb_tone_off_threshold_cms +
+                                                  ((int32_t)direction * 5),
+                                                  0,
+                                                  300);
+            vario_settings_sanitize_audio_thresholds();
+            break;
+
+        case VARIO_QUICKSET_ITEM_PRETHERMAL_MODE:
+            vario_settings_cycle_prethermal_mode(direction);
+            break;
+
+        case VARIO_QUICKSET_ITEM_PRETHERMAL_THRESHOLD:
+            s_vario_settings.prethermal_threshold_cms =
+                (int16_t)vario_settings_clamp_s32((int32_t)s_vario_settings.prethermal_threshold_cms +
+                                                  ((int32_t)direction * 5),
+                                                  -100,
+                                                  300);
+            vario_settings_sanitize_audio_thresholds();
+            break;
+
+        case VARIO_QUICKSET_ITEM_PRETHERMAL_OFF_THRESHOLD:
+            s_vario_settings.prethermal_off_threshold_cms =
+                (int16_t)vario_settings_clamp_s32((int32_t)s_vario_settings.prethermal_off_threshold_cms +
+                                                  ((int32_t)direction * 5),
+                                                  -100,
+                                                  300);
+            vario_settings_sanitize_audio_thresholds();
             break;
 
         case VARIO_QUICKSET_ITEM_SINK_TONE_THRESHOLD:
@@ -830,7 +1009,16 @@ void Vario_Settings_AdjustQuickSet(vario_quickset_item_t item, int8_t direction)
                                                   ((int32_t)direction * 10),
                                                   -500,
                                                   0);
-            vario_settings_sanitize_sink_audio_band();
+            vario_settings_sanitize_audio_thresholds();
+            break;
+
+        case VARIO_QUICKSET_ITEM_SINK_TONE_OFF_THRESHOLD:
+            s_vario_settings.sink_tone_off_threshold_cms =
+                (int16_t)vario_settings_clamp_s32((int32_t)s_vario_settings.sink_tone_off_threshold_cms +
+                                                  ((int32_t)direction * 10),
+                                                  -500,
+                                                  0);
+            vario_settings_sanitize_audio_thresholds();
             break;
 
         case VARIO_QUICKSET_ITEM_SINK_CONT_THRESHOLD:
@@ -839,7 +1027,16 @@ void Vario_Settings_AdjustQuickSet(vario_quickset_item_t item, int8_t direction)
                                                   ((int32_t)direction * 10),
                                                   -800,
                                                   0);
-            vario_settings_sanitize_sink_audio_band();
+            vario_settings_sanitize_audio_thresholds();
+            break;
+
+        case VARIO_QUICKSET_ITEM_SINK_CONT_OFF_THRESHOLD:
+            s_vario_settings.sink_continuous_off_threshold_cms =
+                (int16_t)vario_settings_clamp_s32((int32_t)s_vario_settings.sink_continuous_off_threshold_cms +
+                                                  ((int32_t)direction * 10),
+                                                  -800,
+                                                  0);
+            vario_settings_sanitize_audio_thresholds();
             break;
 
         case VARIO_QUICKSET_ITEM_FLIGHT_START_SPEED:
@@ -1259,6 +1456,53 @@ const char *Vario_Settings_GetAudioOnOffText(void)
     return (s_vario_settings.audio_enabled != 0u) ? "ON" : "OFF";
 }
 
+const char *Vario_Settings_GetAudioProfileText(void)
+{
+    return Vario_Settings_GetAudioProfileTextForProfile(s_vario_settings.audio_profile);
+}
+
+const char *Vario_Settings_GetAudioProfileTextForProfile(vario_audio_profile_t profile)
+{
+    switch (profile)
+    {
+        case VARIO_AUDIO_PROFILE_FLYTEC_CLASSIC:
+            return "FLYTEC";
+
+        case VARIO_AUDIO_PROFILE_BLUEFLY_SMOOTH:
+            return "BLUEFLY";
+
+        case VARIO_AUDIO_PROFILE_DIGIFLY_DG:
+            return "DIGIFLY";
+
+        case VARIO_AUDIO_PROFILE_SOFT_SPEAKER:
+        case VARIO_AUDIO_PROFILE_COUNT:
+        default:
+            return "SOFT";
+    }
+}
+
+const char *Vario_Settings_GetPrethermalModeText(void)
+{
+    return Vario_Settings_GetPrethermalModeTextForMode(s_vario_settings.prethermal_mode);
+}
+
+const char *Vario_Settings_GetPrethermalModeTextForMode(vario_prethermal_mode_t mode)
+{
+    switch (mode)
+    {
+        case VARIO_PRETHERMAL_MODE_BUZZER:
+            return "BUZZER";
+
+        case VARIO_PRETHERMAL_MODE_SOFT_PULSE:
+            return "PULSE";
+
+        case VARIO_PRETHERMAL_MODE_OFF:
+        case VARIO_PRETHERMAL_MODE_COUNT:
+        default:
+            return "OFF";
+    }
+}
+
 const char *Vario_Settings_GetAltitudeSourceText(void)
 {
     switch (s_vario_settings.altitude_source)
@@ -1586,14 +1830,64 @@ void Vario_Settings_GetCategoryItemText(vario_settings_category_t category,
             snprintf(out_value, value_len, "%s", Vario_Settings_GetBeepModeText());
             break;
 
+        case VARIO_MENU_ITEM_AUDIO_PROFILE:
+            snprintf(out_label, label_len, "Sound Prof");
+            snprintf(out_value, value_len, "%s", Vario_Settings_GetAudioProfileText());
+            break;
+
+        case VARIO_MENU_ITEM_AUDIO_RESPONSE:
+            snprintf(out_label, label_len, "Audio Resp");
+            snprintf(out_value, value_len, "%u/10", (unsigned)settings->audio_response_level);
+            break;
+
+        case VARIO_MENU_ITEM_AUDIO_UP_BASE:
+            snprintf(out_label, label_len, "UPHZ");
+            snprintf(out_value, value_len, "%u Hz", (unsigned)settings->audio_up_base_hz);
+            break;
+
+        case VARIO_MENU_ITEM_AUDIO_MOD_DEPTH:
+            snprintf(out_label, label_len, "MODH");
+            snprintf(out_value, value_len, "%u%%", (unsigned)settings->audio_modulation_depth_percent);
+            break;
+
+        case VARIO_MENU_ITEM_AUDIO_PITCH_CURVE:
+            snprintf(out_label, label_len, "PITC");
+            snprintf(out_value, value_len, "%u%%", (unsigned)settings->audio_pitch_curve_percent);
+            break;
+
         case VARIO_MENU_ITEM_CLIMB_TONE:
-            snprintf(out_label, label_len, "Climb Start");
+            snprintf(out_label, label_len, "Climb On");
             vario_settings_format_vspeed_threshold(out_value, value_len, settings->climb_tone_threshold_cms);
             break;
 
+        case VARIO_MENU_ITEM_CLIMB_TONE_OFF:
+            snprintf(out_label, label_len, "Climb Off");
+            vario_settings_format_vspeed_threshold(out_value, value_len, settings->climb_tone_off_threshold_cms);
+            break;
+
+        case VARIO_MENU_ITEM_PRETHERMAL_MODE:
+            snprintf(out_label, label_len, "PreTherm");
+            snprintf(out_value, value_len, "%s", Vario_Settings_GetPrethermalModeText());
+            break;
+
+        case VARIO_MENU_ITEM_PRETHERMAL:
+            snprintf(out_label, label_len, "PT On");
+            vario_settings_format_vspeed_threshold(out_value, value_len, settings->prethermal_threshold_cms);
+            break;
+
+        case VARIO_MENU_ITEM_PRETHERMAL_OFF:
+            snprintf(out_label, label_len, "PT Off");
+            vario_settings_format_vspeed_threshold(out_value, value_len, settings->prethermal_off_threshold_cms);
+            break;
+
         case VARIO_MENU_ITEM_SINK_TONE:
-            snprintf(out_label, label_len, "Sink Start");
+            snprintf(out_label, label_len, "Sink On");
             vario_settings_format_vspeed_threshold(out_value, value_len, settings->sink_tone_threshold_cms);
+            break;
+
+        case VARIO_MENU_ITEM_SINK_TONE_OFF:
+            snprintf(out_label, label_len, "Sink Off");
+            vario_settings_format_vspeed_threshold(out_value, value_len, settings->sink_tone_off_threshold_cms);
             break;
 
         case VARIO_MENU_ITEM_SINK_CONT:
@@ -1601,6 +1895,13 @@ void Vario_Settings_GetCategoryItemText(vario_settings_category_t category,
             vario_settings_format_vspeed_threshold(out_value,
                                                    value_len,
                                                    settings->sink_continuous_threshold_cms);
+            break;
+
+        case VARIO_MENU_ITEM_SINK_CONT_OFF:
+            snprintf(out_label, label_len, "Cont Off");
+            vario_settings_format_vspeed_threshold(out_value,
+                                                   value_len,
+                                                   settings->sink_continuous_off_threshold_cms);
             break;
 
         case VARIO_MENU_ITEM_LOG_ENABLE:
@@ -1614,7 +1915,7 @@ void Vario_Settings_GetCategoryItemText(vario_settings_category_t category,
             break;
 
         case VARIO_MENU_ITEM_DAMPING:
-            snprintf(out_label, label_len, "Response");
+            snprintf(out_label, label_len, "Disp Resp");
             snprintf(out_value, value_len, "%u/10", (unsigned)settings->vario_damping_level);
             break;
 
@@ -1797,16 +2098,60 @@ void Vario_Settings_AdjustCategoryItem(vario_settings_category_t category,
             Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_BEEP_ONLY_WHEN_FLYING, direction);
             break;
 
+        case VARIO_MENU_ITEM_AUDIO_PROFILE:
+            Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_AUDIO_PROFILE, direction);
+            break;
+
+        case VARIO_MENU_ITEM_AUDIO_RESPONSE:
+            Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_AUDIO_RESPONSE, direction);
+            break;
+
+        case VARIO_MENU_ITEM_AUDIO_UP_BASE:
+            Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_AUDIO_UP_BASE_HZ, direction);
+            break;
+
+        case VARIO_MENU_ITEM_AUDIO_MOD_DEPTH:
+            Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_AUDIO_MOD_DEPTH, direction);
+            break;
+
+        case VARIO_MENU_ITEM_AUDIO_PITCH_CURVE:
+            Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_AUDIO_PITCH_CURVE, direction);
+            break;
+
         case VARIO_MENU_ITEM_CLIMB_TONE:
             Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_CLIMB_TONE_THRESHOLD, direction);
+            break;
+
+        case VARIO_MENU_ITEM_CLIMB_TONE_OFF:
+            Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_CLIMB_TONE_OFF_THRESHOLD, direction);
+            break;
+
+        case VARIO_MENU_ITEM_PRETHERMAL_MODE:
+            Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_PRETHERMAL_MODE, direction);
+            break;
+
+        case VARIO_MENU_ITEM_PRETHERMAL:
+            Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_PRETHERMAL_THRESHOLD, direction);
+            break;
+
+        case VARIO_MENU_ITEM_PRETHERMAL_OFF:
+            Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_PRETHERMAL_OFF_THRESHOLD, direction);
             break;
 
         case VARIO_MENU_ITEM_SINK_TONE:
             Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_SINK_TONE_THRESHOLD, direction);
             break;
 
+        case VARIO_MENU_ITEM_SINK_TONE_OFF:
+            Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_SINK_TONE_OFF_THRESHOLD, direction);
+            break;
+
         case VARIO_MENU_ITEM_SINK_CONT:
             Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_SINK_CONT_THRESHOLD, direction);
+            break;
+
+        case VARIO_MENU_ITEM_SINK_CONT_OFF:
+            Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_SINK_CONT_OFF_THRESHOLD, direction);
             break;
 
         case VARIO_MENU_ITEM_LOG_ENABLE:

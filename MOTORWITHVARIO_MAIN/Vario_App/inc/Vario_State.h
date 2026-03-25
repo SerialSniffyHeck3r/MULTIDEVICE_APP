@@ -34,7 +34,7 @@ typedef enum
 /*  root settings 화면은 즉시 조절 가능한 대시보드 역할을 맡는다.              */
 /*  - BRIGHTNESS   : live backlight bar                                        */
 /*  - VOLUME       : audio volume bar                                          */
-/*  - RESPONSE     : 실제 바리오 response knob                                 */
+/*  - RESPONSE     : display publish response knob                              */
 /*  - CLIMB START  : 상승음 시작 임계값                                        */
 /* -------------------------------------------------------------------------- */
 typedef enum
@@ -129,8 +129,8 @@ typedef struct
     /*                                                                          */
     /*  fast_vario_bar_mps                                                      */
     /*  - 좌측 14px VARIO bar 전용 고속 경로                                     */
-    /*  - APP_STATE fast vario path를 사용하고, 숫자 표시용 바리오와는 별도 필터  */
-    /*    를 거친다.                                                            */
+    /*  - APP_ALTITUDE fast vario path를 app-layer second filter 없이 그대로    */
+    /*    전달한다.                                                             */
     /*                                                                          */
     /*  average_vario_mps                                                       */
     /*  - Flytec 스타일 integrating / average vario 용 최근 평균 상승률         */

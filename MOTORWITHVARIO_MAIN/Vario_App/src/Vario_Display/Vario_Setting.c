@@ -87,7 +87,7 @@ void Vario_Setting_Render(u8g2_t *u8g2, const vario_buttonbar_t *buttonbar)
                              v,
                              (int16_t)(v->y + 60),
                              (Vario_State_GetSettingsCursor() == VARIO_SETTING_MENU_RESPONSE),
-                             "Response",
+                             "Disp Resp",
                              response_text,
                              (uint8_t)(settings->vario_damping_level * 10u));
 
