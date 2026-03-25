@@ -88,6 +88,7 @@ static const vario_menu_item_t s_vario_category_display_items[] = {
     VARIO_MENU_ITEM_BRIGHTNESS,
     VARIO_MENU_ITEM_CONTRAST,
     VARIO_MENU_ITEM_TEMP_COMP,
+    VARIO_MENU_ITEM_VARIO_SCALE,
     VARIO_MENU_ITEM_GS_TOP,
 };
 
@@ -225,6 +226,17 @@ static uint8_t vario_settings_clamp_u8(uint8_t value, uint8_t min_v, uint8_t max
     }
 
     return value;
+}
+
+static uint8_t vario_settings_snap_vario_range_x10(uint8_t value_x10)
+{
+    /* ---------------------------------------------------------------------- */
+    /*  좌측 VARIO side bar scale 은 현재 4.0 / 5.0 두 단계만 제공한다.       */
+    /*                                                                        */
+    /*  기존 firmware가 8.0(=80) 같은 옛 값을 들고 들어오더라도               */
+    /*  새 UI 계약에 맞춰 안전하게 5.0 쪽으로 접어 주기 위한 helper 다.       */
+    /* ---------------------------------------------------------------------- */
+    return (value_x10 >= 50u) ? 50u : 40u;
 }
 
 static void vario_settings_toggle_u8(uint8_t *value)
@@ -894,12 +906,25 @@ void Vario_Settings_AdjustValue(vario_value_item_t item, int8_t direction)
             break;
 
         case VARIO_VALUE_ITEM_VARIO_RANGE:
-            s_vario_settings.vario_range_mps_x10 =
-                vario_settings_clamp_u8((uint8_t)((int32_t)s_vario_settings.vario_range_mps_x10 +
-                                                  ((int32_t)direction * 10)),
-                                        40u,
-                                        80u);
+        {
+            uint8_t next_range_x10;
+
+            /* -------------------------------------------------------------- */
+            /*  VARIO scale 은 4.0 / 5.0 두 단계만 제공한다.                 */
+            /*                                                                */
+            /*  - + 방향 입력 : 5.0 쪽으로                                    */
+            /*  - - 방향 입력 : 4.0 쪽으로                                    */
+            /*  - 그 외의 저장값이 들어와도 먼저 4.0/5.0으로 snap 한 뒤       */
+            /*    다음 연산을 수행한다.                                       */
+            /* -------------------------------------------------------------- */
+            next_range_x10 = vario_settings_snap_vario_range_x10(s_vario_settings.vario_range_mps_x10);
+            next_range_x10 = vario_settings_clamp_u8((uint8_t)((int32_t)next_range_x10 +
+                                                               ((int32_t)direction * 10)),
+                                                     40u,
+                                                     50u);
+            s_vario_settings.vario_range_mps_x10 = vario_settings_snap_vario_range_x10(next_range_x10);
             break;
+        }
 
         case VARIO_VALUE_ITEM_GS_RANGE:
             s_vario_settings.gs_range_kmh =
@@ -1553,12 +1578,23 @@ void Vario_Settings_GetCategoryItemText(vario_settings_category_t category,
             break;
 
         case VARIO_MENU_ITEM_VARIO_SCALE:
+        {
+            uint8_t vario_scale_x10;
+
+            /* -------------------------------------------------------------- */
+            /*  표시 문자열도 draw layer와 같은 4.0 / 5.0 계약을 사용한다.    */
+            /*  즉, 내부 필드가 옛 값(예: 80)으로 남아 있어도                 */
+            /*  메뉴에는 현재 지원 범위만 명확히 보이게 한다.                */
+            /* -------------------------------------------------------------- */
+            vario_scale_x10 = vario_settings_snap_vario_range_x10(settings->vario_range_mps_x10);
             snprintf(out_label, label_len, "Vario Top");
             snprintf(out_value,
                      value_len,
-                     "%u m/s",
-                     (unsigned)(settings->vario_range_mps_x10 / 10u));
+                     "%u.%u m/s",
+                     (unsigned)(vario_scale_x10 / 10u),
+                     (unsigned)(vario_scale_x10 % 10u));
             break;
+        }
 
         case VARIO_MENU_ITEM_ALT2_CAPTURE:
             snprintf(out_label, label_len, "ALT2 Capture");

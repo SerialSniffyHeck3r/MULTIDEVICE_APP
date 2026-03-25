@@ -165,16 +165,26 @@ static const unsigned char vario_icon_gs_avg_bits[] = {
 /* - left vario  : inside edge(right edge) 에 tick 가 붙는다.                   */
 /* - right GS    : inside edge(left edge) 에 tick 가 붙는다.                    */
 /* - 0.0 m/s line 은 3px 두께 + 최장 길이로 그려 중심을 강하게 표시한다.        */
+/*                                                                            */
+/* 이번 변경의 핵심                                                            */
+/* - 좌측 VARIO 는 설정값 4.0 / 5.0 에 따라 full-scale 이 바뀐다.              */
+/* - 우측 GS 는 설정된 top speed 를 full-scale 로 쓰되,                        */
+/*   50 km/h 미만이면 5 / 2.5 tick, 그 이상이면 10 / 5 tick 을 사용한다.      */
+/* - tick 의 X 위치 / 길이 / bar X 위치 / bar 폭은 기존 그대로 유지한다.      */
 /* -------------------------------------------------------------------------- */
-#define VARIO_UI_VARIO_HALFSTEP_COUNT              8u
-#define VARIO_UI_VARIO_HALFSTEP_MPS                0.5f
-#define VARIO_UI_VARIO_MAX_ABS_MPS                 (VARIO_UI_VARIO_HALFSTEP_COUNT * VARIO_UI_VARIO_HALFSTEP_MPS)
+#define VARIO_UI_VARIO_MINOR_STEP_MPS             0.5f
+#define VARIO_UI_VARIO_MAJOR_STEP_MPS             1.0f
+#define VARIO_UI_VARIO_SCALE_MIN_X10               40u
+#define VARIO_UI_VARIO_SCALE_MAX_X10               50u
 #define VARIO_UI_VARIO_ZERO_LINE_W                 14u
 #define VARIO_UI_VARIO_ZERO_LINE_THICKNESS          3u
-#define VARIO_UI_GS_STEP_COUNT                    10u
-#define VARIO_UI_GS_STEP_KMH                       5.0f
-#define VARIO_UI_GS_MIN_VISIBLE_KMH               10.0f
-#define VARIO_UI_GS_MAX_KMH                       70.0f
+#define VARIO_UI_GS_SCALE_MIN_KMH                 30.0f
+#define VARIO_UI_GS_SCALE_MAX_KMH                150.0f
+#define VARIO_UI_GS_LOW_RANGE_SWITCH_KMH          50.0f
+#define VARIO_UI_GS_LOW_MAJOR_STEP_KMH             5.0f
+#define VARIO_UI_GS_LOW_MINOR_STEP_KMH             2.5f
+#define VARIO_UI_GS_HIGH_MAJOR_STEP_KMH           10.0f
+#define VARIO_UI_GS_HIGH_MINOR_STEP_KMH            5.0f
 #define VARIO_UI_SCALE_MAJOR_W                    14u
 #define VARIO_UI_SCALE_MINOR_W                     8u
 
@@ -252,10 +262,22 @@ typedef struct
     uint32_t last_publish_ms;
     uint32_t last_flight_start_ms;
     uint32_t last_bar_update_ms;
+
+    /* ---------------------------------------------------------------------- */
+    /*  display layer 가 유지하는 lightweight cache                            */
+    /*                                                                        */
+    /*  - top_speed_kmh       : flight 중 peak GS                              */
+    /*  - filtered_gs_bar_kmh : GS side bar 전용 smoothing cache               */
+    /*                                                                        */
+    /*  예전 renderer 가 쓰던                                                  */
+    /*  - filtered_vario_bar_mps                                               */
+    /*  - vario_bar_zero_latched                                               */
+    /*  는 현재 경로에서 더 이상 사용되지 않으므로 제거한다.                  */
+    /*  좌측 VARIO bar 는 runtime snapshot 이 준 fast path 값을               */
+    /*  그대로 받아 스케일링만 수행한다.                                      */
+    /* ---------------------------------------------------------------------- */
     float    top_speed_kmh;
-    float    filtered_vario_bar_mps;
     float    filtered_gs_bar_kmh;
-    bool     vario_bar_zero_latched;
     vario_nav_target_mode_t nav_mode;
     int32_t  wp_lat_e7;
     int32_t  wp_lon_e7;
@@ -282,6 +304,15 @@ typedef struct
     const char *stub_subtitle;
 } vario_display_page_cfg_t;
 
+/* -------------------------------------------------------------------------- */
+/* side bar scale helper forward declaration                                   */
+/*                                                                            */
+/* bar smoothing / runtime selection 로직이 helper 정의보다 먼저 등장하므로,     */
+/* 설정 기반 scale helper 의 prototype 만 앞쪽에 배치한다.                     */
+/* -------------------------------------------------------------------------- */
+static float vario_display_get_vario_scale_mps(const vario_settings_t *settings);
+static float vario_display_get_gs_scale_kmh(const vario_settings_t *settings);
+
 static vario_viewport_t s_vario_full_viewport =
 {
     0,
@@ -307,6 +338,8 @@ static vario_display_dynamic_t s_vario_ui_dynamic =
     0u,
     0u,
     0u,
+    0u,
+    0.0f,
     0.0f,
     VARIO_NAV_TARGET_START,
     VARIO_UI_DEFAULT_WP_LAT_E7,
@@ -717,32 +750,6 @@ static void vario_display_format_flight_time(char *buf, size_t buf_len, const va
              (unsigned long)ss);
 }
 
-static void vario_display_format_altitude(char *buf, size_t buf_len, float altitude_m)
-{
-    if ((buf == NULL) || (buf_len == 0u))
-    {
-        return;
-    }
-
-    snprintf(buf,
-             buf_len,
-             "%ld",
-             (long)Vario_Settings_AltitudeMetersToDisplayRounded(altitude_m));
-}
-
-static void vario_display_format_signed_altitude(char *buf, size_t buf_len, float altitude_m)
-{
-    if ((buf == NULL) || (buf_len == 0u))
-    {
-        return;
-    }
-
-    snprintf(buf,
-             buf_len,
-             "%ld",
-             (long)Vario_Settings_AltitudeMetersToDisplayRounded(altitude_m));
-}
-
 /* -------------------------------------------------------------------------- */
 /* per-row altitude formatter                                                 */
 /*                                                                            */
@@ -779,43 +786,6 @@ static void vario_display_format_altitude_from_unit_bank(char *buf,
              buf_len,
              "%ld",
              (long)vario_display_select_altitude_from_unit_bank(units, unit));
-}
-
-static const app_altitude_linear_units_t *vario_display_get_selected_absolute_unit_bank(const vario_runtime_t *rt,
-                                                                                         const vario_settings_t *settings)
-{
-    const app_altitude_state_t *alt;
-
-    if ((rt == NULL) || (settings == NULL))
-    {
-        return NULL;
-    }
-
-    alt = &rt->altitude;
-
-    switch (settings->altitude_source)
-    {
-        case VARIO_ALT_SOURCE_QNH_MANUAL:
-            return &alt->units.alt_qnh_manual;
-
-        case VARIO_ALT_SOURCE_FUSED_NOIMU:
-            return &alt->units.alt_fused_noimu;
-
-        case VARIO_ALT_SOURCE_FUSED_IMU:
-            if (alt->imu_vector_valid != false)
-            {
-                return &alt->units.alt_fused_imu;
-            }
-            return &alt->units.alt_fused_noimu;
-
-        case VARIO_ALT_SOURCE_GPS_HMSL:
-            return &alt->units.alt_gps_hmsl;
-
-        case VARIO_ALT_SOURCE_DISPLAY:
-        case VARIO_ALT_SOURCE_COUNT:
-        default:
-            return &alt->units.alt_display;
-    }
 }
 
 static long vario_display_get_flight_level_from_unit_bank(const vario_runtime_t *rt)
@@ -901,26 +871,6 @@ static void vario_display_format_vario_value_abs(char *buf, size_t buf_len, floa
     }
 
     display_value = Vario_Settings_VSpeedMpsToDisplayFloat(vario_display_absf(vario_mps));
-    if (Vario_Settings_Get()->vspeed_unit == VARIO_VSPEED_UNIT_FPM)
-    {
-        snprintf(buf, buf_len, "%ld", (long)lroundf(display_value));
-    }
-    else
-    {
-        snprintf(buf, buf_len, "%.1f", (double)display_value);
-    }
-}
-
-static void vario_display_format_vario_value_signed(char *buf, size_t buf_len, float vario_mps)
-{
-    float display_value;
-
-    if ((buf == NULL) || (buf_len == 0u))
-    {
-        return;
-    }
-
-    display_value = Vario_Settings_VSpeedMpsToDisplayFloat(vario_mps);
     if (Vario_Settings_Get()->vspeed_unit == VARIO_VSPEED_UNIT_FPM)
     {
         snprintf(buf, buf_len, "%ld", (long)lroundf(display_value));
@@ -1231,11 +1181,15 @@ static void vario_display_get_bar_display_values(const vario_runtime_t *rt,
                                                  float *out_gs_bar_kmh,
                                                  float *out_avg_speed_kmh)
 {
-    float target_vario_mps;
-    float target_gs_kmh;
-    uint32_t now_ms;
-    float dt_s;
-    float alpha;
+    const vario_settings_t *settings;
+    float                   vario_scale_mps;
+    float                   vario_bar_limit_mps;
+    float                   gs_bar_limit_kmh;
+    float                   target_vario_mps;
+    float                   target_gs_kmh;
+    uint32_t                now_ms;
+    float                   dt_s;
+    float                   alpha;
 
     if ((out_vario_bar_mps == NULL) || (out_avg_vario_mps == NULL) ||
         (out_gs_bar_kmh == NULL) || (out_avg_speed_kmh == NULL))
@@ -1253,26 +1207,41 @@ static void vario_display_get_bar_display_values(const vario_runtime_t *rt,
         return;
     }
 
-    target_vario_mps = vario_display_clampf(rt->fast_vario_bar_mps, -8.0f, 8.0f);
-    target_gs_kmh = vario_display_clampf(rt->gs_bar_speed_kmh, 0.0f, 120.0f);
+    settings = Vario_Settings_Get();
+    vario_scale_mps = vario_display_get_vario_scale_mps(settings);
+    gs_bar_limit_kmh = vario_display_get_gs_scale_kmh(settings);
+
+    /* ---------------------------------------------------------------------- */
+    /*  over-range 삭제 패턴을 표시하려면                                       */
+    /*  좌측 VARIO bar 입력이 full-scale 을 약간 넘을 수 있어야 한다.          */
+    /*                                                                        */
+    /*  따라서 renderer 입력 clamp 는                                         */
+    /*  - vario : 현재 scale 의 2배까지                                        */
+    /*  - GS    : 현재 설정 top speed 까지                                     */
+    /*  로 맞춘다.                                                             */
+    /* ---------------------------------------------------------------------- */
+    vario_bar_limit_mps = vario_scale_mps * 2.0f;
+    if (vario_bar_limit_mps < VARIO_UI_VARIO_MAJOR_STEP_MPS)
+    {
+        vario_bar_limit_mps = VARIO_UI_VARIO_MAJOR_STEP_MPS;
+    }
+
+    target_vario_mps = vario_display_clampf(rt->fast_vario_bar_mps,
+                                            -vario_bar_limit_mps,
+                                            vario_bar_limit_mps);
+    target_gs_kmh = vario_display_clampf(rt->gs_bar_speed_kmh,
+                                         0.0f,
+                                         gs_bar_limit_kmh);
     now_ms = (rt->last_task_ms != 0u) ? rt->last_task_ms : rt->last_publish_ms;
 
     /* ---------------------------------------------------------------------- */
-    /* 좌측 VARIO bar는 더 이상 display layer에서 다시 필터링하지 않는다.      */
+    /* 좌측 VARIO bar는 display layer에서 추가 필터를 넣지 않는다.            */
     /*                                                                        */
-    /* source                                                                  */
-    /* - rt->fast_vario_bar_mps = Vario_State가 low-level fast path를           */
-    /*   그대로 라우팅한 값                                                     */
+    /* - source 값은 Vario_State 가 만든 fast snapshot 을 그대로 쓴다.         */
+    /* - 여기서는 scale-aware clamp 만 수행한다.                              */
     /*                                                                        */
-    /* 이유                                                                   */
-    /* - legacy debug에서 이미 sound / instant bar 체감이 충분히 좋은데         */
-    /*   화면 렌더러가 여기서 attack/release와 zero latch를 또 얹으면            */
-    /*   손맛이 죽고 반응이 느려진다.                                           */
-    /*                                                                        */
-    /* 따라서 이 함수의 역할은                                                 */
-    /* - vario bar : 단순 clamp / 전달                                          */
-    /* - GS bar    : 기존처럼 가벼운 smoothing 유지                             */
-    /* 로 제한한다.                                                             */
+    /* 우측 GS bar는 기존과 같은 가벼운 smoothing 을 유지하되,                */
+    /* smoothing 결과 역시 settings 기반 top speed 를 넘지 않게 고정한다.     */
     /* ---------------------------------------------------------------------- */
     *out_vario_bar_mps = target_vario_mps;
 
@@ -1289,7 +1258,9 @@ static void vario_display_get_bar_display_values(const vario_runtime_t *rt,
         s_vario_ui_dynamic.filtered_gs_bar_kmh += alpha *
             (target_gs_kmh - s_vario_ui_dynamic.filtered_gs_bar_kmh);
         s_vario_ui_dynamic.filtered_gs_bar_kmh =
-            vario_display_clampf(s_vario_ui_dynamic.filtered_gs_bar_kmh, 0.0f, 120.0f);
+            vario_display_clampf(s_vario_ui_dynamic.filtered_gs_bar_kmh,
+                                 0.0f,
+                                 gs_bar_limit_kmh);
         s_vario_ui_dynamic.last_bar_update_ms = now_ms;
     }
 
@@ -1450,130 +1421,476 @@ static void vario_display_compute_nav_solution(const vario_runtime_t *rt,
     out_solution->target_valid = true;
 }
 
-static void vario_display_get_vario_slot_rect(const vario_viewport_t *v,
+static uint8_t vario_display_get_vario_scale_x10(const vario_settings_t *settings)
+{
+    uint8_t scale_x10;
+
+    /* ---------------------------------------------------------------------- */
+    /*  좌측 VARIO gauge 는 현재 4.0 / 5.0 두 값만 지원한다.                  */
+    /*                                                                        */
+    /*  저장된 값이 옛 firmware 의 흔적으로 다른 값이어도                    */
+    /*  draw layer 에서는 4.0 또는 5.0 계약으로 snap 해서 사용한다.           */
+    /* ---------------------------------------------------------------------- */
+    scale_x10 = VARIO_UI_VARIO_SCALE_MAX_X10;
+    if (settings != NULL)
+    {
+        scale_x10 = settings->vario_range_mps_x10;
+    }
+
+    if (scale_x10 <= VARIO_UI_VARIO_SCALE_MIN_X10)
+    {
+        return VARIO_UI_VARIO_SCALE_MIN_X10;
+    }
+
+    return VARIO_UI_VARIO_SCALE_MAX_X10;
+}
+
+static float vario_display_get_vario_scale_mps(const vario_settings_t *settings)
+{
+    return ((float)vario_display_get_vario_scale_x10(settings)) * 0.1f;
+}
+
+static uint8_t vario_display_get_vario_halfstep_count(const vario_settings_t *settings)
+{
+    return (uint8_t)(vario_display_get_vario_scale_x10(settings) / 5u);
+}
+
+static float vario_display_get_gs_scale_kmh(const vario_settings_t *settings)
+{
+    float gs_top_kmh;
+
+    gs_top_kmh = 80.0f;
+    if (settings != NULL)
+    {
+        gs_top_kmh = (float)settings->gs_range_kmh;
+    }
+
+    return vario_display_clampf(gs_top_kmh,
+                                VARIO_UI_GS_SCALE_MIN_KMH,
+                                VARIO_UI_GS_SCALE_MAX_KMH);
+}
+
+static float vario_display_get_gs_minor_step_kmh(float gs_top_kmh)
+{
+    return (gs_top_kmh < VARIO_UI_GS_LOW_RANGE_SWITCH_KMH) ?
+        VARIO_UI_GS_LOW_MINOR_STEP_KMH :
+        VARIO_UI_GS_HIGH_MINOR_STEP_KMH;
+}
+
+static float vario_display_get_gs_major_step_kmh(float gs_top_kmh)
+{
+    return (gs_top_kmh < VARIO_UI_GS_LOW_RANGE_SWITCH_KMH) ?
+        VARIO_UI_GS_LOW_MAJOR_STEP_KMH :
+        VARIO_UI_GS_HIGH_MAJOR_STEP_KMH;
+}
+
+static void vario_display_get_vario_screen_geometry(int16_t *out_top_limit_y,
+                                                    int16_t *out_zero_top_y,
+                                                    int16_t *out_zero_bottom_y,
+                                                    int16_t *out_bottom_limit_y,
+                                                    int16_t *out_top_span_px,
+                                                    int16_t *out_bottom_span_px)
+{
+    int16_t center_y;
+    int16_t top_limit_y;
+    int16_t zero_top_y;
+    int16_t zero_bottom_y;
+    int16_t bottom_limit_y;
+    int16_t top_span_px;
+    int16_t bottom_span_px;
+
+    center_y = (int16_t)(VARIO_LCD_H / 2);
+    top_limit_y = 0;
+    zero_top_y = (int16_t)(center_y - 1);
+    zero_bottom_y = (int16_t)(center_y + 1);
+    bottom_limit_y = (int16_t)(VARIO_LCD_H - 1);
+    top_span_px = (int16_t)(zero_top_y - top_limit_y);
+    bottom_span_px = (int16_t)(bottom_limit_y - zero_bottom_y);
+
+    if (top_span_px < 0)
+    {
+        top_span_px = 0;
+    }
+
+    if (bottom_span_px < 0)
+    {
+        bottom_span_px = 0;
+    }
+
+    if (out_top_limit_y != NULL)
+    {
+        *out_top_limit_y = top_limit_y;
+    }
+    if (out_zero_top_y != NULL)
+    {
+        *out_zero_top_y = zero_top_y;
+    }
+    if (out_zero_bottom_y != NULL)
+    {
+        *out_zero_bottom_y = zero_bottom_y;
+    }
+    if (out_bottom_limit_y != NULL)
+    {
+        *out_bottom_limit_y = bottom_limit_y;
+    }
+    if (out_top_span_px != NULL)
+    {
+        *out_top_span_px = top_span_px;
+    }
+    if (out_bottom_span_px != NULL)
+    {
+        *out_bottom_span_px = bottom_span_px;
+    }
+}
+
+static int16_t vario_display_scale_value_to_fill_px(float abs_value,
+                                                    float full_scale,
+                                                    int16_t span_px)
+{
+    int16_t fill_px;
+
+    if ((abs_value <= 0.0f) || (full_scale <= 0.0f) || (span_px <= 0))
+    {
+        return 0;
+    }
+
+    fill_px = (int16_t)lroundf((abs_value / full_scale) * (float)span_px);
+    if ((abs_value > 0.0f) && (fill_px <= 0))
+    {
+        fill_px = 1;
+    }
+    if (fill_px > span_px)
+    {
+        fill_px = span_px;
+    }
+
+    return fill_px;
+}
+
+static void vario_display_get_vario_slot_rect(const vario_settings_t *settings,
                                               bool positive,
                                               uint8_t level_from_center,
                                               int16_t *out_y,
                                               int16_t *out_h)
 {
-    uint8_t slot_index;
-    int32_t top_y;
-    int32_t bottom_y;
+    uint8_t halfstep_count;
+    int16_t top_limit_y;
+    int16_t zero_top_y;
+    int16_t zero_bottom_y;
+    int16_t bottom_limit_y;
+    int16_t top_span_px;
+    int16_t bottom_span_px;
+    int16_t start_y;
+    int16_t end_y;
 
-    if ((v == NULL) || (out_y == NULL) || (out_h == NULL))
+    if ((out_y == NULL) || (out_h == NULL))
     {
+        return;
+    }
+
+    halfstep_count = vario_display_get_vario_halfstep_count(settings);
+    vario_display_get_vario_screen_geometry(&top_limit_y,
+                                            &zero_top_y,
+                                            &zero_bottom_y,
+                                            &bottom_limit_y,
+                                            &top_span_px,
+                                            &bottom_span_px);
+
+    if ((halfstep_count == 0u) || (level_from_center >= halfstep_count))
+    {
+        *out_y = zero_top_y;
+        *out_h = 0;
         return;
     }
 
     if (positive != false)
     {
-        slot_index = (uint8_t)(VARIO_UI_VARIO_HALFSTEP_COUNT - 1u - level_from_center);
+        start_y = (int16_t)(zero_top_y -
+                            (int16_t)lroundf((((float)level_from_center) / (float)halfstep_count) *
+                                             (float)top_span_px));
+        end_y = (int16_t)(zero_top_y -
+                          (int16_t)lroundf((((float)(level_from_center + 1u)) / (float)halfstep_count) *
+                                           (float)top_span_px) +
+                          1);
+
+        if (start_y > zero_top_y)
+        {
+            start_y = zero_top_y;
+        }
+        if (end_y < top_limit_y)
+        {
+            end_y = top_limit_y;
+        }
+        if (end_y > start_y)
+        {
+            end_y = start_y;
+        }
+
+        *out_y = end_y;
+        *out_h = (int16_t)(start_y - end_y + 1);
     }
     else
     {
-        slot_index = (uint8_t)(VARIO_UI_VARIO_HALFSTEP_COUNT + level_from_center);
+        start_y = (int16_t)(zero_bottom_y + 1 +
+                            (int16_t)lroundf((((float)level_from_center) / (float)halfstep_count) *
+                                             (float)bottom_span_px));
+        end_y = (int16_t)(zero_bottom_y + 1 +
+                          (int16_t)lroundf((((float)(level_from_center + 1u)) / (float)halfstep_count) *
+                                           (float)bottom_span_px) -
+                          1);
+
+        if (start_y < (zero_bottom_y + 1))
+        {
+            start_y = (int16_t)(zero_bottom_y + 1);
+        }
+        if (end_y > bottom_limit_y)
+        {
+            end_y = bottom_limit_y;
+        }
+        if (end_y < start_y)
+        {
+            end_y = start_y;
+        }
+
+        *out_y = start_y;
+        *out_h = (int16_t)(end_y - start_y + 1);
     }
 
-    top_y = v->y + (((int32_t)slot_index * v->h) / ((int32_t)VARIO_UI_VARIO_HALFSTEP_COUNT * 2));
-    bottom_y = v->y + ((((int32_t)slot_index + 1) * v->h) / ((int32_t)VARIO_UI_VARIO_HALFSTEP_COUNT * 2)) - 1;
-
-    if (bottom_y < top_y)
+    if (*out_h < 0)
     {
-        bottom_y = top_y;
+        *out_h = 0;
     }
-
-    *out_y = (int16_t)top_y;
-    *out_h = (int16_t)(bottom_y - top_y + 1);
 }
 
-static void vario_display_get_gs_slot_rect(const vario_viewport_t *v,
-                                           uint8_t level_from_bottom,
-                                           int16_t *out_y,
-                                           int16_t *out_h)
+static void vario_display_compute_vario_overrange_window(const vario_settings_t *settings,
+                                                         float abs_value_mps,
+                                                         uint8_t *out_first_level,
+                                                         uint8_t *out_count)
 {
-    uint8_t slot_index;
-    int32_t top_y;
-    int32_t bottom_y;
-
-    if ((v == NULL) || (out_y == NULL) || (out_h == NULL))
-    {
-        return;
-    }
-
-    slot_index = (uint8_t)(VARIO_UI_GS_STEP_COUNT - 1u - level_from_bottom);
-    top_y = v->y + (((int32_t)slot_index * v->h) / (int32_t)VARIO_UI_GS_STEP_COUNT);
-    bottom_y = v->y + ((((int32_t)slot_index + 1) * v->h) / (int32_t)VARIO_UI_GS_STEP_COUNT) - 1;
-
-    if (bottom_y < top_y)
-    {
-        bottom_y = top_y;
-    }
-
-    *out_y = (int16_t)top_y;
-    *out_h = (int16_t)(bottom_y - top_y + 1);
-}
-
-static void vario_display_compute_vario_fill(float vario_mps,
-                                             uint8_t *out_first_level,
-                                             uint8_t *out_count,
-                                             bool *out_positive)
-{
-    float   abs_value;
+    float   full_scale_mps;
+    uint8_t halfstep_count;
     uint8_t overflow_steps;
-    uint8_t visible_steps;
 
-    if ((out_first_level == NULL) || (out_count == NULL) || (out_positive == NULL))
+    if ((out_first_level == NULL) || (out_count == NULL))
     {
         return;
     }
 
+    full_scale_mps = vario_display_get_vario_scale_mps(settings);
+    halfstep_count = vario_display_get_vario_halfstep_count(settings);
     *out_first_level = 0u;
     *out_count = 0u;
-    *out_positive = (vario_mps >= 0.0f) ? true : false;
 
-    abs_value = vario_display_absf(vario_mps);
-    if (abs_value <= 0.0f)
+    if ((full_scale_mps <= 0.0f) || (halfstep_count == 0u) || (abs_value_mps <= 0.0f))
     {
         return;
     }
 
-    if (abs_value <= VARIO_UI_VARIO_MAX_ABS_MPS)
+    if (abs_value_mps <= full_scale_mps)
     {
-        visible_steps = (uint8_t)ceilf(abs_value / VARIO_UI_VARIO_HALFSTEP_MPS);
-        if (visible_steps > VARIO_UI_VARIO_HALFSTEP_COUNT)
-        {
-            visible_steps = VARIO_UI_VARIO_HALFSTEP_COUNT;
-        }
-        *out_first_level = 0u;
-        *out_count = visible_steps;
+        *out_count = halfstep_count;
         return;
     }
 
-    overflow_steps = (uint8_t)ceilf((abs_value - VARIO_UI_VARIO_MAX_ABS_MPS) / VARIO_UI_VARIO_HALFSTEP_MPS);
-    if (overflow_steps >= VARIO_UI_VARIO_HALFSTEP_COUNT)
+    /* ---------------------------------------------------------------------- */
+    /*  over-range 표시 규칙                                                   */
+    /*                                                                        */
+    /*  full scale 를 넘어가면 gauge 전체를 꽉 채우는 대신,                   */
+    /*  중심축(0.0 근처) 쪽 slot 부터 0.5 m/s 단위로 하나씩 비운다.            */
+    /*                                                                        */
+    /*  예) 5.0 scale 에서 +5.5 => 0.0~0.5 slot 이 비워지고                    */
+    /*      바는 위쪽 4.5 m/s 구간만 남는다.                                  */
+    /* ---------------------------------------------------------------------- */
+    overflow_steps = (uint8_t)ceilf((abs_value_mps - full_scale_mps) /
+                                    VARIO_UI_VARIO_MINOR_STEP_MPS);
+    if (overflow_steps >= halfstep_count)
     {
-        *out_first_level = VARIO_UI_VARIO_HALFSTEP_COUNT;
+        *out_first_level = halfstep_count;
         *out_count = 0u;
         return;
     }
 
     *out_first_level = overflow_steps;
-    *out_count = (uint8_t)(VARIO_UI_VARIO_HALFSTEP_COUNT - overflow_steps);
+    *out_count = (uint8_t)(halfstep_count - overflow_steps);
 }
 
-static uint8_t vario_display_compute_gs_fill_steps(float speed_kmh)
+static void vario_display_draw_vario_column(u8g2_t *u8g2,
+                                            int16_t bar_x,
+                                            uint8_t bar_w,
+                                            float vario_mps,
+                                            const vario_settings_t *settings)
 {
-    if (speed_kmh < VARIO_UI_GS_MIN_VISIBLE_KMH)
+    float   full_scale_mps;
+    float   abs_value_mps;
+    float   over_range_mps;
+    bool    positive;
+    int16_t top_limit_y;
+    int16_t zero_top_y;
+    int16_t zero_bottom_y;
+    int16_t bottom_limit_y;
+    int16_t top_span_px;
+    int16_t bottom_span_px;
+    int16_t fill_px;
+    int16_t erase_px;
+    int16_t visible_px;
+
+    if (u8g2 == NULL)
+    {
+        return;
+    }
+
+    full_scale_mps = vario_display_get_vario_scale_mps(settings);
+    abs_value_mps = vario_display_absf(vario_mps);
+    positive = (vario_mps >= 0.0f) ? true : false;
+
+    vario_display_get_vario_screen_geometry(&top_limit_y,
+                                            &zero_top_y,
+                                            &zero_bottom_y,
+                                            &bottom_limit_y,
+                                            &top_span_px,
+                                            &bottom_span_px);
+
+    if ((full_scale_mps <= 0.0f) || (abs_value_mps <= 0.0f))
+    {
+        return;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /*  1) 정상 범위(0 ~ full scale)                                            */
+    /*                                                                         */
+    /*  기존과 동일하게 중심축에서 바깥 방향으로 "연속적으로" 채운다.           */
+    /*  이 구간의 그래픽/스케일 동작은 건드리지 않는다.                        */
+    /* ---------------------------------------------------------------------- */
+    if (abs_value_mps <= full_scale_mps)
+    {
+        if (positive != false)
+        {
+            fill_px = vario_display_scale_value_to_fill_px(abs_value_mps,
+                                                           full_scale_mps,
+                                                           top_span_px);
+            if (fill_px > 0)
+            {
+                u8g2_DrawBox(u8g2,
+                             bar_x,
+                             (int16_t)(zero_top_y - fill_px),
+                             bar_w,
+                             fill_px);
+            }
+        }
+        else
+        {
+            fill_px = vario_display_scale_value_to_fill_px(abs_value_mps,
+                                                           full_scale_mps,
+                                                           bottom_span_px);
+            if (fill_px > 0)
+            {
+                u8g2_DrawBox(u8g2,
+                             bar_x,
+                             (int16_t)(zero_bottom_y + 1),
+                             bar_w,
+                             fill_px);
+            }
+        }
+        return;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /*  2) 오버레인지(full scale 초과)                                          */
+    /*                                                                         */
+    /*  기존 버그: 0.5 m/s slot 단위로 한 칸씩 뚝뚝 지워져서                    */
+    /*  연속적이지 않게 보였다.                                                */
+    /*                                                                         */
+    /*  수정: 초과분(over_range_mps)을 "정상 범위와 완전히 같은 스케일 식"으로  */
+    /*  픽셀로 환산해서, 중심축 쪽부터 연속적으로 지운다.                      */
+    /*                                                                         */
+    /*  - + 방향: 꽉 찬 바의 아래쪽(0.0 쪽)부터 연속적으로 지움                */
+    /*  - - 방향: 꽉 찬 바의 위쪽(0.0 쪽)부터 연속적으로 지움                  */
+    /*                                                                         */
+    /*  즉, 0 -> 4.0/5.0 까지 올라갈 때의 부드러움과 동일한 방식으로            */
+    /*  4.0/5.0 초과분도 부드럽게 "지워지며" 표현된다.                         */
+    /* ---------------------------------------------------------------------- */
+    over_range_mps = abs_value_mps - full_scale_mps;
+    if (over_range_mps > full_scale_mps)
+    {
+        over_range_mps = full_scale_mps;
+    }
+
+    if (positive != false)
+    {
+        erase_px = vario_display_scale_value_to_fill_px(over_range_mps,
+                                                        full_scale_mps,
+                                                        top_span_px);
+        visible_px = (int16_t)(top_span_px - erase_px);
+        if (visible_px > 0)
+        {
+            u8g2_DrawBox(u8g2,
+                         bar_x,
+                         top_limit_y,
+                         bar_w,
+                         visible_px);
+        }
+    }
+    else
+    {
+        erase_px = vario_display_scale_value_to_fill_px(over_range_mps,
+                                                        full_scale_mps,
+                                                        bottom_span_px);
+        visible_px = (int16_t)(bottom_span_px - erase_px);
+        if (visible_px > 0)
+        {
+            u8g2_DrawBox(u8g2,
+                         bar_x,
+                         (int16_t)(bottom_limit_y - visible_px + 1),
+                         bar_w,
+                         visible_px);
+        }
+    }
+}
+
+static uint16_t vario_display_get_gs_minor_tick_count(float gs_top_kmh,
+                                                      float gs_minor_step_kmh)
+{
+    if ((gs_top_kmh <= 0.0f) || (gs_minor_step_kmh <= 0.0f))
     {
         return 0u;
     }
 
-    if (speed_kmh >= VARIO_UI_GS_MAX_KMH)
+    return (uint16_t)lroundf(gs_top_kmh / gs_minor_step_kmh);
+}
+
+static int16_t vario_display_get_gs_value_center_y(const vario_viewport_t *v,
+                                                   float value_kmh,
+                                                   float gs_top_kmh)
+{
+    float ratio;
+
+    if ((v == NULL) || (v->h <= 0) || (gs_top_kmh <= 0.0f))
     {
-        return VARIO_UI_GS_STEP_COUNT;
+        return 0;
     }
 
-    return (uint8_t)(floorf((speed_kmh - VARIO_UI_GS_MIN_VISIBLE_KMH) / VARIO_UI_GS_STEP_KMH) + 1.0f);
+    ratio = vario_display_clampf(value_kmh / gs_top_kmh, 0.0f, 1.0f);
+    return (int16_t)(v->y + v->h - 1 - lroundf(ratio * (float)(v->h - 1)));
+}
+
+static int16_t vario_display_get_marker_top_y(int16_t center_y,
+                                              int16_t marker_h,
+                                              int16_t min_y,
+                                              int16_t max_y)
+{
+    int16_t top_y;
+
+    top_y = (int16_t)(center_y - (marker_h / 2));
+    if (top_y < min_y)
+    {
+        top_y = min_y;
+    }
+    if ((top_y + marker_h) > max_y)
+    {
+        top_y = (int16_t)(max_y - marker_h);
+    }
+
+    return top_y;
 }
 
 static void vario_display_draw_decimal_value(u8g2_t *u8g2,
@@ -2140,7 +2457,7 @@ static void vario_display_draw_top_right_altitudes(u8g2_t *u8g2,
     }
 
     alt23_row_h = alt23_value_h;
-    if (alt23_row_h < VARIO_ICON_ALT2_HEIGHT)
+    if (alt23_row_h < (int16_t)VARIO_ICON_ALT2_HEIGHT)
     {
         alt23_row_h = VARIO_ICON_ALT2_HEIGHT;
     }
@@ -2222,70 +2539,57 @@ static void vario_display_draw_vario_side_bar(u8g2_t *u8g2,
                                               float instant_vario_mps,
                                               float average_vario_mps)
 {
-    uint8_t tick_halfstep_index;
-    int16_t left_bar_x;
-    int16_t instant_x;
-    int16_t avg_x;
-    int16_t tick_x;
-    int16_t center_y;
-    int16_t zero_top_y;
-    int16_t zero_bottom_y;
-    int16_t top_limit_y;
-    int16_t bottom_limit_y;
-    int16_t top_span_px;
-    int16_t bottom_span_px;
-    int16_t instant_fill_px;
-    int16_t avg_fill_px;
-    float clamped_instant;
-    float clamped_average;
-    uint8_t thick_i;
+    const vario_settings_t *settings;
+    uint8_t                 tick_halfstep_index;
+    uint8_t                 halfstep_count;
+    int16_t                 left_bar_x;
+    int16_t                 instant_x;
+    int16_t                 avg_x;
+    int16_t                 tick_x;
+    int16_t                 top_limit_y;
+    int16_t                 zero_top_y;
+    int16_t                 zero_bottom_y;
+    int16_t                 bottom_limit_y;
+    int16_t                 top_span_px;
+    int16_t                 bottom_span_px;
+    uint8_t                 thick_i;
 
     if ((u8g2 == NULL) || (v == NULL))
     {
         return;
     }
 
+    settings = Vario_Settings_Get();
+    halfstep_count = vario_display_get_vario_halfstep_count(settings);
+
     left_bar_x = v->x;
     instant_x  = (int16_t)(left_bar_x + 1);   /* 기존 instant bar X 유지 */
     avg_x      = (int16_t)(left_bar_x + 10);  /* 기존 average bar X 유지 */
     tick_x     = left_bar_x;                  /* 기존 tick 시작 X 유지 */
 
-    /* ----------------------------------------------------------------------
-     * Y 스케일 기준은 viewport 가 아니라 실제 LCD 전체 높이로 고정
-     * - +5.0 tick  -> 화면 맨 위(y=0)
-     * - -5.0 tick  -> 화면 맨 아래(y=127)
-     * - X 위치와 tick 길이, instant/avg bar X 는 그대로 유지
-     * ---------------------------------------------------------------------- */
-    center_y      = (int16_t)(VARIO_LCD_H / 2);
-    zero_top_y    = (int16_t)(center_y - 1);
-    zero_bottom_y = (int16_t)(center_y + 1);
+    /* ---------------------------------------------------------------------- */
+    /*  좌측 VARIO 는 viewport height 를 쓰지 않고 실제 LCD 전체 높이를 쓴다.  */
+    /*                                                                        */
+    /*  - 4.0 scale : 화면 맨 위 +4.0 / 맨 아래 -4.0                          */
+    /*  - 5.0 scale : 화면 맨 위 +5.0 / 맨 아래 -5.0                          */
+    /*  - 가운데 3 px zero band 는 기존 그대로 유지                           */
+    /* ---------------------------------------------------------------------- */
+    vario_display_get_vario_screen_geometry(&top_limit_y,
+                                            &zero_top_y,
+                                            &zero_bottom_y,
+                                            &bottom_limit_y,
+                                            &top_span_px,
+                                            &bottom_span_px);
 
-    top_limit_y    = 0;
-    bottom_limit_y = (int16_t)(VARIO_LCD_H - 1);
-    /* +5.0 -> top_limit, -5.0 -> bottom_limit 이 되도록 실제 사용 가능한 span 계산 */
-    top_span_px    = (int16_t)(zero_top_y - top_limit_y);
-    bottom_span_px = (int16_t)(bottom_limit_y - zero_bottom_y);
-
-    if (top_span_px < 0)
-    {
-        top_span_px = 0;
-    }
-
-    if (bottom_span_px < 0)
-    {
-        bottom_span_px = 0;
-    }
-
-    /* ----------------------------------------------------------------------
-     * VARIO BAR / TICK SCALE
-     * - full scale : -5.0 ~ +5.0 m/s
-     * - tick count : 각 방향 10개 (0.5, 1.0, 1.5 ... 5.0)
-     * - x.5 : small tick
-     * - x.0 : major tick
-     * - tick X / tick width / instant X / avg X 는 기존 그대로 유지
-     * - tick Y 는 bar fill 과 같은 환산식을 써서 정확히 같은 스케일에 올라가게 한다
-     * ---------------------------------------------------------------------- */
-    for (tick_halfstep_index = 1u; tick_halfstep_index <= 10u; ++tick_halfstep_index)
+    /* ---------------------------------------------------------------------- */
+    /*  tick Y 역시 bar fill 과 같은 scale 식을 공유해야                      */
+    /*  숫자 스케일과 실제 fill 이 서로 틀어지지 않는다.                      */
+    /*                                                                        */
+    /*  - 0.5 단위 : small tick                                                */
+    /*  - 1.0 단위 : major tick                                                */
+    /*  - tick 의 X 시작점 / 길이 / 모양은 기존 그대로 유지                   */
+    /* ---------------------------------------------------------------------- */
+    for (tick_halfstep_index = 1u; tick_halfstep_index <= halfstep_count; ++tick_halfstep_index)
     {
         uint8_t tick_w;
         int16_t up_offset_px;
@@ -2296,8 +2600,10 @@ static void vario_display_draw_vario_side_bar(u8g2_t *u8g2,
         tick_w = ((tick_halfstep_index % 2u) == 0u) ? VARIO_UI_SCALE_MAJOR_W
                                                     : VARIO_UI_SCALE_MINOR_W;
 
-        up_offset_px = (int16_t)lroundf((((float)tick_halfstep_index) / 10.0f) * (float)top_span_px);
-        down_offset_px = (int16_t)lroundf((((float)tick_halfstep_index) / 10.0f) * (float)bottom_span_px);
+        up_offset_px = (int16_t)lroundf((((float)tick_halfstep_index) / (float)halfstep_count) *
+                                        (float)top_span_px);
+        down_offset_px = (int16_t)lroundf((((float)tick_halfstep_index) / (float)halfstep_count) *
+                                          (float)bottom_span_px);
 
         up_y = (int16_t)(zero_top_y - up_offset_px);
         down_y = (int16_t)(zero_bottom_y + down_offset_px);
@@ -2310,7 +2616,6 @@ static void vario_display_draw_vario_side_bar(u8g2_t *u8g2,
         {
             up_y = bottom_limit_y;
         }
-
         if (down_y < top_limit_y)
         {
             down_y = top_limit_y;
@@ -2324,112 +2629,22 @@ static void vario_display_draw_vario_side_bar(u8g2_t *u8g2,
         u8g2_DrawHLine(u8g2, tick_x, down_y, tick_w);
     }
 
-    clamped_instant = vario_display_clampf(instant_vario_mps, -5.0f, 5.0f);
-    clamped_average = vario_display_clampf(average_vario_mps, -5.0f, 5.0f);
-
-    /* +5.0m/s 는 위 끝, -5.0m/s 는 아래 끝에 닿도록 동적 스케일 */
-    if (clamped_instant >= 0.0f)
-    {
-        instant_fill_px = (int16_t)lroundf((vario_display_absf(clamped_instant) / 5.0f) * (float)top_span_px);
-    }
-    else
-    {
-        instant_fill_px = (int16_t)lroundf((vario_display_absf(clamped_instant) / 5.0f) * (float)bottom_span_px);
-    }
-
-    if (clamped_average >= 0.0f)
-    {
-        avg_fill_px = (int16_t)lroundf((vario_display_absf(clamped_average) / 5.0f) * (float)top_span_px);
-    }
-    else
-    {
-        avg_fill_px = (int16_t)lroundf((vario_display_absf(clamped_average) / 5.0f) * (float)bottom_span_px);
-    }
-
-    /* 아주 작은 값도 0이 아니면 1px는 보이게 유지 */
-    if ((vario_display_absf(clamped_instant) > 0.0f) && (instant_fill_px <= 0))
-    {
-        instant_fill_px = 1;
-    }
-
-    if ((vario_display_absf(clamped_average) > 0.0f) && (avg_fill_px <= 0))
-    {
-        avg_fill_px = 1;
-    }
-
-    /* instant bar */
-    if (clamped_instant > 0.0f)
-    {
-        int16_t y;
-        int16_t h;
-
-        y = (int16_t)(zero_top_y - instant_fill_px);
-        if (y < top_limit_y)
-        {
-            y = top_limit_y;
-        }
-
-        h = (int16_t)(zero_top_y - y);
-        if (h > 0)
-        {
-            u8g2_DrawBox(u8g2, instant_x, y, VARIO_UI_GAUGE_INSTANT_W, h);
-        }
-    }
-    else if (clamped_instant < 0.0f)
-    {
-        int16_t y;
-        int16_t h;
-
-        y = (int16_t)(zero_bottom_y + 1);
-        h = instant_fill_px;
-
-        if ((y + h - 1) > bottom_limit_y)
-        {
-            h = (int16_t)(bottom_limit_y - y + 1);
-        }
-
-        if (h > 0)
-        {
-            u8g2_DrawBox(u8g2, instant_x, y, VARIO_UI_GAUGE_INSTANT_W, h);
-        }
-    }
-
-    /* average bar */
-    if (clamped_average > 0.0f)
-    {
-        int16_t y;
-        int16_t h;
-
-        y = (int16_t)(zero_top_y - avg_fill_px);
-        if (y < top_limit_y)
-        {
-            y = top_limit_y;
-        }
-
-        h = (int16_t)(zero_top_y - y);
-        if (h > 0)
-        {
-            u8g2_DrawBox(u8g2, avg_x, y, VARIO_UI_GAUGE_AVG_W, h);
-        }
-    }
-    else if (clamped_average < 0.0f)
-    {
-        int16_t y;
-        int16_t h;
-
-        y = (int16_t)(zero_bottom_y + 1);
-        h = avg_fill_px;
-
-        if ((y + h - 1) > bottom_limit_y)
-        {
-            h = (int16_t)(bottom_limit_y - y + 1);
-        }
-
-        if (h > 0)
-        {
-            u8g2_DrawBox(u8g2, avg_x, y, VARIO_UI_GAUGE_AVG_W, h);
-        }
-    }
+    /* ---------------------------------------------------------------------- */
+    /*  fill draw                                                              */
+    /*                                                                        */
+    /*  - scale 안쪽 : 연속값 -> pixel 로 환산                                 */
+    /*  - scale 초과 : 중심축부터 0.5 m/s slot 을 한 칸씩 지우는 패턴         */
+    /* ---------------------------------------------------------------------- */
+    vario_display_draw_vario_column(u8g2,
+                                    instant_x,
+                                    VARIO_UI_GAUGE_INSTANT_W,
+                                    instant_vario_mps,
+                                    settings);
+    vario_display_draw_vario_column(u8g2,
+                                    avg_x,
+                                    VARIO_UI_GAUGE_AVG_W,
+                                    average_vario_mps,
+                                    settings);
 
     /* center zero line 은 fill 후 다시 덮어 그려 기준선이 항상 살아 있게 유지 */
     for (thick_i = 0u; thick_i < VARIO_UI_VARIO_ZERO_LINE_THICKNESS; ++thick_i)
@@ -2450,18 +2665,22 @@ static void vario_display_draw_gs_side_bar(u8g2_t *u8g2,
                                            float average_speed_kmh)
 {
     const vario_settings_t *settings;
-    uint8_t                 level;
-    int16_t                 slot_y;
-    int16_t                 slot_h;
+    uint16_t                tick_index;
     int16_t                 right_bar_x;
     int16_t                 instant_x;
-    int16_t                 avg_x;
-    int16_t                 arrow_y;
+    int16_t                 avg_icon_x;
+    int16_t                 avg_arrow_x;
     int16_t                 fill_h;
+    int16_t                 tick_y;
+    int16_t                 avg_center_y;
+    int16_t                 avg_icon_y;
+    int16_t                 avg_arrow_y;
     float                   clamped_speed;
     float                   clamped_avg_speed;
-    float                   ratio;
     float                   gs_top_kmh;
+    float                   minor_step_kmh;
+    float                   major_step_kmh;
+    uint16_t                tick_count;
     uint8_t                 tick_w;
     int16_t                 tick_x;
 
@@ -2471,41 +2690,58 @@ static void vario_display_draw_gs_side_bar(u8g2_t *u8g2,
     }
 
     settings = Vario_Settings_Get();
-    gs_top_kmh = 80.0f;
-    if (settings != NULL)
-    {
-        gs_top_kmh = (float)settings->gs_range_kmh;
-        if (gs_top_kmh < 30.0f)
-        {
-            gs_top_kmh = 30.0f;
-        }
-        else if (gs_top_kmh > 150.0f)
-        {
-            gs_top_kmh = 150.0f;
-        }
-    }
+    gs_top_kmh = vario_display_get_gs_scale_kmh(settings);
+    minor_step_kmh = vario_display_get_gs_minor_step_kmh(gs_top_kmh);
+    major_step_kmh = vario_display_get_gs_major_step_kmh(gs_top_kmh);
+    tick_count = vario_display_get_gs_minor_tick_count(gs_top_kmh, minor_step_kmh);
 
     right_bar_x = (int16_t)(v->x + v->w - VARIO_UI_SIDE_BAR_W);
     instant_x = (int16_t)(right_bar_x + 5);
-    avg_x = (int16_t)(right_bar_x + 9);
+    avg_icon_x = right_bar_x;
+    avg_arrow_x = (int16_t)(right_bar_x + 9);
 
-    for (level = 0u; level < VARIO_UI_GS_STEP_COUNT; ++level)
+    /* ---------------------------------------------------------------------- */
+    /*  GS tick 재계산                                                        */
+    /*                                                                        */
+    /*  - top < 50 km/h : major 5 / minor 2.5                                */
+    /*  - 그 외          : major 10 / minor 5                                */
+    /*                                                                        */
+    /*  tick 의 X 위치 / 길이 / bar 폭은 기존 그대로 두고                     */
+    /*  Y 좌표만 설정된 full-scale 에 맞춰 다시 계산한다.                     */
+    /* ---------------------------------------------------------------------- */
+    for (tick_index = 1u; tick_index <= tick_count; ++tick_index)
     {
-        tick_w = ((level % 2u) == 0u) ? VARIO_UI_SCALE_MAJOR_W : VARIO_UI_SCALE_MINOR_W;
+        float   tick_value_kmh;
+        float   ratio;
+        float   major_ratio;
+
+        tick_value_kmh = ((float)tick_index) * minor_step_kmh;
+        ratio = tick_value_kmh / gs_top_kmh;
+        major_ratio = tick_value_kmh / major_step_kmh;
+
+        tick_w = (fabsf(major_ratio - roundf(major_ratio)) < 0.001f) ?
+            VARIO_UI_SCALE_MAJOR_W :
+            VARIO_UI_SCALE_MINOR_W;
         tick_x = (int16_t)(right_bar_x + VARIO_UI_SIDE_BAR_W - tick_w);
-        vario_display_get_gs_slot_rect(v, level, &slot_y, &slot_h);
-        u8g2_DrawHLine(u8g2, tick_x, slot_y, tick_w);
+        tick_y = (int16_t)(v->y + v->h - 1 - lroundf(ratio * (float)(v->h - 1)));
+        if (tick_y < v->y)
+        {
+            tick_y = v->y;
+        }
+        if (tick_y > (v->y + v->h - 1))
+        {
+            tick_y = (int16_t)(v->y + v->h - 1);
+        }
+
+        u8g2_DrawHLine(u8g2, tick_x, tick_y, tick_w);
     }
 
     clamped_speed = vario_display_clampf(instant_speed_kmh, 0.0f, gs_top_kmh);
     if (clamped_speed > 0.0f)
     {
-        ratio = clamped_speed / gs_top_kmh;
-        fill_h = (int16_t)lroundf(ratio * (float)v->h);
-        if ((ratio > 0.0f) && (fill_h <= 0))
-        {
-            fill_h = 1;
-        }
+        fill_h = vario_display_scale_value_to_fill_px(clamped_speed,
+                                                      gs_top_kmh,
+                                                      v->h);
         if (fill_h > v->h)
         {
             fill_h = v->h;
@@ -2523,22 +2759,35 @@ static void vario_display_draw_gs_side_bar(u8g2_t *u8g2,
     clamped_avg_speed = vario_display_clampf(average_speed_kmh, 0.0f, gs_top_kmh);
     if (clamped_avg_speed > 0.0f)
     {
-        ratio = clamped_avg_speed / gs_top_kmh;
-        arrow_y = (int16_t)(v->y + v->h - 1 -
-                            lroundf(ratio * (float)(v->h - VARIO_ICON_BAR_MARK_RIGHT_HEIGHT)) -
-                            (VARIO_ICON_BAR_MARK_RIGHT_HEIGHT / 2));
-        if (arrow_y < v->y)
-        {
-            arrow_y = v->y;
-        }
-        if ((arrow_y + VARIO_ICON_BAR_MARK_RIGHT_HEIGHT) > (v->y + v->h))
-        {
-            arrow_y = (int16_t)(v->y + v->h - VARIO_ICON_BAR_MARK_RIGHT_HEIGHT);
-        }
+        avg_center_y = vario_display_get_gs_value_center_y(v,
+                                                           clamped_avg_speed,
+                                                           gs_top_kmh);
+
+        /* ------------------------------------------------------------------ */
+        /*  평균 속도 마커는 기존 right-edge arrow 를 유지하면서,              */
+        /*  과거 코드에서 빠져 있던 GS AVG XBM 도 bar 왼쪽 영역에 복원한다.   */
+        /*                                                                    */
+        /*  - avg_icon_x  : bar의 왼쪽 영역                                    */
+        /*  - avg_arrow_x : 기존 right marker X                               */
+        /* ------------------------------------------------------------------ */
+        avg_icon_y = vario_display_get_marker_top_y(avg_center_y,
+                                                    VARIO_ICON_GS_AVG_HEIGHT,
+                                                    v->y,
+                                                    (int16_t)(v->y + v->h));
+        avg_arrow_y = vario_display_get_marker_top_y(avg_center_y,
+                                                     VARIO_ICON_BAR_MARK_RIGHT_HEIGHT,
+                                                     v->y,
+                                                     (int16_t)(v->y + v->h));
 
         vario_display_draw_xbm(u8g2,
-                               avg_x,
-                               arrow_y,
+                               avg_icon_x,
+                               avg_icon_y,
+                               VARIO_ICON_GS_AVG_WIDTH,
+                               VARIO_ICON_GS_AVG_HEIGHT,
+                               vario_icon_gs_avg_bits);
+        vario_display_draw_xbm(u8g2,
+                               avg_arrow_x,
+                               avg_arrow_y,
                                VARIO_ICON_BAR_MARK_RIGHT_WIDTH,
                                VARIO_ICON_BAR_MARK_RIGHT_HEIGHT,
                                vario_icon_bar_mark_right_bits);
