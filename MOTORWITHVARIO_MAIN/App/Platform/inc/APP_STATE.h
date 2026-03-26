@@ -1901,8 +1901,26 @@ typedef struct
     int16_t  bank_rate_dps_x10;         /* 0.1 dps                                */
     int16_t  grade_rate_dps_x10;        /* 0.1 dps                                */
 
-    int32_t  lat_accel_mg;              /* 최종 lateral accel, mg                 */
-    int32_t  lon_accel_mg;              /* 최종 accel/decel, mg                   */
+    /* ---------------------------------------------------------------------- */
+    /*  canonical estimator output                                             */
+    /*                                                                        */
+    /*  bank_raw_deg_x10 / grade_raw_deg_x10                                  */
+    /*  - display smoothing(lean/grade tau) 적용 전의 자세 추정값             */
+    /*  - logger / peak detector / offline analyzer 는 이 값을 기준으로        */
+    /*    읽어야 한다.                                                         */
+    /*                                                                        */
+    /*  lat_accel_est_mg / lon_accel_est_mg                                   */
+    /*  - bias 제거 + deadband/clip 적용 후, display tau 적용 전 fused accel   */
+    /*  - 즉, rider-facing UI 값(lat_accel_mg/lon_accel_mg)보다               */
+    /*    응답이 빠른 canonical telemetry 층이다.                              */
+    /* ---------------------------------------------------------------------- */
+    int16_t  bank_raw_deg_x10;          /* 0.1 deg, pre-display smoothing         */
+    int16_t  grade_raw_deg_x10;         /* 0.1 deg, pre-display smoothing         */
+    int32_t  lat_accel_est_mg;          /* mg, pre-display smoothing              */
+    int32_t  lon_accel_est_mg;          /* mg, pre-display smoothing              */
+
+    int32_t  lat_accel_mg;              /* 최종 rider-facing lateral accel, mg    */
+    int32_t  lon_accel_mg;              /* 최종 rider-facing accel/decel, mg      */
     int32_t  lat_accel_cms2;            /* cm/s^2                                 */
     int32_t  lon_accel_cms2;            /* cm/s^2                                 */
 

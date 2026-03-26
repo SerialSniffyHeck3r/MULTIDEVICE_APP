@@ -1373,6 +1373,112 @@ static bool BIKE_DYN_BuildAxesFromUpAndHints(float up_x,
     return true;
 }
 
+static bool BIKE_DYN_BuildNominalBikeAxes(const app_bike_settings_t *settings,
+                                          float *out_fwd_x,
+                                          float *out_fwd_y,
+                                          float *out_fwd_z,
+                                          float *out_left_x,
+                                          float *out_left_y,
+                                          float *out_left_z,
+                                          float *out_up_x,
+                                          float *out_up_y,
+                                          float *out_up_z)
+{
+    float fwd_x;
+    float fwd_y;
+    float fwd_z;
+    float left_x;
+    float left_y;
+    float left_z;
+    float up_x;
+    float up_y;
+    float up_z;
+
+    if ((settings == 0) ||
+        (out_fwd_x == 0) || (out_fwd_y == 0) || (out_fwd_z == 0) ||
+        (out_left_x == 0) || (out_left_y == 0) || (out_left_z == 0) ||
+        (out_up_x == 0) || (out_up_y == 0) || (out_up_z == 0))
+    {
+        return false;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  provisional display용 nominal bike basis                           */
+    /*                                                                    */
+    /*  zero_valid 가 아직 false 여도, 사용자가 화면에서 lean / G 변화를      */
+    /*  즉시 볼 수 있도록 mount axis 설정만으로 만드는 임시 기준축이다.       */
+    /*                                                                    */
+    /*  주의                                                               */
+    /*  - 이 축은 "확정된 zero basis" 가 아니다.                            */
+    /*  - 따라서 canonical estimator / peak / logger 에는 사용하지 않고,     */
+    /*    display-only 경로에서만 사용한다.                                 */
+    /* ------------------------------------------------------------------ */
+    BIKE_DYN_AxisEnumToUnitVec(settings->mount_forward_axis, &fwd_x, &fwd_y, &fwd_z);
+    BIKE_DYN_AxisEnumToUnitVec(settings->mount_left_axis,    &left_x, &left_y, &left_z);
+
+    if (BIKE_DYN_Normalize3(&fwd_x, &fwd_y, &fwd_z) == false)
+    {
+        return false;
+    }
+    if (BIKE_DYN_Normalize3(&left_x, &left_y, &left_z) == false)
+    {
+        return false;
+    }
+
+    BIKE_DYN_Cross3(fwd_x, fwd_y, fwd_z, left_x, left_y, left_z, &up_x, &up_y, &up_z);
+    if (BIKE_DYN_Normalize3(&up_x, &up_y, &up_z) == false)
+    {
+        return false;
+    }
+
+    BIKE_DYN_Cross3(up_x, up_y, up_z, fwd_x, fwd_y, fwd_z, &left_x, &left_y, &left_z);
+    if (BIKE_DYN_Normalize3(&left_x, &left_y, &left_z) == false)
+    {
+        return false;
+    }
+
+    if (settings->mount_yaw_trim_deg_x10 != 0)
+    {
+        float angle_rad;
+        float rot_fwd_x;
+        float rot_fwd_y;
+        float rot_fwd_z;
+
+        angle_rad = ((float)settings->mount_yaw_trim_deg_x10) * ((float)M_PI / 1800.0f);
+        BIKE_DYN_RotateVecAroundAxis(fwd_x, fwd_y, fwd_z,
+                                     up_x, up_y, up_z,
+                                     angle_rad,
+                                     &rot_fwd_x, &rot_fwd_y, &rot_fwd_z);
+
+        fwd_x = rot_fwd_x;
+        fwd_y = rot_fwd_y;
+        fwd_z = rot_fwd_z;
+
+        if (BIKE_DYN_Normalize3(&fwd_x, &fwd_y, &fwd_z) == false)
+        {
+            return false;
+        }
+
+        BIKE_DYN_Cross3(up_x, up_y, up_z, fwd_x, fwd_y, fwd_z, &left_x, &left_y, &left_z);
+        if (BIKE_DYN_Normalize3(&left_x, &left_y, &left_z) == false)
+        {
+            return false;
+        }
+    }
+
+    *out_fwd_x  = fwd_x;
+    *out_fwd_y  = fwd_y;
+    *out_fwd_z  = fwd_z;
+    *out_left_x = left_x;
+    *out_left_y = left_y;
+    *out_left_z = left_z;
+    *out_up_x   = up_x;
+    *out_up_y   = up_y;
+    *out_up_z   = up_z;
+
+    return true;
+}
+
 static bool BIKE_DYN_BuildMountLevelAxes(const app_bike_settings_t *settings,
                                          float up_x,
                                          float up_y,
@@ -2241,27 +2347,95 @@ static void BIKE_DYN_UpdateOutputsFromCurrentImu(const app_bike_settings_t *sett
     float level_left_x;
     float level_left_y;
     float level_left_z;
+    float nominal_fwd_x;
+    float nominal_fwd_y;
+    float nominal_fwd_z;
+    float nominal_left_x;
+    float nominal_left_y;
+    float nominal_left_z;
+    float nominal_up_x;
+    float nominal_up_y;
+    float nominal_up_z;
     float dyn_x_s;
     float dyn_y_s;
     float dyn_z_s;
     float lon_raw_g;
     float lat_raw_g;
+    bool  level_axes_valid;
 
     if ((settings == 0) ||
-        (s_bike_runtime.gravity_valid == false) ||
-        (s_bike_runtime.zero_valid == false))
+        (s_bike_runtime.gravity_valid == false))
     {
         return;
     }
 
     dt_s = BIKE_DYN_ClampF(s_bike_runtime.last_dt_s, BIKE_DYN_MIN_DT_S, BIKE_DYN_MAX_IMU_DT_S);
+    level_axes_valid = false;
 
-    up_bx = BIKE_DYN_Dot3(s_bike_runtime.zero_fwd_x_s,  s_bike_runtime.zero_fwd_y_s,  s_bike_runtime.zero_fwd_z_s,
-                          s_bike_runtime.gravity_est_x_s, s_bike_runtime.gravity_est_y_s, s_bike_runtime.gravity_est_z_s);
-    up_by = BIKE_DYN_Dot3(s_bike_runtime.zero_left_x_s, s_bike_runtime.zero_left_y_s, s_bike_runtime.zero_left_z_s,
-                          s_bike_runtime.gravity_est_x_s, s_bike_runtime.gravity_est_y_s, s_bike_runtime.gravity_est_z_s);
-    up_bz = BIKE_DYN_Dot3(s_bike_runtime.zero_up_x_s,   s_bike_runtime.zero_up_y_s,   s_bike_runtime.zero_up_z_s,
-                          s_bike_runtime.gravity_est_x_s, s_bike_runtime.gravity_est_y_s, s_bike_runtime.gravity_est_z_s);
+    if (s_bike_runtime.zero_valid != false)
+    {
+        up_bx = BIKE_DYN_Dot3(s_bike_runtime.zero_fwd_x_s,  s_bike_runtime.zero_fwd_y_s,  s_bike_runtime.zero_fwd_z_s,
+                              s_bike_runtime.gravity_est_x_s, s_bike_runtime.gravity_est_y_s, s_bike_runtime.gravity_est_z_s);
+        up_by = BIKE_DYN_Dot3(s_bike_runtime.zero_left_x_s, s_bike_runtime.zero_left_y_s, s_bike_runtime.zero_left_z_s,
+                              s_bike_runtime.gravity_est_x_s, s_bike_runtime.gravity_est_y_s, s_bike_runtime.gravity_est_z_s);
+        up_bz = BIKE_DYN_Dot3(s_bike_runtime.zero_up_x_s,   s_bike_runtime.zero_up_y_s,   s_bike_runtime.zero_up_z_s,
+                              s_bike_runtime.gravity_est_x_s, s_bike_runtime.gravity_est_y_s, s_bike_runtime.gravity_est_z_s);
+
+        level_axes_valid = BIKE_DYN_BuildCurrentLevelAxes(&level_fwd_x,
+                                                          &level_fwd_y,
+                                                          &level_fwd_z,
+                                                          &level_left_x,
+                                                          &level_left_y,
+                                                          &level_left_z);
+    }
+    else
+    {
+        /* ------------------------------------------------------------------ */
+        /*  provisional display path                                           */
+        /*                                                                    */
+        /*  zero_valid 가 아직 false 인 동안에도 사용자는 화면에서 lean / G     */
+        /*  변화가 살아 있는지 확인할 수 있어야 한다.                           */
+        /*                                                                    */
+        /*  따라서 확정 zero basis 대신, mount axis 설정만으로 만든 nominal      */
+        /*  bike frame 을 사용해 임시 표시값을 만든다.                           */
+        /*                                                                    */
+        /*  중요한 점                                                           */
+        /*  - 이 경로는 display-only 다.                                        */
+        /*  - canonical raw(est_*) / peak / log 는 아래 publish 단계에서        */
+        /*    zero_valid 이후부터만 열리게 한다.                                 */
+        /* ------------------------------------------------------------------ */
+        if (BIKE_DYN_BuildNominalBikeAxes(settings,
+                                          &nominal_fwd_x,
+                                          &nominal_fwd_y,
+                                          &nominal_fwd_z,
+                                          &nominal_left_x,
+                                          &nominal_left_y,
+                                          &nominal_left_z,
+                                          &nominal_up_x,
+                                          &nominal_up_y,
+                                          &nominal_up_z) == false)
+        {
+            return;
+        }
+
+        up_bx = BIKE_DYN_Dot3(nominal_fwd_x,  nominal_fwd_y,  nominal_fwd_z,
+                              s_bike_runtime.gravity_est_x_s, s_bike_runtime.gravity_est_y_s, s_bike_runtime.gravity_est_z_s);
+        up_by = BIKE_DYN_Dot3(nominal_left_x, nominal_left_y, nominal_left_z,
+                              s_bike_runtime.gravity_est_x_s, s_bike_runtime.gravity_est_y_s, s_bike_runtime.gravity_est_z_s);
+        up_bz = BIKE_DYN_Dot3(nominal_up_x,   nominal_up_y,   nominal_up_z,
+                              s_bike_runtime.gravity_est_x_s, s_bike_runtime.gravity_est_y_s, s_bike_runtime.gravity_est_z_s);
+
+        level_axes_valid = BIKE_DYN_BuildMountLevelAxes(settings,
+                                                        s_bike_runtime.gravity_est_x_s,
+                                                        s_bike_runtime.gravity_est_y_s,
+                                                        s_bike_runtime.gravity_est_z_s,
+                                                        &level_fwd_x,
+                                                        &level_fwd_y,
+                                                        &level_fwd_z,
+                                                        &level_left_x,
+                                                        &level_left_y,
+                                                        &level_left_z);
+    }
 
     bank_rad  = atan2f(-up_by, BIKE_DYN_ClampF(up_bz, -1.0f, 1.0f));
     grade_rad = atan2f(-up_bx, BIKE_DYN_SafeSqrtF((up_by * up_by) + (up_bz * up_bz)));
@@ -2269,12 +2443,7 @@ static void BIKE_DYN_UpdateOutputsFromCurrentImu(const app_bike_settings_t *sett
     s_bike_runtime.bank_raw_deg  = bank_rad  * BIKE_DYN_RAD2DEG;
     s_bike_runtime.grade_raw_deg = grade_rad * BIKE_DYN_RAD2DEG;
 
-    if (BIKE_DYN_BuildCurrentLevelAxes(&level_fwd_x,
-                                       &level_fwd_y,
-                                       &level_fwd_z,
-                                       &level_left_x,
-                                       &level_left_y,
-                                       &level_left_z) != false)
+    if (level_axes_valid != false)
     {
         s_bike_runtime.bank_rate_dps  = -BIKE_DYN_Dot3(s_bike_runtime.last_gx_dps,
                                                        s_bike_runtime.last_gy_dps,
@@ -2309,12 +2478,7 @@ static void BIKE_DYN_UpdateOutputsFromCurrentImu(const app_bike_settings_t *sett
     dyn_y_s = s_bike_runtime.last_ay_g - s_bike_runtime.gravity_est_y_s;
     dyn_z_s = s_bike_runtime.last_az_g - s_bike_runtime.gravity_est_z_s;
 
-    if (BIKE_DYN_BuildCurrentLevelAxes(&level_fwd_x,
-                                       &level_fwd_y,
-                                       &level_fwd_z,
-                                       &level_left_x,
-                                       &level_left_y,
-                                       &level_left_z) != false)
+    if (level_axes_valid != false)
     {
         lon_raw_g = BIKE_DYN_Dot3(dyn_x_s, dyn_y_s, dyn_z_s,
                                   level_fwd_x, level_fwd_y, level_fwd_z);
@@ -2868,6 +3032,39 @@ static void BIKE_DYN_PublishState(uint32_t now_ms,
     bike->last_zero_capture_ms = s_bike_runtime.last_zero_capture_ms;
     bike->last_gnss_aid_ms     = s_bike_runtime.last_gnss_fix_update_ms;
 
+    /* ------------------------------------------------------------------ */
+    /*  canonical telemetry와 rider-facing display 출력을 함께 publish 한다. */
+    /*                                                                    */
+    /*  이유                                                               */
+    /*  - logger / peak detector / replay tool 은                         */
+    /*    pre-display smoothing 값을 읽어야 응답이 둔화되지 않는다.       */
+    /*  - live UI 는 display tau가 적용된 부드러운 값을 계속 사용한다.    */
+    /* ------------------------------------------------------------------ */
+    if (s_bike_runtime.zero_valid != false)
+    {
+        /* ------------------------------------------------------------------ */
+        /*  canonical estimator output 는 zero_valid 이후부터만 연다.           */
+        /*                                                                    */
+        /*  이렇게 해야 display-only provisional 값이 peak/log 경로로            */
+        /*  오염되지 않는다.                                                    */
+        /* ------------------------------------------------------------------ */
+        bike->bank_raw_deg_x10 = BIKE_DYN_RoundFloatToS16X10(s_bike_runtime.bank_raw_deg * 10.0f);
+        bike->grade_raw_deg_x10 = BIKE_DYN_RoundFloatToS16X10(s_bike_runtime.grade_raw_deg * 10.0f);
+        bike->lat_accel_est_mg = BIKE_DYN_RoundFloatToS32(BIKE_DYN_DeadbandAndClipG(s_bike_runtime.lat_imu_g - s_bike_runtime.lat_bias_g,
+                                                                                     settings->output_deadband_mg,
+                                                                                     settings->output_clip_mg) * 1000.0f);
+        bike->lon_accel_est_mg = BIKE_DYN_RoundFloatToS32(BIKE_DYN_DeadbandAndClipG(s_bike_runtime.lon_imu_g - s_bike_runtime.lon_bias_g,
+                                                                                     settings->output_deadband_mg,
+                                                                                     settings->output_clip_mg) * 1000.0f);
+    }
+    else
+    {
+        bike->bank_raw_deg_x10 = 0;
+        bike->grade_raw_deg_x10 = 0;
+        bike->lat_accel_est_mg = 0;
+        bike->lon_accel_est_mg = 0;
+    }
+
     bike->banking_angle_deg_x10     = BIKE_DYN_RoundFloatToS16X10(s_bike_runtime.bank_display_deg * 10.0f);
     bike->banking_angle_display_deg = BIKE_DYN_RoundFloatToS16X10(s_bike_runtime.bank_display_deg);
     bike->grade_deg_x10             = BIKE_DYN_RoundFloatToS16X10(s_bike_runtime.grade_display_deg * 10.0f);
@@ -2993,11 +3190,15 @@ void BIKE_DYNAMICS_Init(uint32_t now_ms)
 {
     BIKE_DYN_ResetRuntime(now_ms);
 
-    g_app_state.bike.initialized         = true;
-    g_app_state.bike.last_update_ms      = now_ms;
-    g_app_state.bike.last_imu_update_ms  = 0u;
+    g_app_state.bike.initialized          = true;
+    g_app_state.bike.last_update_ms       = now_ms;
+    g_app_state.bike.last_imu_update_ms   = 0u;
     g_app_state.bike.last_zero_capture_ms = 0u;
-    g_app_state.bike.last_gnss_aid_ms    = 0u;
+    g_app_state.bike.last_gnss_aid_ms     = 0u;
+    g_app_state.bike.bank_raw_deg_x10     = 0;
+    g_app_state.bike.grade_raw_deg_x10    = 0;
+    g_app_state.bike.lat_accel_est_mg     = 0;
+    g_app_state.bike.lon_accel_est_mg     = 0;
 }
 
 void BIKE_DYNAMICS_RequestZeroCapture(void)
@@ -3065,6 +3266,10 @@ void BIKE_DYNAMICS_Task(uint32_t now_ms)
         g_app_state.bike.heading_source      = (uint8_t)APP_BIKE_HEADING_SOURCE_NONE;
         g_app_state.bike.heading_deg_x10     = 0;
         g_app_state.bike.mag_heading_deg_x10 = 0;
+        g_app_state.bike.bank_raw_deg_x10    = 0;
+        g_app_state.bike.grade_raw_deg_x10   = 0;
+        g_app_state.bike.lat_accel_est_mg    = 0;
+        g_app_state.bike.lon_accel_est_mg    = 0;
         g_app_state.bike.last_update_ms      = now_ms;
         return;
     }
