@@ -210,12 +210,23 @@ void Motor_Dynamics_Task(uint32_t now_ms)
     /*  이렇게 하면 menu/settings 화면에서도 Dynamics 자체는 절대 멈추지       */
     /*  않지만, 같은 샘플을 여러 번 중복 기록하는 일은 피할 수 있다.          */
     /* ---------------------------------------------------------------------- */
-    if ((bike->last_update_ms == 0u) || (bike->last_update_ms == s_runtime.last_shared_update_ms))
+    /* ---------------------------------------------------------------------- */
+    /*  dedupe 기준은 task tick이 아니라 실제 IMU sample timestamp 여야 한다.   */
+    /*                                                                        */
+    /*  BIKE_DYNAMICS는 매 task에서 last_update_ms를 갱신하므로,                */
+    /*  그 값을 그대로 쓰면 같은 IMU 샘플을 여러 superloop에서 중복 소비할 수   */
+    /*  있다. 따라서 IMU sample stamp가 있으면 그것을 우선 사용한다.           */
+    /* ---------------------------------------------------------------------- */
     {
-        return;
-    }
+        uint32_t sample_stamp_ms = (bike->last_imu_update_ms != 0u) ? bike->last_imu_update_ms
+                                                                    : bike->last_update_ms;
+        if ((sample_stamp_ms == 0u) || (sample_stamp_ms == s_runtime.last_shared_update_ms))
+        {
+            return;
+        }
 
-    s_runtime.last_shared_update_ms = bike->last_update_ms;
+        s_runtime.last_shared_update_ms = sample_stamp_ms;
+    }
 
     /* ---------------------------------------------------------------------- */
     /*  history는 display layer의 일부이므로 zero_valid 전에도 살아 있어야 한다.*/
