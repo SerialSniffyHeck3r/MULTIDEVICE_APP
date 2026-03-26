@@ -2776,6 +2776,48 @@ static void BIKE_DYN_UpdateBiasAndFusedOutputs(const app_bike_settings_t *settin
         dt_s);
 }
 
+static void BIKE_DYN_UpdateProvisionalDisplayOutputs(const app_bike_settings_t *settings)
+{
+    float dt_s;
+
+    if (settings == 0)
+    {
+        return;
+    }
+
+    dt_s = BIKE_DYN_ClampF(s_bike_runtime.last_dt_s, BIKE_DYN_MIN_DT_S, BIKE_DYN_MAX_IMU_DT_S);
+
+    /* ---------------------------------------------------------------------- */
+    /*  provisional display-only accel path                                    */
+    /*                                                                          */
+    /*  zero 기준이 아직 성립하지 않은 동안에도 라이더는 화면에서 lean / G가     */
+    /*  살아 움직이는지 확인할 수 있어야 한다.                                  */
+    /*                                                                          */
+    /*  따라서 fused display 출력은 bias adaptation 없이 현재 IMU에서 나온      */
+    /*  level-frame accel을 바로 deadband / clip / display LPF 처리해서 만든다. */
+    /*                                                                          */
+    /*  중요한 점                                                               */
+    /*  - canonical est_* publish 는 BIKE_DYN_PublishState()에서                */
+    /*    zero_valid 이후에만 계속 잠겨 있다.                                   */
+    /*  - 즉, 여기서 만드는 값은 rider-facing display 전용이다.                 */
+    /* ---------------------------------------------------------------------- */
+    s_bike_runtime.lon_fused_g = BIKE_DYN_LpfUpdate(
+        s_bike_runtime.lon_fused_g,
+        BIKE_DYN_DeadbandAndClipG(s_bike_runtime.lon_imu_g,
+                                  settings->output_deadband_mg,
+                                  settings->output_clip_mg),
+        settings->accel_display_tau_ms,
+        dt_s);
+
+    s_bike_runtime.lat_fused_g = BIKE_DYN_LpfUpdate(
+        s_bike_runtime.lat_fused_g,
+        BIKE_DYN_DeadbandAndClipG(s_bike_runtime.lat_imu_g,
+                                  settings->output_deadband_mg,
+                                  settings->output_clip_mg),
+        settings->accel_display_tau_ms,
+        dt_s);
+}
+
 /* -------------------------------------------------------------------------- */
 /*  gyro bias calibration state machine                                         */
 /* -------------------------------------------------------------------------- */
@@ -3258,19 +3300,42 @@ void BIKE_DYNAMICS_Task(uint32_t now_ms)
 
     if (settings->enabled == 0u)
     {
-        g_app_state.bike.initialized         = true;
-        g_app_state.bike.imu_valid           = false;
-        g_app_state.bike.zero_valid          = false;
-        g_app_state.bike.heading_valid       = false;
-        g_app_state.bike.mag_heading_valid   = false;
-        g_app_state.bike.heading_source      = (uint8_t)APP_BIKE_HEADING_SOURCE_NONE;
-        g_app_state.bike.heading_deg_x10     = 0;
-        g_app_state.bike.mag_heading_deg_x10 = 0;
-        g_app_state.bike.bank_raw_deg_x10    = 0;
-        g_app_state.bike.grade_raw_deg_x10   = 0;
-        g_app_state.bike.lat_accel_est_mg    = 0;
-        g_app_state.bike.lon_accel_est_mg    = 0;
-        g_app_state.bike.last_update_ms      = now_ms;
+        g_app_state.bike.initialized               = true;
+        g_app_state.bike.imu_valid                 = false;
+        g_app_state.bike.zero_valid                = false;
+        g_app_state.bike.gnss_aid_valid            = 0u;
+        g_app_state.bike.gnss_heading_valid        = 0u;
+        g_app_state.bike.obd_speed_valid           = 0u;
+        g_app_state.bike.heading_valid             = false;
+        g_app_state.bike.mag_heading_valid         = false;
+        g_app_state.bike.heading_source            = (uint8_t)APP_BIKE_HEADING_SOURCE_NONE;
+        g_app_state.bike.speed_source              = (uint8_t)APP_BIKE_SPEED_SOURCE_IMU_FALLBACK;
+        g_app_state.bike.estimator_mode            = (uint8_t)APP_BIKE_ESTIMATOR_MODE_IMU_ONLY;
+        g_app_state.bike.confidence_permille       = 0u;
+        g_app_state.bike.heading_deg_x10           = 0;
+        g_app_state.bike.mag_heading_deg_x10       = 0;
+        g_app_state.bike.bank_raw_deg_x10          = 0;
+        g_app_state.bike.grade_raw_deg_x10         = 0;
+        g_app_state.bike.banking_angle_deg_x10     = 0;
+        g_app_state.bike.banking_angle_display_deg = 0;
+        g_app_state.bike.grade_deg_x10             = 0;
+        g_app_state.bike.grade_display_deg         = 0;
+        g_app_state.bike.bank_rate_dps_x10         = 0;
+        g_app_state.bike.grade_rate_dps_x10        = 0;
+        g_app_state.bike.lat_accel_est_mg          = 0;
+        g_app_state.bike.lon_accel_est_mg          = 0;
+        g_app_state.bike.lat_accel_mg              = 0;
+        g_app_state.bike.lon_accel_mg              = 0;
+        g_app_state.bike.lat_accel_cms2            = 0;
+        g_app_state.bike.lon_accel_cms2            = 0;
+        g_app_state.bike.lat_accel_imu_mg          = 0;
+        g_app_state.bike.lon_accel_imu_mg          = 0;
+        g_app_state.bike.lat_accel_ref_mg          = 0;
+        g_app_state.bike.lon_accel_ref_mg          = 0;
+        g_app_state.bike.lat_bias_mg               = 0;
+        g_app_state.bike.lon_bias_mg               = 0;
+        g_app_state.bike.last_imu_update_ms        = 0u;
+        g_app_state.bike.last_update_ms            = now_ms;
         return;
     }
 
@@ -3307,9 +3372,17 @@ void BIKE_DYNAMICS_Task(uint32_t now_ms)
                                                     now_ms);
 
     if ((imu_new_sample != false) &&
-        (s_bike_runtime.gravity_valid != false) &&
-        (s_bike_runtime.zero_valid != false))
+        (s_bike_runtime.gravity_valid != false))
     {
+        /* ------------------------------------------------------------------ */
+        /*  zero_valid 이전에도 display-only lean / G는 살아 있어야 한다.      */
+        /*                                                                      */
+        /*  따라서 current IMU -> bike-frame 출력 계산은 gravity만 유효하면      */
+        /*  항상 먼저 수행한다. 이후 zero_valid 여부에 따라                     */
+        /*  - canonical bias/fused path                                         */
+        /*  - provisional display-only path                                     */
+        /*  로 분기한다.                                                        */
+        /* ------------------------------------------------------------------ */
         BIKE_DYN_UpdateOutputsFromCurrentImu(settings);
     }
 
@@ -3325,22 +3398,27 @@ void BIKE_DYNAMICS_Task(uint32_t now_ms)
                                 imu_new_sample,
                                 now_ms);
 
-    if ((s_bike_runtime.gravity_valid != false) &&
-        (s_bike_runtime.zero_valid != false))
+    if (s_bike_runtime.gravity_valid != false)
     {
-        BIKE_DYN_UpdateMotionReferenceBlend(speed_source,
-                                            gnss_heading_valid,
-                                            selected_speed_mmps);
-
         if (imu_new_sample != false)
         {
-            BIKE_DYN_UpdateOutputsFromCurrentImu(settings);
-            BIKE_DYN_UpdateBiasAndFusedOutputs(settings,
-                                               speed_source,
-                                               gnss_speed_valid,
-                                               gnss_heading_valid,
-                                               obd_speed_valid,
-                                               selected_speed_mmps);
+            if (s_bike_runtime.zero_valid != false)
+            {
+                BIKE_DYN_UpdateMotionReferenceBlend(speed_source,
+                                                    gnss_heading_valid,
+                                                    selected_speed_mmps);
+
+                BIKE_DYN_UpdateBiasAndFusedOutputs(settings,
+                                                   speed_source,
+                                                   gnss_speed_valid,
+                                                   gnss_heading_valid,
+                                                   obd_speed_valid,
+                                                   selected_speed_mmps);
+            }
+            else
+            {
+                BIKE_DYN_UpdateProvisionalDisplayOutputs(settings);
+            }
         }
     }
     else
@@ -3349,6 +3427,8 @@ void BIKE_DYNAMICS_Task(uint32_t now_ms)
         s_bike_runtime.grade_raw_deg     = 0.0f;
         s_bike_runtime.bank_display_deg  = 0.0f;
         s_bike_runtime.grade_display_deg = 0.0f;
+        s_bike_runtime.bank_rate_dps     = 0.0f;
+        s_bike_runtime.grade_rate_dps    = 0.0f;
         s_bike_runtime.lon_imu_g         = 0.0f;
         s_bike_runtime.lat_imu_g         = 0.0f;
         s_bike_runtime.lon_fused_g       = 0.0f;
