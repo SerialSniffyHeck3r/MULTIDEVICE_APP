@@ -76,6 +76,7 @@ typedef enum
     VARIO_MENU_ITEM_DAMPING,
     VARIO_MENU_ITEM_INT_AVG,
     VARIO_MENU_ITEM_FLIGHT_START,
+    VARIO_MENU_ITEM_TRAINER,
     VARIO_MENU_ITEM_MANUAL_MC,
     VARIO_MENU_ITEM_FINAL_GLIDE_MARGIN,
     VARIO_MENU_ITEM_POLAR_V1,
@@ -147,6 +148,7 @@ static const vario_menu_item_t s_vario_category_flight_items[] = {
     VARIO_MENU_ITEM_HEADING_SOURCE,
     VARIO_MENU_ITEM_INT_AVG,
     VARIO_MENU_ITEM_FLIGHT_START,
+    VARIO_MENU_ITEM_TRAINER,
     VARIO_MENU_ITEM_MANUAL_MC,
     VARIO_MENU_ITEM_FINAL_GLIDE_MARGIN,
     VARIO_MENU_ITEM_POLAR_V1,
@@ -934,6 +936,7 @@ void Vario_Settings_Init(void)
     s_vario_settings.show_flight_time              = 1u;
     s_vario_settings.show_max_vario                = 1u;
     s_vario_settings.show_gs_bar                   = 1u;
+    s_vario_settings.trainer_enabled               = 0u;
 
     vario_settings_sanitize_audio_thresholds();
     vario_settings_sanitize_glide_computer();
@@ -1175,6 +1178,19 @@ void Vario_Settings_AdjustQuickSet(vario_quickset_item_t item, int8_t direction)
                                                   ((int32_t)direction * 5)),
                                         0u,
                                         100u);
+            break;
+
+        case VARIO_QUICKSET_ITEM_TRAINER:
+            /* -------------------------------------------------------------- */
+            /*  TRAINER toggle 는 단순 on/off 스위치다.                       */
+            /*  direction 부호만 보고 토글해서 root setup, valuesetting,       */
+            /*  추후 direct caller가 모두 같은 동작을 보게 한다.              */
+            /* -------------------------------------------------------------- */
+            if (direction != 0)
+            {
+                s_vario_settings.trainer_enabled =
+                    (s_vario_settings.trainer_enabled == 0u) ? 1u : 0u;
+            }
             break;
 
         case VARIO_QUICKSET_ITEM_ALT2_CAPTURE:
@@ -2037,6 +2053,11 @@ void Vario_Settings_GetCategoryItemText(vario_settings_category_t category,
             vario_settings_format_speed_threshold(out_value, value_len, settings->flight_start_speed_kmh_x10);
             break;
 
+        case VARIO_MENU_ITEM_TRAINER:
+            snprintf(out_label, label_len, "Trainer");
+            snprintf(out_value, value_len, "%s", vario_settings_get_on_off_text(settings->trainer_enabled));
+            break;
+
         case VARIO_MENU_ITEM_MANUAL_MC:
             snprintf(out_label, label_len, "Manual MC");
             vario_settings_format_positive_sink(out_value, value_len, settings->manual_mccready_cms);
@@ -2331,6 +2352,10 @@ void Vario_Settings_AdjustCategoryItem(vario_settings_category_t category,
 
         case VARIO_MENU_ITEM_FLIGHT_START:
             Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_FLIGHT_START_SPEED, direction);
+            break;
+
+        case VARIO_MENU_ITEM_TRAINER:
+            Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_TRAINER, direction);
             break;
 
         case VARIO_MENU_ITEM_MANUAL_MC:

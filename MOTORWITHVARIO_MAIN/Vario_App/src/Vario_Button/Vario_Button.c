@@ -2,13 +2,66 @@
 
 #include "button.h"
 #include "Vario_Settings.h"
+#include "ui_toast.h"
 
+#include <stdio.h>
 #include <string.h>
 
-static void vario_button_handle_main_screen(const button_event_t *event)
+static void vario_button_show_qnh_toast(uint32_t now_ms)
+{
+    char qnh_text[32];
+    char toast_text[40];
+
+    Vario_Settings_FormatQnhText(qnh_text, sizeof(qnh_text));
+    snprintf(toast_text, sizeof(toast_text), "QNH %s", qnh_text);
+    UI_Toast_Show(toast_text, NULL, 0u, 0u, now_ms, 1200u);
+}
+
+static void vario_button_handle_main_screen(const button_event_t *event, uint32_t now_ms)
 {
     if (event->type != BUTTON_EVENT_SHORT_PRESS)
     {
+        return;
+    }
+
+    if (Vario_Settings_Get()->trainer_enabled != 0u)
+    {
+        switch (event->id)
+        {
+            case BUTTON_ID_1:
+                Vario_State_TrainerAdjustSpeed(+1);
+                Vario_State_RequestRedraw();
+                break;
+
+            case BUTTON_ID_2:
+                Vario_State_TrainerAdjustSpeed(-1);
+                Vario_State_RequestRedraw();
+                break;
+
+            case BUTTON_ID_3:
+                Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_QNH, +1);
+                Vario_State_RequestRedraw();
+                break;
+
+            case BUTTON_ID_4:
+                Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_QNH, -1);
+                Vario_State_RequestRedraw();
+                break;
+
+            case BUTTON_ID_5:
+                Vario_State_TrainerAdjustHeading(+1);
+                Vario_State_RequestRedraw();
+                break;
+
+            case BUTTON_ID_6:
+                Vario_State_TrainerAdjustHeading(-1);
+                Vario_State_RequestRedraw();
+                break;
+
+            default:
+                break;
+        }
+
         return;
     }
 
@@ -28,11 +81,13 @@ static void vario_button_handle_main_screen(const button_event_t *event)
 
         case BUTTON_ID_4:
             Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_QNH, -1);
+            vario_button_show_qnh_toast(now_ms);
             Vario_State_RequestRedraw();
             break;
 
         case BUTTON_ID_5:
             Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_QNH, +1);
+            vario_button_show_qnh_toast(now_ms);
             Vario_State_RequestRedraw();
             break;
 
@@ -90,6 +145,10 @@ static void vario_button_handle_setting(const button_event_t *event)
                     Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_VARIO_DAMPING, direction);
                     break;
 
+                case VARIO_SETTING_MENU_TRAINER:
+                    Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_TRAINER, direction);
+                    break;
+
                 case VARIO_SETTING_MENU_CLIMB_START:
                     Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_CLIMB_TONE_THRESHOLD, direction);
                     break;
@@ -119,6 +178,10 @@ static void vario_button_handle_setting(const button_event_t *event)
 
                 case VARIO_SETTING_MENU_RESPONSE:
                     category = VARIO_SETTINGS_CATEGORY_AUDIO;
+                    break;
+
+                case VARIO_SETTING_MENU_TRAINER:
+                    category = VARIO_SETTINGS_CATEGORY_FLIGHT;
                     break;
 
                 case VARIO_SETTING_MENU_CLIMB_START:
@@ -231,8 +294,6 @@ void Vario_Button_Task(uint32_t now_ms)
 {
     button_event_t event;
 
-    (void)now_ms;
-
     while (Button_PopEvent(&event) != false)
     {
         switch (Vario_State_GetMode())
@@ -240,7 +301,7 @@ void Vario_Button_Task(uint32_t now_ms)
             case VARIO_MODE_SCREEN_1:
             case VARIO_MODE_SCREEN_2:
             case VARIO_MODE_SCREEN_3:
-                vario_button_handle_main_screen(&event);
+                vario_button_handle_main_screen(&event, now_ms);
                 break;
 
             case VARIO_MODE_SETTING:
@@ -276,12 +337,24 @@ void Vario_Button_GetButtonBar(vario_mode_t mode, vario_buttonbar_t *out_bar)
         case VARIO_MODE_SCREEN_1:
         case VARIO_MODE_SCREEN_2:
         case VARIO_MODE_SCREEN_3:
-            out_bar->f1 = "SCR1";
-            out_bar->f2 = "PREV";
-            out_bar->f3 = "NEXT";
-            out_bar->f4 = "QNH-";
-            out_bar->f5 = "QNH+";
-            out_bar->f6 = "SET";
+            if (Vario_Settings_Get()->trainer_enabled != 0u)
+            {
+                out_bar->f1 = "SPD+";
+                out_bar->f2 = "SPD-";
+                out_bar->f3 = "QNH+";
+                out_bar->f4 = "QNH-";
+                out_bar->f5 = "HDG+";
+                out_bar->f6 = "HDG-";
+            }
+            else
+            {
+                out_bar->f1 = "SCR1";
+                out_bar->f2 = "PREV";
+                out_bar->f3 = "NEXT";
+                out_bar->f4 = "QNH-";
+                out_bar->f5 = "QNH+";
+                out_bar->f6 = "SET";
+            }
             break;
 
         case VARIO_MODE_SETTING:

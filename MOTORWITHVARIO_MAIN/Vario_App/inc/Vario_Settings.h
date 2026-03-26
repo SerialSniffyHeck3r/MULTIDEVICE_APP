@@ -210,6 +210,7 @@ typedef enum
     VARIO_QUICKSET_ITEM_BEEP_ONLY_WHEN_FLYING,
     VARIO_QUICKSET_ITEM_AUDIO_ENABLE,
     VARIO_QUICKSET_ITEM_AUDIO_VOLUME,
+    VARIO_QUICKSET_ITEM_TRAINER,
     VARIO_QUICKSET_ITEM_ALT2_CAPTURE,
     VARIO_QUICKSET_ITEM_ALT3_RESET,
     VARIO_QUICKSET_ITEM_FLIGHT_RESET,
@@ -411,6 +412,14 @@ typedef struct
     uint8_t  show_flight_time;
     uint8_t  show_max_vario;
     uint8_t  show_gs_bar;
+
+    /* ---------------------------------------------------------------------- */
+    /*  TRAINER mode                                                          */
+    /*                                                                        */
+    /*  0 = 실제 APP_STATE snapshot 기반 표시/판정/오디오                      */
+    /*  1 = Vario_State 내부 synthetic trainer table 기반 훈련/테스트 모드     */
+    /* ---------------------------------------------------------------------- */
+    uint8_t  trainer_enabled;
 } vario_settings_t;
 
 void Vario_Settings_Init(void);

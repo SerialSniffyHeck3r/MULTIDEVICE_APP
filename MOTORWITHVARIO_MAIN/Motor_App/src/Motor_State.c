@@ -1,6 +1,7 @@
 #include "Motor_State.h"
 
 #include "Motor_Settings.h"
+#include "ui_popup.h"
 #include "ui_toast.h"
 
 #include <string.h>
@@ -158,6 +159,35 @@ void Motor_State_ShowToast(const char *text, uint32_t hold_ms)
     /*  Motor_App는 popup/toast raster를 직접 구현하지 않고 공용 모듈을 쓴다.  */
     /* ---------------------------------------------------------------------- */
     UI_Toast_Show(text, 0, 0u, 0u, s_motor_state.now_ms, hold_ms);
+}
+
+void Motor_State_ShowPopup(const char *title,
+                           const char *line1,
+                           const char *line2,
+                           uint32_t hold_ms)
+{
+    /* ---------------------------------------------------------------------- */
+    /*  popup 역시 Motor_App가 저수준 draw 세부사항을 직접 알지 않도록        */
+    /*  공용 Display_UI 모듈에 위임한다.                                       */
+    /*                                                                        */
+    /*  title/line* 가 NULL 이어도 하위 모듈이 안전하게 빈 문자열로           */
+    /*  정규화하므로, 여기서는 단순 facade 역할만 수행한다.                    */
+    /* ---------------------------------------------------------------------- */
+    UI_Popup_Show(title,
+                  line1,
+                  line2,
+                  0,
+                  0u,
+                  0u,
+                  s_motor_state.now_ms,
+                  hold_ms);
+    s_motor_state.ui.redraw_requested = 1u;
+}
+
+void Motor_State_HidePopup(void)
+{
+    UI_Popup_Hide();
+    s_motor_state.ui.redraw_requested = 1u;
 }
 
 void Motor_State_SetScreen(motor_screen_t screen)

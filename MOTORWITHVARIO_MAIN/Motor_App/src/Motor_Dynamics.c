@@ -3,15 +3,53 @@
 #include "BIKE_DYNAMICS.h"
 #include "Motor_State.h"
 
+#include <stdio.h>
 #include <string.h>
+
+typedef enum
+{
+    MOTOR_DYN_CAL_FLOW_NONE = 0u,
+    MOTOR_DYN_CAL_FLOW_BOOT_GYRO,
+    MOTOR_DYN_CAL_FLOW_BOOT_ZERO,
+    MOTOR_DYN_CAL_FLOW_MANUAL_GYRO,
+    MOTOR_DYN_CAL_FLOW_MANUAL_ZERO
+} motor_dyn_cal_flow_t;
 
 typedef struct
 {
     uint32_t last_shared_update_ms;
     uint32_t last_zero_capture_ms;
+    uint32_t last_zero_request_count;
+    uint32_t last_gyro_bias_cal_ms;
+    uint32_t cal_flow_start_ms;
+    uint32_t cal_popup_last_show_ms;
+    uint32_t cal_expected_zero_capture_ms;
+    uint32_t cal_expected_gyro_cal_ms;
+    uint8_t  last_zero_valid;
+    uint8_t  last_gyro_bias_cal_active;
+    uint8_t  cal_flow;
+    uint8_t  cal_request_sent;
 } motor_dynamics_runtime_t;
 
 static motor_dynamics_runtime_t s_runtime;
+
+#define MOTOR_DYN_CAL_POPUP_HOLD_MS        1200u
+#define MOTOR_DYN_CAL_POPUP_REFRESH_MS      400u
+#define MOTOR_DYN_MANUAL_ZERO_POPUP_MAX_MS 12000u
+
+static void motor_dyn_reset_history(motor_dynamics_state_t *dyn)
+{
+    if (dyn == 0)
+    {
+        return;
+    }
+
+    memset(dyn->bank_history_x10, 0, sizeof(dyn->bank_history_x10));
+    memset(dyn->lat_history_x10, 0, sizeof(dyn->lat_history_x10));
+    memset(dyn->alt_history_m, 0, sizeof(dyn->alt_history_m));
+    memset(dyn->grade_history_x10, 0, sizeof(dyn->grade_history_x10));
+    dyn->history_head = 0u;
+}
 
 static void motor_dyn_update_history(motor_dynamics_state_t *dyn, int32_t altitude_cm)
 {
@@ -125,6 +163,265 @@ static void motor_dyn_update_peaks_from_estimator(motor_dynamics_state_t *dyn)
     }
 }
 
+static void motor_dyn_start_cal_flow(motor_dyn_cal_flow_t flow,
+                                     uint32_t now_ms,
+                                     const app_bike_state_t *bike)
+{
+    s_runtime.cal_flow = (uint8_t)flow;
+    s_runtime.cal_flow_start_ms = now_ms;
+    s_runtime.cal_popup_last_show_ms = 0u;
+    s_runtime.cal_expected_zero_capture_ms = (bike != 0) ? bike->last_zero_capture_ms : 0u;
+    s_runtime.cal_expected_gyro_cal_ms = (bike != 0) ? bike->last_gyro_bias_cal_ms : 0u;
+
+    /* ---------------------------------------------------------------------- */
+    /*  boot flow 는 여기서 실제 low-level request를 보낸다.                   */
+    /*  manual flow 는 이미 버튼/상위 요청이 내려간 뒤 이를 관찰한 것이므로     */
+    /*  추가 request를 중복 발행하지 않는다.                                   */
+    /* ---------------------------------------------------------------------- */
+    switch (flow)
+    {
+    case MOTOR_DYN_CAL_FLOW_MANUAL_GYRO:
+    case MOTOR_DYN_CAL_FLOW_MANUAL_ZERO:
+        s_runtime.cal_request_sent = 1u;
+        break;
+
+    case MOTOR_DYN_CAL_FLOW_BOOT_GYRO:
+    case MOTOR_DYN_CAL_FLOW_BOOT_ZERO:
+    default:
+        s_runtime.cal_request_sent = 0u;
+        break;
+    }
+}
+
+static void motor_dyn_finish_cal_flow(const char *toast_text)
+{
+    s_runtime.cal_flow = (uint8_t)MOTOR_DYN_CAL_FLOW_NONE;
+    s_runtime.cal_request_sent = 0u;
+    s_runtime.cal_flow_start_ms = 0u;
+    s_runtime.cal_popup_last_show_ms = 0u;
+    s_runtime.cal_expected_zero_capture_ms = 0u;
+    s_runtime.cal_expected_gyro_cal_ms = 0u;
+
+    Motor_State_HidePopup();
+    if (toast_text != 0)
+    {
+        Motor_State_ShowToast(toast_text, 1400u);
+    }
+}
+
+static void motor_dyn_show_cal_popup(uint32_t now_ms,
+                                     const char *title,
+                                     const char *line1,
+                                     const char *line2)
+{
+    if ((s_runtime.cal_popup_last_show_ms == 0u) ||
+        ((uint32_t)(now_ms - s_runtime.cal_popup_last_show_ms) >= MOTOR_DYN_CAL_POPUP_REFRESH_MS))
+    {
+        Motor_State_ShowPopup(title, line1, line2, MOTOR_DYN_CAL_POPUP_HOLD_MS);
+        s_runtime.cal_popup_last_show_ms = now_ms;
+    }
+}
+
+static void motor_dyn_run_calibration_supervisor(uint32_t now_ms,
+                                                 const app_bike_state_t *bike)
+{
+    char line2[32];
+
+    if (bike == 0)
+    {
+        return;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /*  manual request 감지                                                     */
+    /*                                                                        */
+    /*  zero capture 는 public counter가 있으므로 이를 edge-trigger로 사용한다. */
+    /*  gyro cal 은 active rising edge를 수동 시작 신호로 본다.                */
+    /*                                                                        */
+    /*  주의                                                                   */
+    /*  - boot flow가 자기 자신이 발행한 request 때문에 manual flow로          */
+    /*    오인되지 않도록, 현재 flow가 NONE 일 때만 새 manual flow를 연다.     */
+    /* ---------------------------------------------------------------------- */
+    if (bike->zero_request_count != s_runtime.last_zero_request_count)
+    {
+        s_runtime.last_zero_request_count = bike->zero_request_count;
+
+        if ((motor_dyn_cal_flow_t)s_runtime.cal_flow == MOTOR_DYN_CAL_FLOW_NONE)
+        {
+            motor_dyn_start_cal_flow(MOTOR_DYN_CAL_FLOW_MANUAL_ZERO, now_ms, bike);
+        }
+    }
+
+    if ((bike->gyro_bias_cal_active != false) && (s_runtime.last_gyro_bias_cal_active == 0u))
+    {
+        if ((motor_dyn_cal_flow_t)s_runtime.cal_flow == MOTOR_DYN_CAL_FLOW_NONE)
+        {
+            motor_dyn_start_cal_flow(MOTOR_DYN_CAL_FLOW_MANUAL_GYRO, now_ms, bike);
+        }
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /*  boot-time / zero-invalid supervisor                                    */
+    /*                                                                        */
+    /*  정책                                                                   */
+    /*  1) gyro bias 가 한 번도 유효하지 않으면 그것을 먼저 잡는다.             */
+    /*  2) gyro bias 가 준비되면 zero capture 를 수행한다.                     */
+    /*  3) zero_valid 전에는 BIKE_DYNAMICS publish가 화면/기록을 잠그므로,      */
+    /*     사용자는 반드시 popup을 보고 캘리 동작을 이해하게 된다.             */
+    /* ---------------------------------------------------------------------- */
+    if ((motor_dyn_cal_flow_t)s_runtime.cal_flow == MOTOR_DYN_CAL_FLOW_NONE)
+    {
+        if (bike->gyro_bias_valid == false)
+        {
+            motor_dyn_start_cal_flow(MOTOR_DYN_CAL_FLOW_BOOT_GYRO, now_ms, bike);
+        }
+        else if (bike->zero_valid == false)
+        {
+            motor_dyn_start_cal_flow(MOTOR_DYN_CAL_FLOW_BOOT_ZERO, now_ms, bike);
+        }
+    }
+
+    switch ((motor_dyn_cal_flow_t)s_runtime.cal_flow)
+    {
+    case MOTOR_DYN_CAL_FLOW_BOOT_GYRO:
+        if ((bike->gyro_bias_valid == false) &&
+            (bike->gyro_bias_cal_active == false) &&
+            (s_runtime.cal_request_sent == 0u))
+        {
+            Motor_Dynamics_RequestGyroBiasCalibration();
+            s_runtime.cal_request_sent = 1u;
+            s_runtime.cal_expected_gyro_cal_ms = bike->last_gyro_bias_cal_ms;
+        }
+
+        if ((bike->gyro_bias_valid != false) && (bike->gyro_bias_cal_active == false))
+        {
+            motor_dyn_start_cal_flow(MOTOR_DYN_CAL_FLOW_BOOT_ZERO, now_ms, bike);
+            break;
+        }
+
+        if ((s_runtime.cal_request_sent != 0u) &&
+            (bike->gyro_bias_cal_active == false) &&
+            (bike->last_gyro_bias_cal_ms != s_runtime.cal_expected_gyro_cal_ms) &&
+            (bike->gyro_bias_valid == false))
+        {
+            /* ------------------------------------------------------------------ */
+            /*  이전 시도가 timeout/실패로 종료되었으므로 다시 request를 열어 둔다. */
+            /*  popup은 계속 유지해서 사용자가 "아직 자세를 잡아야 한다" 를         */
+            /*  즉시 이해할 수 있게 한다.                                         */
+            /* ------------------------------------------------------------------ */
+            s_runtime.cal_request_sent = 0u;
+            s_runtime.cal_expected_gyro_cal_ms = bike->last_gyro_bias_cal_ms;
+        }
+
+        if (bike->gyro_bias_cal_active != false)
+        {
+            (void)snprintf(line2,
+                           sizeof(line2),
+                           "GYRO %u%%",
+                           (unsigned)(bike->gyro_bias_cal_progress_permille / 10u));
+        }
+        else
+        {
+            (void)snprintf(line2, sizeof(line2), "DO NOT TOUCH DEVICE");
+        }
+
+        motor_dyn_show_cal_popup(now_ms,
+                                 "CALIB REQUIRED!",
+                                 "KEEP BIKE STILL",
+                                 line2);
+        break;
+
+    case MOTOR_DYN_CAL_FLOW_BOOT_ZERO:
+        if ((bike->zero_valid == false) && (s_runtime.cal_request_sent == 0u))
+        {
+            Motor_Dynamics_RequestZeroCapture();
+            s_runtime.cal_request_sent = 1u;
+            s_runtime.cal_expected_zero_capture_ms = bike->last_zero_capture_ms;
+        }
+
+        if ((bike->zero_valid != false) ||
+            (bike->last_zero_capture_ms != s_runtime.cal_expected_zero_capture_ms))
+        {
+            motor_dyn_finish_cal_flow("CAL OK");
+            break;
+        }
+
+        motor_dyn_show_cal_popup(now_ms,
+                                 "CALIB REQUIRED!",
+                                 (bike->imu_valid != false) ? "LEVEL BIKE FOR ZERO" : "WAITING FOR IMU",
+                                 (bike->imu_valid != false) ? "HOLD STILL 1.5s" : "CHECK IMU DATA");
+        break;
+
+    case MOTOR_DYN_CAL_FLOW_MANUAL_GYRO:
+        if ((bike->gyro_bias_valid != false) &&
+            (bike->gyro_bias_cal_active == false) &&
+            (bike->last_gyro_bias_cal_ms != 0u))
+        {
+            motor_dyn_finish_cal_flow("GYRO CAL OK");
+            break;
+        }
+
+        if ((bike->gyro_bias_cal_active == false) &&
+            (bike->last_gyro_bias_cal_ms != s_runtime.cal_expected_gyro_cal_ms) &&
+            (bike->gyro_bias_valid == false))
+        {
+            motor_dyn_finish_cal_flow("GYRO CAL FAIL");
+            break;
+        }
+
+        if (bike->gyro_bias_cal_active != false)
+        {
+            (void)snprintf(line2,
+                           sizeof(line2),
+                           "GYRO %u%%",
+                           (unsigned)(bike->gyro_bias_cal_progress_permille / 10u));
+        }
+        else
+        {
+            (void)snprintf(line2, sizeof(line2), "HOLD STILL");
+        }
+
+        motor_dyn_show_cal_popup(now_ms,
+                                 "GYRO CAL",
+                                 "KEEP BIKE STILL",
+                                 line2);
+        break;
+
+    case MOTOR_DYN_CAL_FLOW_MANUAL_ZERO:
+        if (bike->last_zero_capture_ms != s_runtime.cal_expected_zero_capture_ms)
+        {
+            motor_dyn_finish_cal_flow("ZERO OK");
+            break;
+        }
+
+        /* ------------------------------------------------------------------ */
+        /*  manual zero 는 low-level에서 timeout 없이 pending 될 수 있다.       */
+        /*  따라서 popup을 무한정 붙잡아 두지 않고, 일정 시간이 지나면          */
+        /*  "요청은 남겨 두되 UI popup만 정리" 하는 쪽으로 UX를 완화한다.      */
+        /*  이후 사용자가 실제로 level/stable 상태를 만들면 zero capture는      */
+        /*  여전히 low-level state machine 안에서 정상적으로 완료될 수 있다.    */
+        /* ------------------------------------------------------------------ */
+        if ((uint32_t)(now_ms - s_runtime.cal_flow_start_ms) >= MOTOR_DYN_MANUAL_ZERO_POPUP_MAX_MS)
+        {
+            motor_dyn_finish_cal_flow("ZERO PENDING");
+            break;
+        }
+
+        motor_dyn_show_cal_popup(now_ms,
+                                 "ZERO CAPTURE",
+                                 (bike->imu_valid != false) ? "LEVEL BIKE / HOLD" : "WAITING FOR IMU",
+                                 (bike->imu_valid != false) ? "WAIT FOR STABLE HOLD" : "CHECK IMU DATA");
+        break;
+
+    case MOTOR_DYN_CAL_FLOW_NONE:
+    default:
+        break;
+    }
+
+    s_runtime.last_gyro_bias_cal_active = (bike->gyro_bias_cal_active != false) ? 1u : 0u;
+    s_runtime.last_gyro_bias_cal_ms = bike->last_gyro_bias_cal_ms;
+}
+
 void Motor_Dynamics_Init(void)
 {
     memset(&s_runtime, 0, sizeof(s_runtime));
@@ -190,18 +487,41 @@ void Motor_Dynamics_Task(uint32_t now_ms)
     motor_dyn_copy_shared_truth(dyn, bike);
 
     /* ---------------------------------------------------------------------- */
-    /*  실제 zero capture 완료 시점에만 session peak 를 초기화한다.            */
+    /*  calibration popup / boot supervisor                                    */
+    /*                                                                        */
+    /*  Dynamics adapter가 low-level snapshot을 가장 먼저 보는 상위 경로이므로, */
+    /*  calibration UX를 여기서 관리하면 화면 종류와 무관하게 동일하게 동작한다.*/
+    /* ---------------------------------------------------------------------- */
+    motor_dyn_run_calibration_supervisor(now_ms, bike);
+
+    /* ---------------------------------------------------------------------- */
+    /*  zero_valid가 내려간 순간 history를 즉시 비운다.                        */
+    /*                                                                        */
+    /*  이유                                                                   */
+    /*  - hard rezero 직후 이전 주행의 bank/G trace가 화면에 남아 있으면        */
+    /*    사용자는 "현재 값이 아직 살아 있다" 고 오해하기 쉽다.               */
+    /*  - 따라서 zero 기준이 무효화되면 history는 즉시 빈 상태로 되돌린다.      */
+    /* ---------------------------------------------------------------------- */
+    if ((dyn->zero_valid == false) && (s_runtime.last_zero_valid != 0u))
+    {
+        motor_dyn_reset_history(dyn);
+    }
+    s_runtime.last_zero_valid = (dyn->zero_valid != false) ? 1u : 0u;
+
+    /* ---------------------------------------------------------------------- */
+    /*  실제 zero capture 완료 시점에만 session peak / history 를 초기화한다.  */
     /*                                                                        */
     /*  중요한 이유                                                            */
     /*  - 버튼 요청 시점이 아니라, low-level zero state machine이               */
     /*    "안정 조건 만족 후 실제 capture를 끝낸 시점"을 기준으로             */
-    /*    peak reset이 일어나야 의미가 맞다.                                  */
+    /*    reset이 일어나야 의미가 맞다.                                        */
     /* ---------------------------------------------------------------------- */
     if ((bike->last_zero_capture_ms != 0u) &&
         (bike->last_zero_capture_ms != s_runtime.last_zero_capture_ms))
     {
         s_runtime.last_zero_capture_ms = bike->last_zero_capture_ms;
         Motor_Dynamics_ResetSessionPeaks();
+        motor_dyn_reset_history(dyn);
     }
 
     /* ---------------------------------------------------------------------- */
@@ -228,23 +548,25 @@ void Motor_Dynamics_Task(uint32_t now_ms)
         s_runtime.last_shared_update_ms = sample_stamp_ms;
     }
 
-    /* ---------------------------------------------------------------------- */
-    /*  history는 display layer의 일부이므로 zero_valid 전에도 살아 있어야 한다.*/
-    /*                                                                        */
-    /*  즉, 사용자는 부팅 직후에도 lean / G 변화가 화면에서 보인다.            */
-    /*  다만 peak 는 확정 zero 기준이 서기 전까지 절대 누적하지 않는다.         */
-    /* ---------------------------------------------------------------------- */
     if (dyn->imu_valid == false)
     {
         return;
     }
 
-    motor_dyn_update_history(dyn, state->nav.altitude_cm);
-
+    /* ---------------------------------------------------------------------- */
+    /*  pre-zero display/history 오염 차단                                     */
+    /*                                                                        */
+    /*  이전 버전은 provisional lean/G를 history에 적재해서 부팅 직후 garbage  */
+    /*  값이 graph / corner trace에 남을 수 있었다.                            */
+    /*  현재는 low-level publish 자체가 zero 전 출력을 0으로 잠그고,           */
+    /*  high-level history 역시 zero_valid 이후부터만 열어                       */
+    /*  UI/기록 경로가 모두 같은 계약을 따르도록 맞춘다.                       */
+    /* ---------------------------------------------------------------------- */
     if (dyn->zero_valid == false)
     {
         return;
     }
 
+    motor_dyn_update_history(dyn, state->nav.altitude_cm);
     motor_dyn_update_peaks_from_estimator(dyn);
 }

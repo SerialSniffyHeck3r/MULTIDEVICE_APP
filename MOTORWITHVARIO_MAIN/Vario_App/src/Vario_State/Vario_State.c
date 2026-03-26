@@ -112,10 +112,103 @@
 #define VARIO_STATE_EARTH_METERS_PER_DEG_LON 111319.5f
 #endif
 
+#ifndef VARIO_STATE_TRAINER_SPEED_STEP_KMH
+#define VARIO_STATE_TRAINER_SPEED_STEP_KMH 5.0f
+#endif
+
+#ifndef VARIO_STATE_TRAINER_HEADING_STEP_DEG
+#define VARIO_STATE_TRAINER_HEADING_STEP_DEG 15.0f
+#endif
+
+#ifndef VARIO_STATE_TRAINER_MIN_SPEED_KMH
+#define VARIO_STATE_TRAINER_MIN_SPEED_KMH 25.0f
+#endif
+
+#ifndef VARIO_STATE_TRAINER_MAX_SPEED_KMH
+#define VARIO_STATE_TRAINER_MAX_SPEED_KMH 140.0f
+#endif
+
+#ifndef VARIO_STATE_TRAINER_DEFAULT_LAT_E7
+#define VARIO_STATE_TRAINER_DEFAULT_LAT_E7 373566000
+#endif
+
+#ifndef VARIO_STATE_TRAINER_DEFAULT_LON_E7
+#define VARIO_STATE_TRAINER_DEFAULT_LON_E7 1269784000
+#endif
+
+#ifndef VARIO_STATE_TRAINER_TRUE_WIND_FROM_DEG
+#define VARIO_STATE_TRAINER_TRUE_WIND_FROM_DEG 240.0f
+#endif
+
+#ifndef VARIO_STATE_TRAINER_TRUE_WIND_SPEED_KMH
+#define VARIO_STATE_TRAINER_TRUE_WIND_SPEED_KMH 18.0f
+#endif
+
 static float vario_state_distance_between_ll_deg_e7(int32_t lat1_e7,
                                                     int32_t lon1_e7,
                                                     int32_t lat2_e7,
                                                     int32_t lon2_e7);
+static float vario_state_wrap_360(float deg);
+static float vario_state_deg_to_rad(float deg);
+static float vario_state_rad_to_deg(float rad);
+
+/* -------------------------------------------------------------------------- */
+/*  TRAINER synthetic scenario tables                                          */
+/*                                                                            */
+/*  실제 센서값을 직접 건드리는 대신, Vario_State 내부에 별도 scenario table 을  */
+/*  두고 그 결과를 runtime snapshot staging 구조체에 덮어쓴다.                */
+/*                                                                            */
+/*  버튼 F1/F2/F5/F6은 아래 table의 입력축(speed / heading)만 조작한다.        */
+/*  QNH는 기존 canonical setting 경로를 그대로 사용하고, trainer는 그 값을      */
+/*  읽어 synthetic baro altitude를 다시 계산한다.                             */
+/* -------------------------------------------------------------------------- */
+typedef struct
+{
+    uint16_t speed_kmh_x10;
+    int16_t  vario_bias_cms;
+} vario_trainer_speed_row_t;
+
+typedef struct
+{
+    bool     initialized;
+    uint32_t last_update_ms;
+    uint32_t start_ms;
+    float    pressure_altitude_m;
+    float    airspeed_kmh;
+    float    heading_deg;
+    float    vario_mps;
+    int32_t  lat_e7;
+    int32_t  lon_e7;
+} vario_trainer_state_t;
+
+static const int16_t s_vario_trainer_heading_lift_cms[12] = {
+    -150, -90, -30, 20, 150, 260, 190, 90, -10, -90, -170, -110
+};
+
+static const vario_trainer_speed_row_t s_vario_trainer_speed_rows[] = {
+    { 350u,  55 },
+    { 450u,  30 },
+    { 550u,  12 },
+    { 650u,   0 },
+    { 750u, -10 },
+    { 850u, -25 },
+    { 950u, -45 },
+    { 1050u, -70 }
+};
+
+static int32_t vario_state_trainer_pressure_from_altitude_hpa_x100(float altitude_m,
+                                                                    int32_t qnh_hpa_x100);
+static float   vario_state_trainer_altitude_from_pressure_m(int32_t pressure_hpa_x100,
+                                                            int32_t qnh_hpa_x100);
+static void    vario_state_trainer_fill_linear_units(app_altitude_linear_units_t *dst,
+                                                     int32_t altitude_cm);
+static void    vario_state_trainer_fill_vspeed_units(app_altitude_vspeed_units_t *dst,
+                                                     int32_t vario_cms);
+static void    vario_state_trainer_init(uint32_t now_ms);
+static void    vario_state_trainer_handle_toggle(bool enabled, uint32_t now_ms);
+static float   vario_state_trainer_compute_vario_mps(uint32_t now_ms);
+static void    vario_state_trainer_step(uint32_t now_ms);
+static void    vario_state_trainer_apply_snapshots(uint32_t now_ms);
 
 static struct
 {
@@ -172,6 +265,12 @@ static struct
     int32_t landing_anchor_lat_e7;
     int32_t landing_anchor_lon_e7;
     float   landing_anchor_altitude_m;
+
+    /* ---------------------------------------------------------------------- */
+    /*  TRAINER mode private state                                             */
+    /* ---------------------------------------------------------------------- */
+    bool                   trainer_mode_latched;
+    vario_trainer_state_t  trainer;
 } s_vario_state;
 
 static float vario_state_absf(float value)
@@ -219,6 +318,348 @@ static float vario_state_lpf_alpha(float dt_s, float tau_s)
     return dt_s / (tau_s + dt_s);
 }
 
+static int32_t vario_state_trainer_pressure_from_altitude_hpa_x100(float altitude_m,
+                                                                    int32_t qnh_hpa_x100)
+{
+    float qnh_hpa;
+    float ratio;
+    float pressure_hpa;
+
+    qnh_hpa = ((float)qnh_hpa_x100) * 0.01f;
+    if (qnh_hpa < 800.0f)
+    {
+        qnh_hpa = 1013.25f;
+    }
+
+    ratio = 1.0f - (altitude_m / VARIO_STATE_PRESSURE_TO_ALT_FACTOR_M);
+    if (ratio < 0.05f)
+    {
+        ratio = 0.05f;
+    }
+
+    pressure_hpa = qnh_hpa * powf(ratio, 1.0f / VARIO_STATE_PRESSURE_TO_ALT_EXPONENT);
+    if (pressure_hpa < 100.0f)
+    {
+        pressure_hpa = 100.0f;
+    }
+
+    return (int32_t)lroundf(pressure_hpa * 100.0f);
+}
+
+static float vario_state_trainer_altitude_from_pressure_m(int32_t pressure_hpa_x100,
+                                                          int32_t qnh_hpa_x100)
+{
+    float pressure_hpa;
+    float qnh_hpa;
+    float ratio;
+
+    pressure_hpa = ((float)pressure_hpa_x100) * 0.01f;
+    qnh_hpa = ((float)qnh_hpa_x100) * 0.01f;
+
+    if (pressure_hpa <= 0.0f)
+    {
+        pressure_hpa = 1013.25f;
+    }
+    if (qnh_hpa < 800.0f)
+    {
+        qnh_hpa = 1013.25f;
+    }
+
+    ratio = pressure_hpa / qnh_hpa;
+    if (ratio < 0.05f)
+    {
+        ratio = 0.05f;
+    }
+    if (ratio > 1.50f)
+    {
+        ratio = 1.50f;
+    }
+
+    return VARIO_STATE_PRESSURE_TO_ALT_FACTOR_M *
+           (1.0f - powf(ratio, VARIO_STATE_PRESSURE_TO_ALT_EXPONENT));
+}
+
+static void vario_state_trainer_fill_linear_units(app_altitude_linear_units_t *dst,
+                                                  int32_t altitude_cm)
+{
+    float altitude_m;
+    float altitude_ft;
+
+    if (dst == NULL)
+    {
+        return;
+    }
+
+    altitude_m = ((float)altitude_cm) * 0.01f;
+    altitude_ft = altitude_m * 3.2808399f;
+    dst->meters_rounded = (int32_t)lroundf(altitude_m);
+    dst->feet_rounded = (int32_t)lroundf(altitude_ft);
+}
+
+static void vario_state_trainer_fill_vspeed_units(app_altitude_vspeed_units_t *dst,
+                                                  int32_t vario_cms)
+{
+    float vario_mps;
+
+    if (dst == NULL)
+    {
+        return;
+    }
+
+    vario_mps = ((float)vario_cms) * 0.01f;
+    dst->mps_x10_rounded = (int32_t)lroundf(vario_mps * 10.0f);
+    dst->fpm_rounded = (int32_t)lroundf(vario_mps * 196.8504f);
+}
+
+static void vario_state_trainer_init(uint32_t now_ms)
+{
+    memset(&s_vario_state.trainer, 0, sizeof(s_vario_state.trainer));
+    s_vario_state.trainer.initialized = true;
+    s_vario_state.trainer.last_update_ms = now_ms;
+    s_vario_state.trainer.start_ms = now_ms;
+    s_vario_state.trainer.pressure_altitude_m = 420.0f;
+    s_vario_state.trainer.airspeed_kmh = 72.0f;
+    s_vario_state.trainer.heading_deg = 35.0f;
+    s_vario_state.trainer.vario_mps = 0.0f;
+    s_vario_state.trainer.lat_e7 = VARIO_STATE_TRAINER_DEFAULT_LAT_E7;
+    s_vario_state.trainer.lon_e7 = VARIO_STATE_TRAINER_DEFAULT_LON_E7;
+}
+
+static void vario_state_trainer_handle_toggle(bool enabled, uint32_t now_ms)
+{
+    if (enabled == s_vario_state.trainer_mode_latched)
+    {
+        return;
+    }
+
+    s_vario_state.trainer_mode_latched = enabled;
+    s_vario_state.altitude_source_tracking_valid = false;
+    s_vario_state.runtime.heading_valid = false;
+    s_vario_state.runtime.last_gps_host_time_ms = 0u;
+    s_vario_state.last_fast_present_ms = 0u;
+    s_vario_state.last_slow_present_ms = 0u;
+
+    if (enabled != false)
+    {
+        vario_state_trainer_init(now_ms);
+    }
+    else
+    {
+        memset(&s_vario_state.trainer, 0, sizeof(s_vario_state.trainer));
+    }
+
+    Vario_State_ResetFlightMetrics();
+}
+
+static float vario_state_trainer_compute_vario_mps(uint32_t now_ms)
+{
+    uint8_t speed_idx;
+    uint8_t heading_idx;
+    float   speed_kmh;
+    float   base_vario_mps;
+    float   wave_fast;
+    float   wave_slow;
+    float   elapsed_s;
+
+    speed_kmh = s_vario_state.trainer.airspeed_kmh;
+    speed_idx = 0u;
+    for (uint8_t i = 0u; i < (uint8_t)(sizeof(s_vario_trainer_speed_rows) / sizeof(s_vario_trainer_speed_rows[0])); ++i)
+    {
+        speed_idx = i;
+        if ((speed_kmh * 10.0f) < (float)s_vario_trainer_speed_rows[i].speed_kmh_x10)
+        {
+            break;
+        }
+    }
+
+    heading_idx = (uint8_t)(((int32_t)lroundf(vario_state_wrap_360(s_vario_state.trainer.heading_deg) / 30.0f)) % 12);
+    base_vario_mps = ((float)s_vario_trainer_heading_lift_cms[heading_idx]) * 0.01f;
+    base_vario_mps += ((float)s_vario_trainer_speed_rows[speed_idx].vario_bias_cms) * 0.01f;
+
+    elapsed_s = ((float)(now_ms - s_vario_state.trainer.start_ms)) * 0.001f;
+    wave_fast = 0.18f * sinf((elapsed_s * 1.7f) + (vario_state_wrap_360(s_vario_state.trainer.heading_deg) * 0.05f));
+    wave_slow = 0.10f * sinf(elapsed_s * 0.37f);
+
+    return vario_state_clampf(base_vario_mps + wave_fast + wave_slow, -4.5f, 4.5f);
+}
+
+static void vario_state_trainer_step(uint32_t now_ms)
+{
+    const vario_settings_t *settings;
+    uint32_t                last_ms;
+    float                   dt_s;
+    float                   airspeed_mps;
+    float                   air_n_mps;
+    float                   air_e_mps;
+    float                   wind_to_deg;
+    float                   wind_rad;
+    float                   wind_n_mps;
+    float                   wind_e_mps;
+    float                   ground_n_mps;
+    float                   ground_e_mps;
+    float                   ground_speed_kmh;
+    float                   heading_rad;
+    float                   lat_deg;
+    float                   cos_lat;
+    int32_t                 pressure_hpa_x100;
+    int32_t                 qnh_hpa_x100;
+    int32_t                 alt_std_cm;
+    int32_t                 alt_qnh_cm;
+    int32_t                 alt_gps_cm;
+    int32_t                 alt_display_cm;
+    int32_t                 vario_cms;
+
+    if (s_vario_state.trainer.initialized == false)
+    {
+        vario_state_trainer_init(now_ms);
+    }
+
+    settings = Vario_Settings_Get();
+    last_ms = s_vario_state.trainer.last_update_ms;
+    if (last_ms == 0u)
+    {
+        last_ms = now_ms;
+    }
+
+    dt_s = ((float)(now_ms - last_ms)) * 0.001f;
+    dt_s = vario_state_clampf(dt_s, VARIO_STATE_MIN_DT_S, VARIO_STATE_MAX_DT_S);
+
+    s_vario_state.trainer.vario_mps = vario_state_trainer_compute_vario_mps(now_ms);
+    s_vario_state.trainer.pressure_altitude_m += (s_vario_state.trainer.vario_mps * dt_s);
+    s_vario_state.trainer.pressure_altitude_m = vario_state_clampf(s_vario_state.trainer.pressure_altitude_m, -100.0f, 4500.0f);
+
+    airspeed_mps = s_vario_state.trainer.airspeed_kmh / 3.6f;
+    heading_rad = vario_state_deg_to_rad(s_vario_state.trainer.heading_deg);
+    air_n_mps = cosf(heading_rad) * airspeed_mps;
+    air_e_mps = sinf(heading_rad) * airspeed_mps;
+
+    wind_to_deg = vario_state_wrap_360(VARIO_STATE_TRAINER_TRUE_WIND_FROM_DEG + 180.0f);
+    wind_rad = vario_state_deg_to_rad(wind_to_deg);
+    wind_n_mps = cosf(wind_rad) * (VARIO_STATE_TRAINER_TRUE_WIND_SPEED_KMH / 3.6f);
+    wind_e_mps = sinf(wind_rad) * (VARIO_STATE_TRAINER_TRUE_WIND_SPEED_KMH / 3.6f);
+
+    ground_n_mps = air_n_mps + wind_n_mps;
+    ground_e_mps = air_e_mps + wind_e_mps;
+    ground_speed_kmh = sqrtf((ground_n_mps * ground_n_mps) + (ground_e_mps * ground_e_mps)) * 3.6f;
+
+    lat_deg = ((float)s_vario_state.trainer.lat_e7) * 1.0e-7f;
+    cos_lat = cosf(vario_state_deg_to_rad(lat_deg));
+    if (vario_state_absf(cos_lat) < 0.1f)
+    {
+        cos_lat = (cos_lat < 0.0f) ? -0.1f : 0.1f;
+    }
+
+    lat_deg += (ground_n_mps * dt_s) / VARIO_STATE_EARTH_METERS_PER_DEG_LAT;
+    s_vario_state.trainer.lat_e7 = (int32_t)lroundf(lat_deg * 1.0e7f);
+    s_vario_state.trainer.lon_e7 += (int32_t)lroundf(((ground_e_mps * dt_s) /
+                                                      (VARIO_STATE_EARTH_METERS_PER_DEG_LON * cos_lat)) * 1.0e7f);
+
+    qnh_hpa_x100 = Vario_Settings_GetManualQnhHpaX100();
+    pressure_hpa_x100 = vario_state_trainer_pressure_from_altitude_hpa_x100(s_vario_state.trainer.pressure_altitude_m,
+                                                                             101325);
+    alt_std_cm = (int32_t)lroundf(vario_state_trainer_altitude_from_pressure_m(pressure_hpa_x100, 101325) * 100.0f);
+    alt_qnh_cm = (int32_t)lroundf(vario_state_trainer_altitude_from_pressure_m(pressure_hpa_x100, qnh_hpa_x100) * 100.0f);
+    alt_gps_cm = (int32_t)lroundf(s_vario_state.trainer.pressure_altitude_m * 100.0f);
+    alt_display_cm = alt_gps_cm;
+    vario_cms = (int32_t)lroundf(s_vario_state.trainer.vario_mps * 100.0f);
+
+    memset(&s_vario_state.runtime.altitude, 0, sizeof(s_vario_state.runtime.altitude));
+    memset(&s_vario_state.runtime.gps, 0, sizeof(s_vario_state.runtime.gps));
+    memset(&s_vario_state.runtime.bike, 0, sizeof(s_vario_state.runtime.bike));
+
+    s_vario_state.runtime.altitude.initialized = true;
+    s_vario_state.runtime.altitude.baro_valid = true;
+    s_vario_state.runtime.altitude.gps_valid = true;
+    s_vario_state.runtime.altitude.imu_vector_valid = true;
+    s_vario_state.runtime.altitude.last_update_ms = now_ms;
+    s_vario_state.runtime.altitude.last_baro_update_ms = now_ms;
+    s_vario_state.runtime.altitude.last_gps_update_ms = now_ms;
+    s_vario_state.runtime.altitude.pressure_raw_hpa_x100 = pressure_hpa_x100;
+    s_vario_state.runtime.altitude.pressure_prefilt_hpa_x100 = pressure_hpa_x100;
+    s_vario_state.runtime.altitude.pressure_filt_hpa_x100 = pressure_hpa_x100;
+    s_vario_state.runtime.altitude.pressure_residual_hpa_x100 = 0;
+    s_vario_state.runtime.altitude.qnh_manual_hpa_x100 = qnh_hpa_x100;
+    s_vario_state.runtime.altitude.qnh_equiv_gps_hpa_x100 = 101325;
+    s_vario_state.runtime.altitude.alt_pressure_std_cm = alt_std_cm;
+    s_vario_state.runtime.altitude.alt_qnh_manual_cm = alt_qnh_cm;
+    s_vario_state.runtime.altitude.alt_gps_hmsl_cm = alt_gps_cm;
+    s_vario_state.runtime.altitude.alt_fused_noimu_cm = alt_display_cm;
+    s_vario_state.runtime.altitude.alt_fused_imu_cm = alt_display_cm;
+    s_vario_state.runtime.altitude.alt_display_cm = alt_display_cm;
+    s_vario_state.runtime.altitude.vario_fast_noimu_cms = vario_cms;
+    s_vario_state.runtime.altitude.vario_slow_noimu_cms = vario_cms;
+    s_vario_state.runtime.altitude.vario_fast_imu_cms = vario_cms;
+    s_vario_state.runtime.altitude.vario_slow_imu_cms = vario_cms;
+    s_vario_state.runtime.altitude.baro_vario_raw_cms = vario_cms;
+    s_vario_state.runtime.altitude.baro_vario_filt_cms = vario_cms;
+
+    vario_state_trainer_fill_linear_units(&s_vario_state.runtime.altitude.units.alt_pressure_std, alt_std_cm);
+    vario_state_trainer_fill_linear_units(&s_vario_state.runtime.altitude.units.alt_qnh_manual, alt_qnh_cm);
+    vario_state_trainer_fill_linear_units(&s_vario_state.runtime.altitude.units.alt_gps_hmsl, alt_gps_cm);
+    vario_state_trainer_fill_linear_units(&s_vario_state.runtime.altitude.units.alt_fused_noimu, alt_display_cm);
+    vario_state_trainer_fill_linear_units(&s_vario_state.runtime.altitude.units.alt_fused_imu, alt_display_cm);
+    vario_state_trainer_fill_linear_units(&s_vario_state.runtime.altitude.units.alt_display, alt_display_cm);
+    vario_state_trainer_fill_linear_units(&s_vario_state.runtime.altitude.units.alt_rel_home_noimu, 0);
+    vario_state_trainer_fill_linear_units(&s_vario_state.runtime.altitude.units.alt_rel_home_imu, 0);
+    vario_state_trainer_fill_linear_units(&s_vario_state.runtime.altitude.units.home_alt_noimu, alt_display_cm);
+    vario_state_trainer_fill_linear_units(&s_vario_state.runtime.altitude.units.home_alt_imu, alt_display_cm);
+    vario_state_trainer_fill_linear_units(&s_vario_state.runtime.altitude.units.baro_bias_noimu, 0);
+    vario_state_trainer_fill_linear_units(&s_vario_state.runtime.altitude.units.baro_bias_imu, 0);
+    s_vario_state.runtime.altitude.units.pressure_raw.hpa_x100 = pressure_hpa_x100;
+    s_vario_state.runtime.altitude.units.pressure_filt.hpa_x100 = pressure_hpa_x100;
+    s_vario_state.runtime.altitude.units.pressure_prefilt.hpa_x100 = pressure_hpa_x100;
+    s_vario_state.runtime.altitude.units.pressure_residual.hpa_x100 = 0;
+    s_vario_state.runtime.altitude.units.qnh_manual.hpa_x100 = qnh_hpa_x100;
+    s_vario_state.runtime.altitude.units.qnh_equiv_gps.hpa_x100 = 101325;
+    s_vario_state.runtime.altitude.units.pressure_raw.inhg_x1000 = (int32_t)lroundf((((float)pressure_hpa_x100) * 0.01f) * 29.529983f);
+    s_vario_state.runtime.altitude.units.pressure_filt.inhg_x1000 = s_vario_state.runtime.altitude.units.pressure_raw.inhg_x1000;
+    s_vario_state.runtime.altitude.units.pressure_prefilt.inhg_x1000 = s_vario_state.runtime.altitude.units.pressure_raw.inhg_x1000;
+    s_vario_state.runtime.altitude.units.qnh_manual.inhg_x1000 = (int32_t)lroundf((((float)qnh_hpa_x100) * 0.01f) * 29.529983f);
+    s_vario_state.runtime.altitude.units.qnh_equiv_gps.inhg_x1000 = (int32_t)lroundf(1013.25f * 29.529983f);
+    vario_state_trainer_fill_vspeed_units(&s_vario_state.runtime.altitude.units.debug_audio_vario, vario_cms);
+    vario_state_trainer_fill_vspeed_units(&s_vario_state.runtime.altitude.units.vario_fast_noimu, vario_cms);
+    vario_state_trainer_fill_vspeed_units(&s_vario_state.runtime.altitude.units.vario_slow_noimu, vario_cms);
+    vario_state_trainer_fill_vspeed_units(&s_vario_state.runtime.altitude.units.vario_fast_imu, vario_cms);
+    vario_state_trainer_fill_vspeed_units(&s_vario_state.runtime.altitude.units.vario_slow_imu, vario_cms);
+    vario_state_trainer_fill_vspeed_units(&s_vario_state.runtime.altitude.units.baro_vario_raw, vario_cms);
+    vario_state_trainer_fill_vspeed_units(&s_vario_state.runtime.altitude.units.baro_vario_filt, vario_cms);
+
+    s_vario_state.runtime.gps.fix.valid = true;
+    s_vario_state.runtime.gps.fix.fixOk = true;
+    s_vario_state.runtime.gps.fix.fixType = 3u;
+    s_vario_state.runtime.gps.fix.head_veh_valid = 1u;
+    s_vario_state.runtime.gps.fix.lat = s_vario_state.trainer.lat_e7;
+    s_vario_state.runtime.gps.fix.lon = s_vario_state.trainer.lon_e7;
+    s_vario_state.runtime.gps.fix.hMSL = alt_gps_cm * 10;
+    s_vario_state.runtime.gps.fix.height = alt_gps_cm * 10;
+    s_vario_state.runtime.gps.fix.velN = (int32_t)lroundf(ground_n_mps * 1000.0f);
+    s_vario_state.runtime.gps.fix.velE = (int32_t)lroundf(ground_e_mps * 1000.0f);
+    s_vario_state.runtime.gps.fix.velD = (int32_t)lroundf((-s_vario_state.trainer.vario_mps) * 1000.0f);
+    s_vario_state.runtime.gps.fix.gSpeed = (int32_t)lroundf(ground_speed_kmh / 3.6f * 1000.0f);
+    s_vario_state.runtime.gps.fix.headMot = (int32_t)lroundf(vario_state_wrap_360(vario_state_rad_to_deg(atan2f(ground_e_mps, ground_n_mps))) * 100000.0f);
+    s_vario_state.runtime.gps.fix.headVeh = s_vario_state.runtime.gps.fix.headMot;
+    s_vario_state.runtime.gps.fix.hAcc = 2500u;
+    s_vario_state.runtime.gps.fix.vAcc = 3000u;
+    s_vario_state.runtime.gps.fix.sAcc = 700u;
+    s_vario_state.runtime.gps.fix.headAcc = 30000u;
+    s_vario_state.runtime.gps.fix.pDOP = 120u;
+    s_vario_state.runtime.gps.fix.numSV_nav_pvt = 14u;
+    s_vario_state.runtime.gps.fix.numSV_used = 14u;
+    s_vario_state.runtime.gps.fix.last_update_ms = now_ms;
+    s_vario_state.runtime.gps.fix.last_fix_ms = now_ms;
+
+    s_vario_state.runtime.bike.heading_valid = true;
+    s_vario_state.runtime.bike.heading_deg_x10 = (int16_t)lroundf(vario_state_wrap_360(s_vario_state.trainer.heading_deg) * 10.0f);
+
+    (void)settings;
+    s_vario_state.trainer.last_update_ms = now_ms;
+}
+
+static void vario_state_trainer_apply_snapshots(uint32_t now_ms)
+{
+    vario_state_trainer_step(now_ms);
+}
+
 static float vario_state_wrap_360(float deg)
 {
     while (deg < 0.0f)
@@ -252,6 +693,11 @@ static float vario_state_wrap_pm180(float deg)
 static float vario_state_deg_to_rad(float deg)
 {
     return deg * (VARIO_STATE_PI / 180.0f);
+}
+
+static float vario_state_rad_to_deg(float rad)
+{
+    return rad * (180.0f / VARIO_STATE_PI);
 }
 
 static bool vario_state_compute_glide_ratio(float speed_kmh, float vario_mps, float *out_ratio)
@@ -1469,7 +1915,17 @@ void Vario_State_Init(void)
 
 void Vario_State_Task(uint32_t now_ms)
 {
+    const vario_settings_t *settings;
+
+    settings = Vario_Settings_Get();
+
     vario_state_capture_snapshots();
+    vario_state_trainer_handle_toggle((settings != NULL) && (settings->trainer_enabled != 0u), now_ms);
+    if ((settings != NULL) && (settings->trainer_enabled != 0u))
+    {
+        vario_state_trainer_apply_snapshots(now_ms);
+    }
+
     vario_state_update_sensor_caches();
     vario_state_update_ground_speed();
     vario_state_update_display_filter(now_ms);
@@ -1482,6 +1938,42 @@ void Vario_State_Task(uint32_t now_ms)
     Vario_GlideComputer_Update(&s_vario_state.runtime, Vario_Settings_Get(), now_ms);
 
     s_vario_state.runtime.last_task_ms = now_ms;
+}
+
+void Vario_State_TrainerAdjustSpeed(int8_t direction)
+{
+    if (direction == 0)
+    {
+        return;
+    }
+
+    if (s_vario_state.trainer.initialized == false)
+    {
+        vario_state_trainer_init(s_vario_state.runtime.last_task_ms);
+    }
+
+    s_vario_state.trainer.airspeed_kmh =
+        vario_state_clampf(s_vario_state.trainer.airspeed_kmh +
+                           (((float)direction) * VARIO_STATE_TRAINER_SPEED_STEP_KMH),
+                           VARIO_STATE_TRAINER_MIN_SPEED_KMH,
+                           VARIO_STATE_TRAINER_MAX_SPEED_KMH);
+}
+
+void Vario_State_TrainerAdjustHeading(int8_t direction)
+{
+    if (direction == 0)
+    {
+        return;
+    }
+
+    if (s_vario_state.trainer.initialized == false)
+    {
+        vario_state_trainer_init(s_vario_state.runtime.last_task_ms);
+    }
+
+    s_vario_state.trainer.heading_deg =
+        vario_state_wrap_360(s_vario_state.trainer.heading_deg +
+                             (((float)direction) * VARIO_STATE_TRAINER_HEADING_STEP_DEG));
 }
 
 vario_mode_t Vario_State_GetMode(void)

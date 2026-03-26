@@ -42,6 +42,7 @@ typedef enum
     VARIO_SETTING_MENU_BRIGHTNESS = 0u,
     VARIO_SETTING_MENU_VOLUME,
     VARIO_SETTING_MENU_RESPONSE,
+    VARIO_SETTING_MENU_TRAINER,
     VARIO_SETTING_MENU_CLIMB_START,
     VARIO_SETTING_MENU_COUNT
 } vario_setting_menu_item_t;
@@ -303,6 +304,16 @@ void Vario_State_EnterQuickSet(void);
 void Vario_State_EnterValueSetting(void);
 void Vario_State_SelectPreviousMainScreen(void);
 void Vario_State_SelectNextMainScreen(void);
+
+/* -------------------------------------------------------------------------- */
+/*  TRAINER synthetic scenario control                                        */
+/*                                                                            */
+/*  main screen 에서 TRAINER=ON 일 때 F1/F2/F5/F6이 이 API를 호출한다.          */
+/*  실제 센서 raw / APP_STATE 저장소를 직접 건드리지 않고,                      */
+/*  Vario_State 내부 synthetic table 값만 조작한다.                           */
+/* -------------------------------------------------------------------------- */
+void Vario_State_TrainerAdjustSpeed(int8_t direction);
+void Vario_State_TrainerAdjustHeading(int8_t direction);
 
 uint8_t Vario_State_GetSettingsCursor(void);
 uint8_t Vario_State_GetQuickSetCursor(void);

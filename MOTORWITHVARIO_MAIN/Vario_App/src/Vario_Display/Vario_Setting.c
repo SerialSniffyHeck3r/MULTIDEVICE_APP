@@ -13,6 +13,7 @@ void Vario_Setting_Render(u8g2_t *u8g2, const vario_buttonbar_t *buttonbar)
     char                    brightness_text[24];
     char                    volume_text[24];
     char                    response_text[24];
+    char                    trainer_text[24];
     char                    climb_text[24];
     char                    qnh_text[32];
 
@@ -57,6 +58,11 @@ void Vario_Setting_Render(u8g2_t *u8g2, const vario_buttonbar_t *buttonbar)
              "%u/10",
              (unsigned)settings->vario_damping_level);
 
+    snprintf(trainer_text,
+             sizeof(trainer_text),
+             "%s",
+             (settings->trainer_enabled != 0u) ? "ON" : "OFF");
+
     snprintf(climb_text,
              sizeof(climb_text),
              "%+.1f %s",
@@ -93,7 +99,14 @@ void Vario_Setting_Render(u8g2_t *u8g2, const vario_buttonbar_t *buttonbar)
 
     Vario_Display_DrawMenuRow(u8g2,
                               v,
-                              (int16_t)(v->y + 90),
+                              (int16_t)(v->y + 80),
+                              (Vario_State_GetSettingsCursor() == VARIO_SETTING_MENU_TRAINER),
+                              "Trainer",
+                              trainer_text);
+
+    Vario_Display_DrawMenuRow(u8g2,
+                              v,
+                              (int16_t)(v->y + 96),
                               (Vario_State_GetSettingsCursor() == VARIO_SETTING_MENU_CLIMB_START),
                               "Climb Start",
                               climb_text);

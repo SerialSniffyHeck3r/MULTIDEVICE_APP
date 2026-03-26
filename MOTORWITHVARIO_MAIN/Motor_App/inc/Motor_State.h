@@ -1,4 +1,3 @@
-
 #ifndef MOTOR_STATE_H
 #define MOTOR_STATE_H
 
@@ -33,6 +32,23 @@ void Motor_State_RefreshSettingsSnapshot(void);
 
 void Motor_State_RequestRedraw(void);
 void Motor_State_ShowToast(const char *text, uint32_t hold_ms);
+
+/* -------------------------------------------------------------------------- */
+/*  공용 popup facade                                                         */
+/*                                                                            */
+/*  목적                                                                       */
+/*  - Motor_App 상위 모듈이 UI raster 세부사항을 직접 만지지 않게 한다.        */
+/*  - popup의 실제 구현은 Display_UI 공용 모듈이 담당하고,                    */
+/*    Motor_App는 이 facade만 호출한다.                                       */
+/*  - 향후 popup 정책을 바꾸더라도 호출 지점을 Motor_State 경계로            */
+/*    묶어 두면 수정 반경을 최소화할 수 있다.                                 */
+/* -------------------------------------------------------------------------- */
+void Motor_State_ShowPopup(const char *title,
+                           const char *line1,
+                           const char *line2,
+                           uint32_t hold_ms);
+void Motor_State_HidePopup(void);
+
 void Motor_State_SetScreen(motor_screen_t screen);
 void Motor_State_StorePreviousDriveScreen(motor_screen_t screen);
 void Motor_State_RequestMarker(void);
