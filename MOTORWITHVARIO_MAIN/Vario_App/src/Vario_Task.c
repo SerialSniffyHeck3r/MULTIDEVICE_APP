@@ -94,7 +94,29 @@ static uint16_t vario_task_lerp_u16(uint16_t slow_value,
     return (uint16_t)(value + 0.5f);
 }
 
-static float vario_task_response_norm_from_settings(const vario_settings_t *settings)
+static float vario_task_damping_norm_from_settings(const vario_settings_t *settings)
+{
+    uint8_t damping_level;
+
+    if (settings == NULL)
+    {
+        return 0.6667f;
+    }
+
+    damping_level = settings->vario_damping_level;
+    if (damping_level < 1u)
+    {
+        damping_level = 1u;
+    }
+    else if (damping_level > 10u)
+    {
+        damping_level = 10u;
+    }
+
+    return ((float)(damping_level - 1u)) / 9.0f;
+}
+
+static float vario_task_audio_response_norm_from_settings(const vario_settings_t *settings)
 {
     uint8_t response_level;
 
@@ -103,7 +125,7 @@ static float vario_task_response_norm_from_settings(const vario_settings_t *sett
         return 0.6667f;
     }
 
-    response_level = settings->vario_damping_level;
+    response_level = settings->audio_response_level;
     if (response_level < 1u)
     {
         response_level = 1u;
@@ -169,7 +191,8 @@ static void vario_task_apply_platform_settings(void)
     uint8_t                 bt_autoping;
     uint8_t                 platform_settings_dirty;
     uint8_t                 uc1608_dirty;
-    float                   response_norm;
+    float                   damping_norm;
+    float                   audio_response_norm;
     uint16_t                fast_tau_ms;
     uint16_t                baro_vario_tau_ms;
     uint16_t                baro_vario_noise_cms;
@@ -247,10 +270,22 @@ static void vario_task_apply_platform_settings(void)
     /*  - 향후 하위 레이어 진단                                               */
     /*  이 전부 같은 값을 보게 된다.                                          */
     /* ---------------------------------------------------------------------- */
-    response_norm = vario_task_response_norm_from_settings(settings);
-    fast_tau_ms = vario_task_lerp_u16(170u, 70u, response_norm);
-    baro_vario_tau_ms = vario_task_lerp_u16(95u, 38u, response_norm);
-    baro_vario_noise_cms = vario_task_lerp_u16(72u, 50u, response_norm);
+    /* ------------------------------------------------------------------ */
+    /*  의미 정리                                                            */
+    /*                                                                      */
+    /*  - damping         : display / publish / low-level tau-noise mirror  */
+    /*  - audio response  : audio cadence / follow-up mirror                */
+    /*                                                                      */
+    /*  이전 구현은 두 knob를 둘 다 노출해 놓고도 APP_STATE mirror 갱신 시     */
+    /*  vario_damping_level 하나로 전부 번역해 버려 semantic mismatch가       */
+    /*  있었다. 여기서는 두 의미를 분리해 mirror도 실제 제품 설정 의미와      */
+    /*  일치시키도록 정리한다.                                                */
+    /* ------------------------------------------------------------------ */
+    damping_norm = vario_task_damping_norm_from_settings(settings);
+    audio_response_norm = vario_task_audio_response_norm_from_settings(settings);
+    fast_tau_ms = vario_task_lerp_u16(170u, 70u, damping_norm);
+    baro_vario_tau_ms = vario_task_lerp_u16(95u, 38u, damping_norm);
+    baro_vario_noise_cms = vario_task_lerp_u16(72u, 50u, damping_norm);
 
     audio_deadband_cms = (uint16_t)((settings->climb_tone_threshold_cms > 0) ?
                                     settings->climb_tone_threshold_cms :
@@ -266,8 +301,8 @@ static void vario_task_apply_platform_settings(void)
 
     audio_min_freq_hz = 225u;
     audio_max_freq_hz = 1820u;
-    audio_repeat_ms   = vario_task_lerp_u16(310u, 140u, response_norm);
-    audio_beep_ms     = vario_task_lerp_u16(105u, 78u, response_norm);
+    audio_repeat_ms   = vario_task_lerp_u16(310u, 140u, audio_response_norm);
+    audio_beep_ms     = vario_task_lerp_u16(105u, 78u, audio_response_norm);
 
     if (platform_settings.altitude.vario_fast_tau_ms != fast_tau_ms)
     {

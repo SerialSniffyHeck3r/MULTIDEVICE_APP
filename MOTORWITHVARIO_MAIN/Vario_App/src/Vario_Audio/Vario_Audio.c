@@ -274,7 +274,16 @@ static int16_t vario_audio_get_prethermal_on_threshold_cms(const vario_settings_
         return 5;
     }
 
-    pre_on = vario_audio_clamp_s16(settings->prethermal_threshold_cms, 0, 300);
+    /* ------------------------------------------------------------------ */
+    /*  prethermal 은 Flytec 계열의 pre-zero / near-thermal 감각을 살리기 위해 */
+    /*  음수 문턱도 그대로 허용한다.                                           */
+    /*                                                                      */
+    /*  Settings layer가 이미 -100..+300 cm/s 계약을 제공하므로,               */
+    /*  audio state machine도 같은 의미를 따라야 한다.                       */
+    /*  이전 구현처럼 0 이상으로 재-clamp 하면 menu에서 준 음수 prethermal이  */
+    /*  실제 소리 판단에서는 사라지는 semantic mismatch가 생긴다.             */
+    /* ------------------------------------------------------------------ */
+    pre_on = vario_audio_clamp_s16(settings->prethermal_threshold_cms, -100, 300);
     if (pre_on > climb_on)
     {
         pre_on = climb_on;
@@ -294,7 +303,7 @@ static int16_t vario_audio_get_prethermal_off_threshold_cms(const vario_settings
         return 0;
     }
 
-    pre_off = vario_audio_clamp_s16(settings->prethermal_off_threshold_cms, 0, 300);
+    pre_off = vario_audio_clamp_s16(settings->prethermal_off_threshold_cms, -100, 300);
     if (pre_off > pre_on)
     {
         pre_off = pre_on;

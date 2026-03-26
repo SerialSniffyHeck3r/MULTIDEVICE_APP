@@ -1,13 +1,26 @@
-
 #include "Motor_Settings.h"
 
 #include "APP_STATE.h"
 #include "Motor_Panel.h"
 #include "Motor_Units.h"
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static motor_settings_t s_motor_settings;
+
+static const char *const s_settings_root_items[] =
+{
+    "DISPLAY",
+    "GPS",
+    "UNITS",
+    "RECORDING",
+    "DYNAMICS",
+    "MAINTENANCE",
+    "OBD",
+    "SYSTEM"
+};
 
 static void motor_settings_fill_default_services(motor_maintenance_settings_t *maintenance)
 {
@@ -91,12 +104,94 @@ static void motor_settings_fill_default_data_fields(void)
     s_motor_settings.data_fields[1][14] = (uint8_t)MOTOR_FIELD_G_BRAKE_MAX;
 }
 
+static const char *motor_settings_axis_name(uint8_t axis_raw)
+{
+    switch ((app_bike_axis_t)axis_raw)
+    {
+    case APP_BIKE_AXIS_POS_X: return "+X";
+    case APP_BIKE_AXIS_NEG_X: return "-X";
+    case APP_BIKE_AXIS_POS_Y: return "+Y";
+    case APP_BIKE_AXIS_NEG_Y: return "-Y";
+    case APP_BIKE_AXIS_POS_Z: return "+Z";
+    case APP_BIKE_AXIS_NEG_Z: return "-Z";
+    default:                  return "AXIS";
+    }
+}
+
+static const char *motor_settings_onoff_text(uint8_t enabled)
+{
+    return (enabled != 0u) ? "ON" : "OFF";
+}
+
+static const char *motor_settings_unit_preset_name(uint8_t preset_raw)
+{
+    switch ((motor_unit_preset_t)preset_raw)
+    {
+    case MOTOR_UNIT_PRESET_ENGLISH:  return "ENGLISH";
+    case MOTOR_UNIT_PRESET_IMPERIAL: return "IMPERIAL";
+    case MOTOR_UNIT_PRESET_CUSTOM:   return "CUSTOM";
+    case MOTOR_UNIT_PRESET_METRIC:
+    default:                         return "METRIC";
+    }
+}
+
+static const char *motor_settings_display_mode_name(uint8_t mode_raw)
+{
+    switch ((motor_display_brightness_mode_t)mode_raw)
+    {
+    case MOTOR_DISPLAY_BRIGHTNESS_AUTO_DAY_NITE:  return "AUTO D/N";
+    case MOTOR_DISPLAY_BRIGHTNESS_MANUAL_PERCENT: return "MANUAL %";
+    case MOTOR_DISPLAY_BRIGHTNESS_AUTO_CONTINUOUS:
+    default:                                      return "AUTO CONT";
+    }
+}
+
+static const char *motor_settings_screen_title(motor_screen_t screen)
+{
+    switch (screen)
+    {
+    case MOTOR_SCREEN_SETTINGS_DISPLAY:     return "DISPLAY";
+    case MOTOR_SCREEN_SETTINGS_GPS:         return "GPS";
+    case MOTOR_SCREEN_SETTINGS_UNITS:       return "UNITS";
+    case MOTOR_SCREEN_SETTINGS_RECORDING:   return "RECORDING";
+    case MOTOR_SCREEN_SETTINGS_DYNAMICS:    return "DYNAMICS";
+    case MOTOR_SCREEN_SETTINGS_MAINTENANCE: return "MAINTENANCE";
+    case MOTOR_SCREEN_SETTINGS_OBD:         return "OBD";
+    case MOTOR_SCREEN_SETTINGS_SYSTEM:      return "SYSTEM";
+    case MOTOR_SCREEN_SETTINGS_ROOT:
+    default:                                return "SETUP";
+    }
+}
+
+static const char *motor_settings_screen_subtitle(motor_screen_t screen)
+{
+    switch (screen)
+    {
+    case MOTOR_SCREEN_SETTINGS_DISPLAY:     return "PANEL / BAR";
+    case MOTOR_SCREEN_SETTINGS_GPS:         return "RECEIVER / TRACK";
+    case MOTOR_SCREEN_SETTINGS_UNITS:       return "UNITS / FORMAT";
+    case MOTOR_SCREEN_SETTINGS_RECORDING:   return "LOG / SESSION";
+    case MOTOR_SCREEN_SETTINGS_DYNAMICS:    return "LEAN / G-FORCE";
+    case MOTOR_SCREEN_SETTINGS_MAINTENANCE: return "SERVICE / LIFE";
+    case MOTOR_SCREEN_SETTINGS_OBD:         return "LINK / WARN";
+    case MOTOR_SCREEN_SETTINGS_SYSTEM:      return "APP / DEBUG";
+    case MOTOR_SCREEN_SETTINGS_ROOT:
+    default:                                return "CATEGORY";
+    }
+}
+
 void Motor_Settings_ResetToDefaults(void)
 {
     memset(&s_motor_settings, 0, sizeof(s_motor_settings));
 
+    /* ---------------------------------------------------------------------- */
+    /*  unit preset                                                            */
+    /* ---------------------------------------------------------------------- */
     Motor_Units_ApplyPreset(&s_motor_settings.units, MOTOR_UNIT_PRESET_METRIC);
 
+    /* ---------------------------------------------------------------------- */
+    /*  display                                                                */
+    /* ---------------------------------------------------------------------- */
     s_motor_settings.display.brightness_mode = (uint8_t)MOTOR_DISPLAY_BRIGHTNESS_AUTO_CONTINUOUS;
     s_motor_settings.display.manual_brightness_percent = 45u;
     s_motor_settings.display.auto_continuous_bias_steps = 0;
@@ -111,6 +206,9 @@ void Motor_Settings_ResetToDefaults(void)
     s_motor_settings.display.page_wrap_enabled = 1u;
     s_motor_settings.display.lock_while_moving = 0u;
 
+    /* ---------------------------------------------------------------------- */
+    /*  GPS                                                                    */
+    /* ---------------------------------------------------------------------- */
     s_motor_settings.gps.receiver_profile = (uint8_t)APP_GPS_BOOT_PROFILE_MULTI_CONST_10HZ;
     s_motor_settings.gps.power_profile = (uint8_t)APP_GPS_POWER_PROFILE_HIGH_POWER;
     s_motor_settings.gps.dynamic_model = (uint8_t)MOTOR_GPS_DYNAMIC_MODEL_AUTOMOTIVE;
@@ -122,6 +220,9 @@ void Motor_Settings_ResetToDefaults(void)
     s_motor_settings.gps.course_valid_min_speed_kmh_x10 = 50u;
     s_motor_settings.gps.breadcrumb_min_distance_m = 10u;
 
+    /* ---------------------------------------------------------------------- */
+    /*  recording                                                              */
+    /* ---------------------------------------------------------------------- */
     s_motor_settings.recording.auto_start_enabled = 1u;
     s_motor_settings.recording.auto_pause_enabled = 0u;
     s_motor_settings.recording.summary_popup_enabled = 1u;
@@ -129,15 +230,46 @@ void Motor_Settings_ResetToDefaults(void)
     s_motor_settings.recording.auto_start_speed_kmh_x10 = 50u;
     s_motor_settings.recording.auto_stop_idle_seconds = 120u;
 
+    /* ---------------------------------------------------------------------- */
+    /*  dynamics                                                               */
+    /*                                                                          */
+    /*  아래 값들은 shared BIKE_DYNAMICS의 field와 1:1 mirror 된다.            */
+    /*  기존 Motor_App의 estimator 중복 구현을 제거하고,                       */
+    /*  이제 low-level canonical service가 이 값을 직접 소비한다.              */
+    /* ---------------------------------------------------------------------- */
+    s_motor_settings.dynamics.enabled = 1u;
     s_motor_settings.dynamics.auto_zero_on_boot = 1u;
     s_motor_settings.dynamics.gnss_aid_enabled = 1u;
     s_motor_settings.dynamics.obd_aid_enabled = 1u;
     s_motor_settings.dynamics.mount_forward_axis = (uint8_t)APP_BIKE_AXIS_POS_X;
     s_motor_settings.dynamics.mount_left_axis = (uint8_t)APP_BIKE_AXIS_POS_Y;
     s_motor_settings.dynamics.mount_yaw_trim_deg_x10 = 0;
+
+    s_motor_settings.dynamics.imu_accel_lsb_per_g = 8192u;
+    s_motor_settings.dynamics.imu_gyro_lsb_per_dps_x10 = 655u;
+    s_motor_settings.dynamics.imu_gravity_tau_ms = 450u;
+    s_motor_settings.dynamics.imu_linear_tau_ms = 180u;
+    s_motor_settings.dynamics.imu_attitude_accel_gate_mg = 150u;
+    s_motor_settings.dynamics.imu_jerk_gate_mg_per_s = 3500u;
+    s_motor_settings.dynamics.imu_predict_min_trust_permille = 250u;
+    s_motor_settings.dynamics.imu_stale_timeout_ms = 250u;
+
+    s_motor_settings.dynamics.output_deadband_mg = 25u;
+    s_motor_settings.dynamics.output_clip_mg = 1400u;
     s_motor_settings.dynamics.lean_display_tau_ms = 180u;
+    s_motor_settings.dynamics.grade_display_tau_ms = 180u;
     s_motor_settings.dynamics.accel_display_tau_ms = 180u;
 
+    s_motor_settings.dynamics.gnss_min_speed_kmh_x10 = 80u;
+    s_motor_settings.dynamics.gnss_max_speed_acc_kmh_x10 = 80u;
+    s_motor_settings.dynamics.gnss_max_head_acc_deg_x10 = 120u;
+    s_motor_settings.dynamics.gnss_bias_tau_ms = 1200u;
+    s_motor_settings.dynamics.gnss_outlier_gate_mg = 300u;
+    s_motor_settings.dynamics.obd_stale_timeout_ms = 500u;
+
+    /* ---------------------------------------------------------------------- */
+    /*  maintenance / vehicle / system                                         */
+    /* ---------------------------------------------------------------------- */
     motor_settings_fill_default_services(&s_motor_settings.maintenance);
 
     s_motor_settings.obd.autoconnect_enabled = 0u;
@@ -189,7 +321,7 @@ void Motor_Settings_Commit(void)
     APP_STATE_CopySettingsSnapshot(&shared_settings);
 
     /* ---------------------------------------------------------------------- */
-    /*  shared APP_STATE 에 직접 반영 가능한 설정만 즉시 저장한다.             */
+    /*  shared APP_STATE 에 직접 반영 가능한 설정                               */
     /* ---------------------------------------------------------------------- */
     shared_settings.gps.boot_profile  = (app_gps_boot_profile_t)s_motor_settings.gps.receiver_profile;
     shared_settings.gps.power_profile = (app_gps_power_profile_t)s_motor_settings.gps.power_profile;
@@ -207,19 +339,247 @@ void Motor_Settings_Commit(void)
     shared_settings.uc1608.temperature_compensation = s_motor_settings.display.temperature_compensation_raw;
 
     /* ---------------------------------------------------------------------- */
-    /*  bike settings 는 Motor_App 상위 계층에서 다시 소유하지만,               */
-    /*  mount axis / trim / 일부 tuning 값은 APP_STATE.settings.bike 에         */
-    /*  미러링해 두면 다른 debug 툴과 일관성을 유지하기 좋다.                   */
+    /*  canonical bike settings mirror                                          */
+    /*                                                                          */
+    /*  Motor_App high-level settings를 low-level BIKE_DYNAMICS가 바로 쓸 수   */
+    /*  있도록 shared APP_STATE.settings.bike에 그대로 반영한다.              */
     /* ---------------------------------------------------------------------- */
+    shared_settings.bike.enabled = s_motor_settings.dynamics.enabled;
     shared_settings.bike.auto_zero_on_boot = s_motor_settings.dynamics.auto_zero_on_boot;
-    shared_settings.bike.gnss_aid_enabled  = s_motor_settings.dynamics.gnss_aid_enabled;
-    shared_settings.bike.obd_aid_enabled   = s_motor_settings.dynamics.obd_aid_enabled;
+    shared_settings.bike.gnss_aid_enabled = s_motor_settings.dynamics.gnss_aid_enabled;
+    shared_settings.bike.obd_aid_enabled = s_motor_settings.dynamics.obd_aid_enabled;
     shared_settings.bike.mount_forward_axis = s_motor_settings.dynamics.mount_forward_axis;
-    shared_settings.bike.mount_left_axis    = s_motor_settings.dynamics.mount_left_axis;
+    shared_settings.bike.mount_left_axis = s_motor_settings.dynamics.mount_left_axis;
     shared_settings.bike.mount_yaw_trim_deg_x10 = s_motor_settings.dynamics.mount_yaw_trim_deg_x10;
+
+    shared_settings.bike.imu_accel_lsb_per_g = s_motor_settings.dynamics.imu_accel_lsb_per_g;
+    shared_settings.bike.imu_gyro_lsb_per_dps_x10 = s_motor_settings.dynamics.imu_gyro_lsb_per_dps_x10;
+    shared_settings.bike.imu_gravity_tau_ms = s_motor_settings.dynamics.imu_gravity_tau_ms;
+    shared_settings.bike.imu_linear_tau_ms = s_motor_settings.dynamics.imu_linear_tau_ms;
+    shared_settings.bike.imu_attitude_accel_gate_mg = s_motor_settings.dynamics.imu_attitude_accel_gate_mg;
+    shared_settings.bike.imu_jerk_gate_mg_per_s = s_motor_settings.dynamics.imu_jerk_gate_mg_per_s;
+    shared_settings.bike.imu_predict_min_trust_permille = s_motor_settings.dynamics.imu_predict_min_trust_permille;
+    shared_settings.bike.imu_stale_timeout_ms = s_motor_settings.dynamics.imu_stale_timeout_ms;
+
+    shared_settings.bike.output_deadband_mg = s_motor_settings.dynamics.output_deadband_mg;
+    shared_settings.bike.output_clip_mg = s_motor_settings.dynamics.output_clip_mg;
     shared_settings.bike.lean_display_tau_ms = s_motor_settings.dynamics.lean_display_tau_ms;
+    shared_settings.bike.grade_display_tau_ms = s_motor_settings.dynamics.grade_display_tau_ms;
     shared_settings.bike.accel_display_tau_ms = s_motor_settings.dynamics.accel_display_tau_ms;
+
+    shared_settings.bike.gnss_min_speed_kmh_x10 = s_motor_settings.dynamics.gnss_min_speed_kmh_x10;
+    shared_settings.bike.gnss_max_speed_acc_kmh_x10 = s_motor_settings.dynamics.gnss_max_speed_acc_kmh_x10;
+    shared_settings.bike.gnss_max_head_acc_deg_x10 = s_motor_settings.dynamics.gnss_max_head_acc_deg_x10;
+    shared_settings.bike.gnss_bias_tau_ms = s_motor_settings.dynamics.gnss_bias_tau_ms;
+    shared_settings.bike.gnss_outlier_gate_mg = s_motor_settings.dynamics.gnss_outlier_gate_mg;
+    shared_settings.bike.obd_stale_timeout_ms = s_motor_settings.dynamics.obd_stale_timeout_ms;
 
     APP_STATE_StoreSettingsSnapshot(&shared_settings);
     Motor_Panel_ApplyDisplaySettings(&s_motor_settings);
+}
+
+uint8_t Motor_Settings_GetRowCount(motor_screen_t screen)
+{
+    switch (screen)
+    {
+    case MOTOR_SCREEN_SETTINGS_ROOT:        return 8u;
+    case MOTOR_SCREEN_SETTINGS_DISPLAY:     return 13u;
+    case MOTOR_SCREEN_SETTINGS_GPS:         return 10u;
+    case MOTOR_SCREEN_SETTINGS_UNITS:       return 7u;
+    case MOTOR_SCREEN_SETTINGS_RECORDING:   return 6u;
+    case MOTOR_SCREEN_SETTINGS_DYNAMICS:    return 27u;
+    case MOTOR_SCREEN_SETTINGS_MAINTENANCE: return 8u;
+    case MOTOR_SCREEN_SETTINGS_OBD:         return 5u;
+    case MOTOR_SCREEN_SETTINGS_SYSTEM:      return 6u;
+    default:                                return 0u;
+    }
+}
+
+const char *Motor_Settings_GetScreenTitle(motor_screen_t screen)
+{
+    return motor_settings_screen_title(screen);
+}
+
+const char *Motor_Settings_GetScreenSubtitle(motor_screen_t screen)
+{
+    return motor_settings_screen_subtitle(screen);
+}
+
+void Motor_Settings_GetRowText(const motor_state_t *state,
+                               motor_screen_t screen,
+                               uint8_t row,
+                               char *out_label,
+                               size_t label_size,
+                               char *out_value,
+                               size_t value_size)
+{
+    if ((state == 0) || (out_label == 0) || (out_value == 0) || (label_size == 0u) || (value_size == 0u))
+    {
+        return;
+    }
+
+    out_label[0] = '\0';
+    out_value[0] = '\0';
+
+    switch (screen)
+    {
+    case MOTOR_SCREEN_SETTINGS_ROOT:
+        if (row < (uint8_t)(sizeof(s_settings_root_items) / sizeof(s_settings_root_items[0])))
+        {
+            (void)snprintf(out_label, label_size, "%s", s_settings_root_items[row]);
+            (void)snprintf(out_value, value_size, ">>");
+        }
+        break;
+
+    case MOTOR_SCREEN_SETTINGS_DISPLAY:
+        switch (row)
+        {
+        case 0u:  (void)snprintf(out_label, label_size, "BRIGHT MODE"); (void)snprintf(out_value, value_size, "%s", motor_settings_display_mode_name(state->settings.display.brightness_mode)); break;
+        case 1u:  (void)snprintf(out_label, label_size, "MANUAL LEVEL"); (void)snprintf(out_value, value_size, "%u%%", (unsigned)state->settings.display.manual_brightness_percent); break;
+        case 2u:  (void)snprintf(out_label, label_size, "AUTO BIAS"); (void)snprintf(out_value, value_size, "%d", (int)state->settings.display.auto_continuous_bias_steps); break;
+        case 3u:  (void)snprintf(out_label, label_size, "NIGHT THR"); (void)snprintf(out_value, value_size, "%u%%", (unsigned)state->settings.display.auto_day_night_night_threshold_percent); break;
+        case 4u:  (void)snprintf(out_label, label_size, "SUPER THR"); (void)snprintf(out_value, value_size, "%u%%", (unsigned)state->settings.display.auto_day_night_super_night_threshold_percent); break;
+        case 5u:  (void)snprintf(out_label, label_size, "NIGHT BRT"); (void)snprintf(out_value, value_size, "%u%%", (unsigned)state->settings.display.auto_day_night_night_brightness_percent); break;
+        case 6u:  (void)snprintf(out_label, label_size, "SUPER BRT"); (void)snprintf(out_value, value_size, "%u%%", (unsigned)state->settings.display.auto_day_night_super_night_brightness_percent); break;
+        case 7u:  (void)snprintf(out_label, label_size, "CONTRAST"); (void)snprintf(out_value, value_size, "%u", (unsigned)state->settings.display.contrast_raw); break;
+        case 8u:  (void)snprintf(out_label, label_size, "TEMP COMP"); (void)snprintf(out_value, value_size, "%u", (unsigned)state->settings.display.temperature_compensation_raw); break;
+        case 9u:  (void)snprintf(out_label, label_size, "SMART UPDATE"); (void)snprintf(out_value, value_size, "%s", motor_settings_onoff_text(state->settings.display.smart_update_enabled)); break;
+        case 10u: (void)snprintf(out_label, label_size, "FRAME LIMIT"); (void)snprintf(out_value, value_size, "%s", motor_settings_onoff_text(state->settings.display.frame_limit_enabled)); break;
+        case 11u: (void)snprintf(out_label, label_size, "PAGE WRAP"); (void)snprintf(out_value, value_size, "%s", motor_settings_onoff_text(state->settings.display.page_wrap_enabled)); break;
+        case 12u: (void)snprintf(out_label, label_size, "MOVING LOCK"); (void)snprintf(out_value, value_size, "%s", motor_settings_onoff_text(state->settings.display.lock_while_moving)); break;
+        default: break;
+        }
+        break;
+
+    case MOTOR_SCREEN_SETTINGS_GPS:
+        switch (row)
+        {
+        case 0u: (void)snprintf(out_label, label_size, "RECEIVER"); (void)snprintf(out_value, value_size, "%s", (state->settings.gps.receiver_profile == (uint8_t)APP_GPS_BOOT_PROFILE_GPS_ONLY_20HZ) ? "20HZ GPS" : "10HZ FULL"); break;
+        case 1u: (void)snprintf(out_label, label_size, "POWER"); (void)snprintf(out_value, value_size, "%s", (state->settings.gps.power_profile == (uint8_t)APP_GPS_POWER_PROFILE_HIGH_POWER) ? "HIGH" : "SAVE"); break;
+        case 2u: (void)snprintf(out_label, label_size, "DYNAMIC MODEL"); (void)snprintf(out_value, value_size, "%s", (state->settings.gps.dynamic_model == (uint8_t)MOTOR_GPS_DYNAMIC_MODEL_AUTOMOTIVE) ? "AUTO" : "PORTABLE"); break;
+        case 3u: (void)snprintf(out_label, label_size, "STATIC HOLD"); (void)snprintf(out_value, value_size, "%s", motor_settings_onoff_text(state->settings.gps.static_hold_enabled)); break;
+        case 4u: (void)snprintf(out_label, label_size, "LOWSPD COG"); (void)snprintf(out_value, value_size, "%s", motor_settings_onoff_text(state->settings.gps.low_speed_course_filter_enabled)); break;
+        case 5u: (void)snprintf(out_label, label_size, "LOWSPD VEL"); (void)snprintf(out_value, value_size, "%s", motor_settings_onoff_text(state->settings.gps.low_speed_velocity_filter_enabled)); break;
+        case 6u: (void)snprintf(out_label, label_size, "RTC SYNC"); (void)snprintf(out_value, value_size, "%s", motor_settings_onoff_text(state->settings.gps.rtc_gps_sync_enabled)); break;
+        case 7u: (void)snprintf(out_label, label_size, "SYNC INT"); (void)snprintf(out_value, value_size, "%u min", (unsigned)state->settings.gps.rtc_gps_sync_interval_min); break;
+        case 8u: (void)snprintf(out_label, label_size, "CRUMB DIST"); (void)snprintf(out_value, value_size, "%u m", (unsigned)state->settings.gps.breadcrumb_min_distance_m); break;
+        case 9u: (void)snprintf(out_label, label_size, "HEAD MIN SPD"); (void)snprintf(out_value, value_size, "%u.%01u", (unsigned)(state->settings.gps.course_valid_min_speed_kmh_x10 / 10u), (unsigned)(state->settings.gps.course_valid_min_speed_kmh_x10 % 10u)); break;
+        default: break;
+        }
+        break;
+
+    case MOTOR_SCREEN_SETTINGS_UNITS:
+        switch (row)
+        {
+        case 0u: (void)snprintf(out_label, label_size, "OVERALL"); (void)snprintf(out_value, value_size, "%s", motor_settings_unit_preset_name(state->settings.units.preset)); break;
+        case 1u: (void)snprintf(out_label, label_size, "SPEED"); (void)snprintf(out_value, value_size, "%s", (state->settings.units.speed == (uint8_t)MOTOR_SPEED_UNIT_KMH) ? "KM/H" : "MPH"); break;
+        case 2u: (void)snprintf(out_label, label_size, "DISTANCE"); (void)snprintf(out_value, value_size, "%s", (state->settings.units.distance == (uint8_t)MOTOR_DISTANCE_UNIT_KM) ? "KM" : "MI"); break;
+        case 3u: (void)snprintf(out_label, label_size, "ALTITUDE"); (void)snprintf(out_value, value_size, "%s", (state->settings.units.altitude == (uint8_t)MOTOR_ALTITUDE_UNIT_M) ? "M" : "FT"); break;
+        case 4u: (void)snprintf(out_label, label_size, "TEMP"); (void)snprintf(out_value, value_size, "%s", (state->settings.units.temperature == (uint8_t)MOTOR_TEMP_UNIT_C) ? "C" : "F"); break;
+        case 5u: (void)snprintf(out_label, label_size, "PRESSURE"); (void)snprintf(out_value, value_size, "%s", (state->settings.units.pressure == (uint8_t)MOTOR_PRESSURE_UNIT_HPA) ? "HPA" : "PSI"); break;
+        case 6u: (void)snprintf(out_label, label_size, "ECONOMY"); (void)snprintf(out_value, value_size, "%s", (state->settings.units.economy == (uint8_t)MOTOR_ECON_UNIT_L_PER_100KM) ? "L/100" : ((state->settings.units.economy == (uint8_t)MOTOR_ECON_UNIT_MPG_US) ? "MPG US" : "MPG UK")); break;
+        default: break;
+        }
+        break;
+
+    case MOTOR_SCREEN_SETTINGS_RECORDING:
+        switch (row)
+        {
+        case 0u: (void)snprintf(out_label, label_size, "AUTO START"); (void)snprintf(out_value, value_size, "%s", motor_settings_onoff_text(state->settings.recording.auto_start_enabled)); break;
+        case 1u: (void)snprintf(out_label, label_size, "START SPD"); (void)snprintf(out_value, value_size, "%u.%01u", (unsigned)(state->settings.recording.auto_start_speed_kmh_x10 / 10u), (unsigned)(state->settings.recording.auto_start_speed_kmh_x10 % 10u)); break;
+        case 2u: (void)snprintf(out_label, label_size, "STOP IDLE"); (void)snprintf(out_value, value_size, "%u s", (unsigned)state->settings.recording.auto_stop_idle_seconds); break;
+        case 3u: (void)snprintf(out_label, label_size, "AUTO PAUSE"); (void)snprintf(out_value, value_size, "%s", motor_settings_onoff_text(state->settings.recording.auto_pause_enabled)); break;
+        case 4u: (void)snprintf(out_label, label_size, "SUMMARY POP"); (void)snprintf(out_value, value_size, "%s", motor_settings_onoff_text(state->settings.recording.summary_popup_enabled)); break;
+        case 5u: (void)snprintf(out_label, label_size, "RAW IMU LOG"); (void)snprintf(out_value, value_size, "%s", motor_settings_onoff_text(state->settings.recording.raw_imu_log_enabled)); break;
+        default: break;
+        }
+        break;
+
+    case MOTOR_SCREEN_SETTINGS_DYNAMICS:
+        switch (row)
+        {
+        case 0u:  (void)snprintf(out_label, label_size, "SERVICE"); (void)snprintf(out_value, value_size, "%s", motor_settings_onoff_text(state->settings.dynamics.enabled)); break;
+        case 1u:  (void)snprintf(out_label, label_size, "AUTO ZERO"); (void)snprintf(out_value, value_size, "%s", motor_settings_onoff_text(state->settings.dynamics.auto_zero_on_boot)); break;
+        case 2u:  (void)snprintf(out_label, label_size, "GNSS AID"); (void)snprintf(out_value, value_size, "%s", motor_settings_onoff_text(state->settings.dynamics.gnss_aid_enabled)); break;
+        case 3u:  (void)snprintf(out_label, label_size, "OBD AID"); (void)snprintf(out_value, value_size, "%s", motor_settings_onoff_text(state->settings.dynamics.obd_aid_enabled)); break;
+        case 4u:  (void)snprintf(out_label, label_size, "FWD AXIS"); (void)snprintf(out_value, value_size, "%s", motor_settings_axis_name(state->settings.dynamics.mount_forward_axis)); break;
+        case 5u:  (void)snprintf(out_label, label_size, "LEFT AXIS"); (void)snprintf(out_value, value_size, "%s", motor_settings_axis_name(state->settings.dynamics.mount_left_axis)); break;
+        case 6u:  (void)snprintf(out_label, label_size, "YAW TRIM"); (void)snprintf(out_value, value_size, "%+d.%01d", (int)(state->settings.dynamics.mount_yaw_trim_deg_x10 / 10), (int)abs((int)(state->settings.dynamics.mount_yaw_trim_deg_x10 % 10))); break;
+        case 7u:  (void)snprintf(out_label, label_size, "GRAV TAU"); (void)snprintf(out_value, value_size, "%u ms", (unsigned)state->settings.dynamics.imu_gravity_tau_ms); break;
+        case 8u:  (void)snprintf(out_label, label_size, "LIN TAU"); (void)snprintf(out_value, value_size, "%u ms", (unsigned)state->settings.dynamics.imu_linear_tau_ms); break;
+        case 9u:  (void)snprintf(out_label, label_size, "ACC GATE"); (void)snprintf(out_value, value_size, "%u mg", (unsigned)state->settings.dynamics.imu_attitude_accel_gate_mg); break;
+        case 10u: (void)snprintf(out_label, label_size, "JERK GATE"); (void)snprintf(out_value, value_size, "%u", (unsigned)state->settings.dynamics.imu_jerk_gate_mg_per_s); break;
+        case 11u: (void)snprintf(out_label, label_size, "MIN TRUST"); (void)snprintf(out_value, value_size, "%u", (unsigned)state->settings.dynamics.imu_predict_min_trust_permille); break;
+        case 12u: (void)snprintf(out_label, label_size, "IMU STALE"); (void)snprintf(out_value, value_size, "%u ms", (unsigned)state->settings.dynamics.imu_stale_timeout_ms); break;
+        case 13u: (void)snprintf(out_label, label_size, "OUT DB"); (void)snprintf(out_value, value_size, "%u mg", (unsigned)state->settings.dynamics.output_deadband_mg); break;
+        case 14u: (void)snprintf(out_label, label_size, "OUT CLIP"); (void)snprintf(out_value, value_size, "%u mg", (unsigned)state->settings.dynamics.output_clip_mg); break;
+        case 15u: (void)snprintf(out_label, label_size, "LEAN TAU"); (void)snprintf(out_value, value_size, "%u ms", (unsigned)state->settings.dynamics.lean_display_tau_ms); break;
+        case 16u: (void)snprintf(out_label, label_size, "GRADE TAU"); (void)snprintf(out_value, value_size, "%u ms", (unsigned)state->settings.dynamics.grade_display_tau_ms); break;
+        case 17u: (void)snprintf(out_label, label_size, "ACC TAU"); (void)snprintf(out_value, value_size, "%u ms", (unsigned)state->settings.dynamics.accel_display_tau_ms); break;
+        case 18u: (void)snprintf(out_label, label_size, "GNSS MIN SPD"); (void)snprintf(out_value, value_size, "%u.%01u", (unsigned)(state->settings.dynamics.gnss_min_speed_kmh_x10 / 10u), (unsigned)(state->settings.dynamics.gnss_min_speed_kmh_x10 % 10u)); break;
+        case 19u: (void)snprintf(out_label, label_size, "SPD ACC MAX"); (void)snprintf(out_value, value_size, "%u.%01u", (unsigned)(state->settings.dynamics.gnss_max_speed_acc_kmh_x10 / 10u), (unsigned)(state->settings.dynamics.gnss_max_speed_acc_kmh_x10 % 10u)); break;
+        case 20u: (void)snprintf(out_label, label_size, "HEAD ACC MAX"); (void)snprintf(out_value, value_size, "%u.%01u deg", (unsigned)(state->settings.dynamics.gnss_max_head_acc_deg_x10 / 10u), (unsigned)(state->settings.dynamics.gnss_max_head_acc_deg_x10 % 10u)); break;
+        case 21u: (void)snprintf(out_label, label_size, "BIAS TAU"); (void)snprintf(out_value, value_size, "%u ms", (unsigned)state->settings.dynamics.gnss_bias_tau_ms); break;
+        case 22u: (void)snprintf(out_label, label_size, "OUTLIER GATE"); (void)snprintf(out_value, value_size, "%u mg", (unsigned)state->settings.dynamics.gnss_outlier_gate_mg); break;
+        case 23u: (void)snprintf(out_label, label_size, "OBD STALE"); (void)snprintf(out_value, value_size, "%u ms", (unsigned)state->settings.dynamics.obd_stale_timeout_ms); break;
+        case 24u: (void)snprintf(out_label, label_size, "ZERO CAPTURE"); (void)snprintf(out_value, value_size, "EXEC"); break;
+        case 25u: (void)snprintf(out_label, label_size, "HARD REZERO"); (void)snprintf(out_value, value_size, "EXEC"); break;
+        case 26u:
+            (void)snprintf(out_label, label_size, "GYRO CAL");
+            if (state->snapshot.bike.gyro_bias_cal_active != false)
+            {
+                (void)snprintf(out_value, value_size, "%u%%", (unsigned)(state->snapshot.bike.gyro_bias_cal_progress_permille / 10u));
+            }
+            else
+            {
+                (void)snprintf(out_value, value_size, "EXEC");
+            }
+            break;
+        default: break;
+        }
+        break;
+
+    case MOTOR_SCREEN_SETTINGS_MAINTENANCE:
+        switch (row)
+        {
+        case 0u: (void)snprintf(out_label, label_size, "DUE SOON M"); (void)snprintf(out_value, value_size, "%lu", (unsigned long)state->settings.maintenance.due_soon_distance_m); break;
+        case 1u: (void)snprintf(out_label, label_size, "DUE SOON D"); (void)snprintf(out_value, value_size, "%u", (unsigned)state->settings.maintenance.due_soon_days); break;
+        case 2u: (void)snprintf(out_label, label_size, "RESET %s", state->settings.maintenance.items[0].label); (void)snprintf(out_value, value_size, "EXEC"); break;
+        case 3u: (void)snprintf(out_label, label_size, "RESET %s", state->settings.maintenance.items[1].label); (void)snprintf(out_value, value_size, "EXEC"); break;
+        case 4u: (void)snprintf(out_label, label_size, "RESET %s", state->settings.maintenance.items[2].label); (void)snprintf(out_value, value_size, "EXEC"); break;
+        case 5u: (void)snprintf(out_label, label_size, "RESET %s", state->settings.maintenance.items[3].label); (void)snprintf(out_value, value_size, "EXEC"); break;
+        case 6u: (void)snprintf(out_label, label_size, "RESET %s", state->settings.maintenance.items[4].label); (void)snprintf(out_value, value_size, "EXEC"); break;
+        case 7u: (void)snprintf(out_label, label_size, "RESET %s", state->settings.maintenance.items[5].label); (void)snprintf(out_value, value_size, "EXEC"); break;
+        default: break;
+        }
+        break;
+
+    case MOTOR_SCREEN_SETTINGS_OBD:
+        switch (row)
+        {
+        case 0u: (void)snprintf(out_label, label_size, "AUTO CONNECT"); (void)snprintf(out_value, value_size, "%s", motor_settings_onoff_text(state->settings.obd.autoconnect_enabled)); break;
+        case 1u: (void)snprintf(out_label, label_size, "SPEED SOURCE"); (void)snprintf(out_value, value_size, "%s", (state->settings.obd.preferred_speed_source == (uint8_t)APP_BIKE_SPEED_SOURCE_OBD) ? "OBD" : "GNSS"); break;
+        case 2u: (void)snprintf(out_label, label_size, "COOL WARN"); (void)snprintf(out_value, value_size, "%u.%01uC", (unsigned)(state->settings.obd.coolant_warn_temp_c_x10 / 10u), (unsigned)(state->settings.obd.coolant_warn_temp_c_x10 % 10u)); break;
+        case 3u: (void)snprintf(out_label, label_size, "SHIFT RPM"); (void)snprintf(out_value, value_size, "%u", (unsigned)state->settings.obd.shift_light_rpm); break;
+        case 4u: (void)snprintf(out_label, label_size, "LINK / DISC"); (void)snprintf(out_value, value_size, "%s", (state->vehicle.connected != false) ? "DISC" : "LINK"); break;
+        default: break;
+        }
+        break;
+
+    case MOTOR_SCREEN_SETTINGS_SYSTEM:
+        switch (row)
+        {
+        case 0u: (void)snprintf(out_label, label_size, "MENU WRAP"); (void)snprintf(out_value, value_size, "%s", motor_settings_onoff_text(state->settings.system.menu_wrap_enabled)); break;
+        case 1u: (void)snprintf(out_label, label_size, "RIDE SUMMARY"); (void)snprintf(out_value, value_size, "%s", motor_settings_onoff_text(state->settings.system.ride_summary_popup_enabled)); break;
+        case 2u: (void)snprintf(out_label, label_size, "DEBUG STUBS"); (void)snprintf(out_value, value_size, "%s", motor_settings_onoff_text(state->settings.system.show_debug_stubs)); break;
+        case 3u: (void)snprintf(out_label, label_size, "FACTORY RESET"); (void)snprintf(out_value, value_size, "EXEC"); break;
+        case 4u: (void)snprintf(out_label, label_size, "UI STYLE"); (void)snprintf(out_value, value_size, "VARIO"); break;
+        case 5u: (void)snprintf(out_label, label_size, "DYN SRC"); (void)snprintf(out_value, value_size, "APP BIKE"); break;
+        default: break;
+        }
+        break;
+
+    default:
+        break;
+    }
 }

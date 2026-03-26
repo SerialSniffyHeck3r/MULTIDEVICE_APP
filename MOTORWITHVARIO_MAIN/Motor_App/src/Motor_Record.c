@@ -521,21 +521,31 @@ void Motor_Record_Task(uint32_t now_ms)
 
     if ((uint32_t)(state->now_ms - s_last_dyn_write_ms) >= 50u)
     {
-        motor_log_dyn_payload_t dyn;
-        memset(&dyn, 0, sizeof(dyn));
-        dyn.bank_deg_x10 = state->dyn.bank_deg_x10;
-        dyn.grade_deg_x10 = state->dyn.grade_deg_x10;
-        dyn.bank_rate_dps_x10 = state->dyn.bank_rate_dps_x10;
-        dyn.grade_rate_dps_x10 = state->dyn.grade_rate_dps_x10;
-        dyn.lat_accel_mg = state->dyn.lat_accel_mg;
-        dyn.lon_accel_mg = state->dyn.lon_accel_mg;
-        dyn.confidence_permille = state->dyn.confidence_permille;
-        dyn.speed_source = state->dyn.speed_source;
-        dyn.heading_source = state->dyn.heading_source;
-        if (motor_record_enqueue_payload(MOTOR_LOG_REC_DYN, state->now_ms, &dyn, sizeof(dyn)) == 0u)
+        /* ------------------------------------------------------------------ */
+        /*  DYN log 는 zero_valid 이후부터만 기록한다.                         */
+        /*                                                                    */
+        /*  부팅 직후 provisional display 값은 라이더에게만 보여주고,           */
+        /*  파일에는 확정 zero 기준이 선 뒤의 canonical estimator 값만 남긴다. */
+        /* ------------------------------------------------------------------ */
+        if (state->dyn.zero_valid != false)
         {
-            state->record.drop_count++;
+            motor_log_dyn_payload_t dyn;
+            memset(&dyn, 0, sizeof(dyn));
+            dyn.bank_deg_x10 = state->dyn.est_bank_deg_x10;
+            dyn.grade_deg_x10 = state->dyn.est_grade_deg_x10;
+            dyn.bank_rate_dps_x10 = state->dyn.est_bank_rate_dps_x10;
+            dyn.grade_rate_dps_x10 = state->dyn.est_grade_rate_dps_x10;
+            dyn.lat_accel_mg = state->dyn.est_lat_accel_mg;
+            dyn.lon_accel_mg = state->dyn.est_lon_accel_mg;
+            dyn.confidence_permille = state->dyn.confidence_permille;
+            dyn.speed_source = state->dyn.speed_source;
+            dyn.heading_source = state->dyn.heading_source;
+            if (motor_record_enqueue_payload(MOTOR_LOG_REC_DYN, state->now_ms, &dyn, sizeof(dyn)) == 0u)
+            {
+                state->record.drop_count++;
+            }
         }
+
         s_last_dyn_write_ms = state->now_ms;
     }
 

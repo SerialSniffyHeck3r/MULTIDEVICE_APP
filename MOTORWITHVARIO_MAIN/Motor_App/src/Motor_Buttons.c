@@ -15,7 +15,7 @@
 #endif
 
 #ifndef MOTOR_SETTINGS_VISIBLE_ROWS
-#define MOTOR_SETTINGS_VISIBLE_ROWS 7u
+#define MOTOR_SETTINGS_VISIBLE_ROWS 6u
 #endif
 
 static const motor_screen_t s_drive_screens[] =
@@ -30,6 +30,89 @@ static const motor_screen_t s_drive_screens[] =
     MOTOR_SCREEN_HORIZON,
     MOTOR_SCREEN_VEHICLE_SUMMARY
 };
+
+static uint8_t motor_buttons_toggle_u8(uint8_t value)
+{
+    return (value == 0u) ? 1u : 0u;
+}
+
+static uint8_t motor_buttons_wrap_u8(uint8_t value, uint8_t count, int8_t delta)
+{
+    if (count == 0u)
+    {
+        return 0u;
+    }
+
+    return (uint8_t)((value + count + delta) % count);
+}
+
+static uint8_t motor_buttons_clamp_u8(int32_t value, uint8_t min_value, uint8_t max_value)
+{
+    if (value < (int32_t)min_value)
+    {
+        return min_value;
+    }
+    if (value > (int32_t)max_value)
+    {
+        return max_value;
+    }
+    return (uint8_t)value;
+}
+
+static uint16_t motor_buttons_clamp_u16(int32_t value, uint16_t min_value, uint16_t max_value)
+{
+    if (value < (int32_t)min_value)
+    {
+        return min_value;
+    }
+    if (value > (int32_t)max_value)
+    {
+        return max_value;
+    }
+    return (uint16_t)value;
+}
+
+static uint32_t motor_buttons_clamp_u32(int64_t value, uint32_t min_value, uint32_t max_value)
+{
+    if (value < (int64_t)min_value)
+    {
+        return min_value;
+    }
+    if (value > (int64_t)max_value)
+    {
+        return max_value;
+    }
+    return (uint32_t)value;
+}
+
+static int16_t motor_buttons_clamp_s16(int32_t value, int16_t min_value, int16_t max_value)
+{
+    if (value < (int32_t)min_value)
+    {
+        return min_value;
+    }
+    if (value > (int32_t)max_value)
+    {
+        return max_value;
+    }
+    return (int16_t)value;
+}
+
+static void motor_buttons_commit_settings_and_refresh(void)
+{
+    /* ---------------------------------------------------------------------- */
+    /*  settings storage와 Motor state snapshot을 같은 사용자 조작 안에서      */
+    /*  함께 갱신한다.                                                         */
+    /*                                                                        */
+    /*  중요한 이유                                                            */
+    /*  - Motor_Settings_Commit() 는 shared APP_STATE settings를 갱신한다.     */
+    /*  - Motor_State snapshot은 다음 주기까지 과거 값일 수 있으므로           */
+    /*    즉시 refresh 해 주어야 UI row/value가 같은 프레임부터 따라온다.      */
+    /* ---------------------------------------------------------------------- */
+    Motor_Settings_Commit();
+    Motor_State_RefreshSettingsSnapshot();
+    Motor_State_RequestRedraw();
+}
 
 static void motor_buttons_open_drive_overlay(motor_state_t *state, uint32_t now_ms)
 {
@@ -160,19 +243,7 @@ static void motor_buttons_ensure_row_visible(motor_state_t *state, uint8_t row_c
 
 static uint8_t motor_buttons_get_settings_row_count(motor_screen_t screen)
 {
-    switch (screen)
-    {
-    case MOTOR_SCREEN_SETTINGS_ROOT:        return 8u;
-    case MOTOR_SCREEN_SETTINGS_DISPLAY:     return 13u;
-    case MOTOR_SCREEN_SETTINGS_GPS:         return 10u;
-    case MOTOR_SCREEN_SETTINGS_UNITS:       return 7u;
-    case MOTOR_SCREEN_SETTINGS_RECORDING:   return 6u;
-    case MOTOR_SCREEN_SETTINGS_DYNAMICS:    return 9u;
-    case MOTOR_SCREEN_SETTINGS_MAINTENANCE: return 8u;
-    case MOTOR_SCREEN_SETTINGS_OBD:         return 5u;
-    case MOTOR_SCREEN_SETTINGS_SYSTEM:      return 6u;
-    default:                                return 0u;
-    }
+    return Motor_Settings_GetRowCount(screen);
 }
 
 static void motor_buttons_move_selection(motor_state_t *state, uint8_t row_count, int8_t delta, uint8_t wrap_enabled)
@@ -213,6 +284,7 @@ static void motor_buttons_adjust_setting_row(int8_t delta)
 {
     motor_state_t *state;
     motor_settings_t *settings;
+    uint8_t changed;
 
     state = Motor_State_GetMutable();
     settings = Motor_Settings_GetMutable();
@@ -221,60 +293,72 @@ static void motor_buttons_adjust_setting_row(int8_t delta)
         return;
     }
 
+    changed = 1u;
+
     switch ((motor_screen_t)state->ui.screen)
     {
     case MOTOR_SCREEN_SETTINGS_DISPLAY:
         switch (state->ui.selected_index)
         {
         case 0u:
-            settings->display.brightness_mode = (uint8_t)((settings->display.brightness_mode + MOTOR_DISPLAY_BRIGHTNESS_COUNT + delta) % MOTOR_DISPLAY_BRIGHTNESS_COUNT);
+            settings->display.brightness_mode = motor_buttons_wrap_u8(settings->display.brightness_mode,
+                                                                      MOTOR_DISPLAY_BRIGHTNESS_COUNT,
+                                                                      delta);
             break;
         case 1u:
-            if (delta > 0)
-            {
-                if (settings->display.manual_brightness_percent < 100u) settings->display.manual_brightness_percent++;
-            }
-            else if (settings->display.manual_brightness_percent > 1u)
-            {
-                settings->display.manual_brightness_percent--;
-            }
+            settings->display.manual_brightness_percent = motor_buttons_clamp_u8((int32_t)settings->display.manual_brightness_percent + delta,
+                                                                                  1u,
+                                                                                  100u);
             break;
         case 2u:
-            settings->display.auto_continuous_bias_steps += delta;
-            if (settings->display.auto_continuous_bias_steps < -2) settings->display.auto_continuous_bias_steps = -2;
-            if (settings->display.auto_continuous_bias_steps > 2) settings->display.auto_continuous_bias_steps = 2;
+            settings->display.auto_continuous_bias_steps = motor_buttons_clamp_s16((int32_t)settings->display.auto_continuous_bias_steps + delta,
+                                                                                    -2,
+                                                                                    2);
             break;
         case 3u:
-            settings->display.auto_day_night_night_threshold_percent = (uint8_t)((int32_t)settings->display.auto_day_night_night_threshold_percent + delta);
+            settings->display.auto_day_night_night_threshold_percent = motor_buttons_clamp_u8((int32_t)settings->display.auto_day_night_night_threshold_percent + delta,
+                                                                                               1u,
+                                                                                               100u);
             break;
         case 4u:
-            settings->display.auto_day_night_super_night_threshold_percent = (uint8_t)((int32_t)settings->display.auto_day_night_super_night_threshold_percent + delta);
+            settings->display.auto_day_night_super_night_threshold_percent = motor_buttons_clamp_u8((int32_t)settings->display.auto_day_night_super_night_threshold_percent + delta,
+                                                                                                     1u,
+                                                                                                     100u);
             break;
         case 5u:
-            settings->display.auto_day_night_night_brightness_percent = (uint8_t)((int32_t)settings->display.auto_day_night_night_brightness_percent + delta);
+            settings->display.auto_day_night_night_brightness_percent = motor_buttons_clamp_u8((int32_t)settings->display.auto_day_night_night_brightness_percent + delta,
+                                                                                                1u,
+                                                                                                100u);
             break;
         case 6u:
-            settings->display.auto_day_night_super_night_brightness_percent = (uint8_t)((int32_t)settings->display.auto_day_night_super_night_brightness_percent + delta);
+            settings->display.auto_day_night_super_night_brightness_percent = motor_buttons_clamp_u8((int32_t)settings->display.auto_day_night_super_night_brightness_percent + delta,
+                                                                                                      1u,
+                                                                                                      100u);
             break;
         case 7u:
-            settings->display.contrast_raw = (uint8_t)((int32_t)settings->display.contrast_raw + (delta * 2));
+            settings->display.contrast_raw = motor_buttons_clamp_u8((int32_t)settings->display.contrast_raw + (delta * 2),
+                                                                    0u,
+                                                                    255u);
             break;
         case 8u:
-            settings->display.temperature_compensation_raw = (uint8_t)((settings->display.temperature_compensation_raw + 4 + delta) % 4);
+            settings->display.temperature_compensation_raw = motor_buttons_wrap_u8(settings->display.temperature_compensation_raw,
+                                                                                   4u,
+                                                                                   delta);
             break;
         case 9u:
-            settings->display.smart_update_enabled = (settings->display.smart_update_enabled == 0u) ? 1u : 0u;
+            settings->display.smart_update_enabled = motor_buttons_toggle_u8(settings->display.smart_update_enabled);
             break;
         case 10u:
-            settings->display.frame_limit_enabled = (settings->display.frame_limit_enabled == 0u) ? 1u : 0u;
+            settings->display.frame_limit_enabled = motor_buttons_toggle_u8(settings->display.frame_limit_enabled);
             break;
         case 11u:
-            settings->display.page_wrap_enabled = (settings->display.page_wrap_enabled == 0u) ? 1u : 0u;
+            settings->display.page_wrap_enabled = motor_buttons_toggle_u8(settings->display.page_wrap_enabled);
             break;
         case 12u:
-            settings->display.lock_while_moving = (settings->display.lock_while_moving == 0u) ? 1u : 0u;
+            settings->display.lock_while_moving = motor_buttons_toggle_u8(settings->display.lock_while_moving);
             break;
         default:
+            changed = 0u;
             break;
         }
         break;
@@ -298,32 +382,34 @@ static void motor_buttons_adjust_setting_row(int8_t delta)
                                         : (uint8_t)MOTOR_GPS_DYNAMIC_MODEL_AUTOMOTIVE;
             break;
         case 3u:
-            settings->gps.static_hold_enabled = (settings->gps.static_hold_enabled == 0u) ? 1u : 0u;
+            settings->gps.static_hold_enabled = motor_buttons_toggle_u8(settings->gps.static_hold_enabled);
             break;
         case 4u:
-            settings->gps.low_speed_course_filter_enabled = (settings->gps.low_speed_course_filter_enabled == 0u) ? 1u : 0u;
+            settings->gps.low_speed_course_filter_enabled = motor_buttons_toggle_u8(settings->gps.low_speed_course_filter_enabled);
             break;
         case 5u:
-            settings->gps.low_speed_velocity_filter_enabled = (settings->gps.low_speed_velocity_filter_enabled == 0u) ? 1u : 0u;
+            settings->gps.low_speed_velocity_filter_enabled = motor_buttons_toggle_u8(settings->gps.low_speed_velocity_filter_enabled);
             break;
         case 6u:
-            settings->gps.rtc_gps_sync_enabled = (settings->gps.rtc_gps_sync_enabled == 0u) ? 1u : 0u;
+            settings->gps.rtc_gps_sync_enabled = motor_buttons_toggle_u8(settings->gps.rtc_gps_sync_enabled);
             break;
         case 7u:
-            settings->gps.rtc_gps_sync_interval_min = (uint8_t)((int32_t)settings->gps.rtc_gps_sync_interval_min + delta);
-            if (settings->gps.rtc_gps_sync_interval_min < 1u) settings->gps.rtc_gps_sync_interval_min = 1u;
-            if (settings->gps.rtc_gps_sync_interval_min > 60u) settings->gps.rtc_gps_sync_interval_min = 60u;
+            settings->gps.rtc_gps_sync_interval_min = motor_buttons_clamp_u8((int32_t)settings->gps.rtc_gps_sync_interval_min + delta,
+                                                                             1u,
+                                                                             60u);
             break;
         case 8u:
-            settings->gps.breadcrumb_min_distance_m = (uint16_t)((int32_t)settings->gps.breadcrumb_min_distance_m + delta);
-            if (settings->gps.breadcrumb_min_distance_m < 2u) settings->gps.breadcrumb_min_distance_m = 2u;
-            if (settings->gps.breadcrumb_min_distance_m > 100u) settings->gps.breadcrumb_min_distance_m = 100u;
+            settings->gps.breadcrumb_min_distance_m = motor_buttons_clamp_u16((int32_t)settings->gps.breadcrumb_min_distance_m + delta,
+                                                                              2u,
+                                                                              100u);
             break;
         case 9u:
-            settings->gps.course_valid_min_speed_kmh_x10 = (uint16_t)((int32_t)settings->gps.course_valid_min_speed_kmh_x10 + (delta * 5));
-            if (settings->gps.course_valid_min_speed_kmh_x10 > 400u) settings->gps.course_valid_min_speed_kmh_x10 = 400u;
+            settings->gps.course_valid_min_speed_kmh_x10 = motor_buttons_clamp_u16((int32_t)settings->gps.course_valid_min_speed_kmh_x10 + (delta * 5),
+                                                                                    0u,
+                                                                                    400u);
             break;
         default:
+            changed = 0u;
             break;
         }
         break;
@@ -334,7 +420,7 @@ static void motor_buttons_adjust_setting_row(int8_t delta)
         case 0u:
         {
             uint8_t preset;
-            preset = (uint8_t)((settings->units.preset + MOTOR_UNIT_PRESET_COUNT + delta) % MOTOR_UNIT_PRESET_COUNT);
+            preset = motor_buttons_wrap_u8(settings->units.preset, MOTOR_UNIT_PRESET_COUNT, delta);
             if (preset == (uint8_t)MOTOR_UNIT_PRESET_CUSTOM)
             {
                 preset = (delta > 0) ? 0u : (uint8_t)MOTOR_UNIT_PRESET_IMPERIAL;
@@ -343,24 +429,25 @@ static void motor_buttons_adjust_setting_row(int8_t delta)
             break;
         }
         case 1u:
-            settings->units.speed = (uint8_t)((settings->units.speed + MOTOR_SPEED_UNIT_COUNT + delta) % MOTOR_SPEED_UNIT_COUNT);
+            settings->units.speed = motor_buttons_wrap_u8(settings->units.speed, MOTOR_SPEED_UNIT_COUNT, delta);
             break;
         case 2u:
-            settings->units.distance = (uint8_t)((settings->units.distance + MOTOR_DISTANCE_UNIT_COUNT + delta) % MOTOR_DISTANCE_UNIT_COUNT);
+            settings->units.distance = motor_buttons_wrap_u8(settings->units.distance, MOTOR_DISTANCE_UNIT_COUNT, delta);
             break;
         case 3u:
-            settings->units.altitude = (uint8_t)((settings->units.altitude + MOTOR_ALTITUDE_UNIT_COUNT + delta) % MOTOR_ALTITUDE_UNIT_COUNT);
+            settings->units.altitude = motor_buttons_wrap_u8(settings->units.altitude, MOTOR_ALTITUDE_UNIT_COUNT, delta);
             break;
         case 4u:
-            settings->units.temperature = (uint8_t)((settings->units.temperature + MOTOR_TEMP_UNIT_COUNT + delta) % MOTOR_TEMP_UNIT_COUNT);
+            settings->units.temperature = motor_buttons_wrap_u8(settings->units.temperature, MOTOR_TEMP_UNIT_COUNT, delta);
             break;
         case 5u:
-            settings->units.pressure = (uint8_t)((settings->units.pressure + MOTOR_PRESSURE_UNIT_COUNT + delta) % MOTOR_PRESSURE_UNIT_COUNT);
+            settings->units.pressure = motor_buttons_wrap_u8(settings->units.pressure, MOTOR_PRESSURE_UNIT_COUNT, delta);
             break;
         case 6u:
-            settings->units.economy = (uint8_t)((settings->units.economy + MOTOR_ECON_UNIT_COUNT + delta) % MOTOR_ECON_UNIT_COUNT);
+            settings->units.economy = motor_buttons_wrap_u8(settings->units.economy, MOTOR_ECON_UNIT_COUNT, delta);
             break;
         default:
+            changed = 0u;
             break;
         }
         break;
@@ -369,24 +456,29 @@ static void motor_buttons_adjust_setting_row(int8_t delta)
         switch (state->ui.selected_index)
         {
         case 0u:
-            settings->recording.auto_start_enabled = (settings->recording.auto_start_enabled == 0u) ? 1u : 0u;
+            settings->recording.auto_start_enabled = motor_buttons_toggle_u8(settings->recording.auto_start_enabled);
             break;
         case 1u:
-            settings->recording.auto_start_speed_kmh_x10 = (uint16_t)((int32_t)settings->recording.auto_start_speed_kmh_x10 + (delta * 5));
+            settings->recording.auto_start_speed_kmh_x10 = motor_buttons_clamp_u16((int32_t)settings->recording.auto_start_speed_kmh_x10 + (delta * 5),
+                                                                                    0u,
+                                                                                    400u);
             break;
         case 2u:
-            settings->recording.auto_stop_idle_seconds = (uint16_t)((int32_t)settings->recording.auto_stop_idle_seconds + (delta * 5));
+            settings->recording.auto_stop_idle_seconds = motor_buttons_clamp_u16((int32_t)settings->recording.auto_stop_idle_seconds + (delta * 5),
+                                                                                 0u,
+                                                                                 3600u);
             break;
         case 3u:
-            settings->recording.auto_pause_enabled = (settings->recording.auto_pause_enabled == 0u) ? 1u : 0u;
+            settings->recording.auto_pause_enabled = motor_buttons_toggle_u8(settings->recording.auto_pause_enabled);
             break;
         case 4u:
-            settings->recording.summary_popup_enabled = (settings->recording.summary_popup_enabled == 0u) ? 1u : 0u;
+            settings->recording.summary_popup_enabled = motor_buttons_toggle_u8(settings->recording.summary_popup_enabled);
             break;
         case 5u:
-            settings->recording.raw_imu_log_enabled = (settings->recording.raw_imu_log_enabled == 0u) ? 1u : 0u;
+            settings->recording.raw_imu_log_enabled = motor_buttons_toggle_u8(settings->recording.raw_imu_log_enabled);
             break;
         default:
+            changed = 0u;
             break;
         }
         break;
@@ -395,30 +487,120 @@ static void motor_buttons_adjust_setting_row(int8_t delta)
         switch (state->ui.selected_index)
         {
         case 0u:
-            settings->dynamics.auto_zero_on_boot = (settings->dynamics.auto_zero_on_boot == 0u) ? 1u : 0u;
+            settings->dynamics.enabled = motor_buttons_toggle_u8(settings->dynamics.enabled);
             break;
         case 1u:
-            settings->dynamics.gnss_aid_enabled = (settings->dynamics.gnss_aid_enabled == 0u) ? 1u : 0u;
+            settings->dynamics.auto_zero_on_boot = motor_buttons_toggle_u8(settings->dynamics.auto_zero_on_boot);
             break;
         case 2u:
-            settings->dynamics.obd_aid_enabled = (settings->dynamics.obd_aid_enabled == 0u) ? 1u : 0u;
+            settings->dynamics.gnss_aid_enabled = motor_buttons_toggle_u8(settings->dynamics.gnss_aid_enabled);
             break;
         case 3u:
-            settings->dynamics.mount_forward_axis = (uint8_t)((settings->dynamics.mount_forward_axis + 6u + delta) % 6u);
+            settings->dynamics.obd_aid_enabled = motor_buttons_toggle_u8(settings->dynamics.obd_aid_enabled);
             break;
         case 4u:
-            settings->dynamics.mount_left_axis = (uint8_t)((settings->dynamics.mount_left_axis + 6u + delta) % 6u);
+            settings->dynamics.mount_forward_axis = motor_buttons_wrap_u8(settings->dynamics.mount_forward_axis, 6u, delta);
             break;
         case 5u:
-            settings->dynamics.mount_yaw_trim_deg_x10 = (int16_t)((int32_t)settings->dynamics.mount_yaw_trim_deg_x10 + delta);
+            settings->dynamics.mount_left_axis = motor_buttons_wrap_u8(settings->dynamics.mount_left_axis, 6u, delta);
             break;
         case 6u:
-            settings->dynamics.lean_display_tau_ms = (uint16_t)((int32_t)settings->dynamics.lean_display_tau_ms + (delta * 10));
+            settings->dynamics.mount_yaw_trim_deg_x10 = motor_buttons_clamp_s16((int32_t)settings->dynamics.mount_yaw_trim_deg_x10 + delta,
+                                                                                -300,
+                                                                                300);
             break;
         case 7u:
-            settings->dynamics.accel_display_tau_ms = (uint16_t)((int32_t)settings->dynamics.accel_display_tau_ms + (delta * 10));
+            settings->dynamics.imu_gravity_tau_ms = motor_buttons_clamp_u16((int32_t)settings->dynamics.imu_gravity_tau_ms + (delta * 10),
+                                                                            50u,
+                                                                            3000u);
+            break;
+        case 8u:
+            settings->dynamics.imu_linear_tau_ms = motor_buttons_clamp_u16((int32_t)settings->dynamics.imu_linear_tau_ms + (delta * 10),
+                                                                           20u,
+                                                                           3000u);
+            break;
+        case 9u:
+            settings->dynamics.imu_attitude_accel_gate_mg = motor_buttons_clamp_u16((int32_t)settings->dynamics.imu_attitude_accel_gate_mg + (delta * 5),
+                                                                                     40u,
+                                                                                     400u);
+            break;
+        case 10u:
+            settings->dynamics.imu_jerk_gate_mg_per_s = motor_buttons_clamp_u32((int64_t)settings->dynamics.imu_jerk_gate_mg_per_s + ((int64_t)delta * 100),
+                                                                                500u,
+                                                                                10000u);
+            break;
+        case 11u:
+            settings->dynamics.imu_predict_min_trust_permille = motor_buttons_clamp_u16((int32_t)settings->dynamics.imu_predict_min_trust_permille + (delta * 25),
+                                                                                        0u,
+                                                                                        1000u);
+            break;
+        case 12u:
+            settings->dynamics.imu_stale_timeout_ms = motor_buttons_clamp_u16((int32_t)settings->dynamics.imu_stale_timeout_ms + (delta * 10),
+                                                                              50u,
+                                                                              2000u);
+            break;
+        case 13u:
+            settings->dynamics.output_deadband_mg = motor_buttons_clamp_u16((int32_t)settings->dynamics.output_deadband_mg + (delta * 5),
+                                                                            0u,
+                                                                            300u);
+            break;
+        case 14u:
+            settings->dynamics.output_clip_mg = motor_buttons_clamp_u16((int32_t)settings->dynamics.output_clip_mg + (delta * 10),
+                                                                        300u,
+                                                                        3000u);
+            break;
+        case 15u:
+            settings->dynamics.lean_display_tau_ms = motor_buttons_clamp_u16((int32_t)settings->dynamics.lean_display_tau_ms + (delta * 10),
+                                                                             20u,
+                                                                             2000u);
+            break;
+        case 16u:
+            settings->dynamics.grade_display_tau_ms = motor_buttons_clamp_u16((int32_t)settings->dynamics.grade_display_tau_ms + (delta * 10),
+                                                                              20u,
+                                                                              2000u);
+            break;
+        case 17u:
+            settings->dynamics.accel_display_tau_ms = motor_buttons_clamp_u16((int32_t)settings->dynamics.accel_display_tau_ms + (delta * 10),
+                                                                              20u,
+                                                                              2000u);
+            break;
+        case 18u:
+            settings->dynamics.gnss_min_speed_kmh_x10 = motor_buttons_clamp_u16((int32_t)settings->dynamics.gnss_min_speed_kmh_x10 + (delta * 5),
+                                                                                0u,
+                                                                                500u);
+            break;
+        case 19u:
+            settings->dynamics.gnss_max_speed_acc_kmh_x10 = motor_buttons_clamp_u16((int32_t)settings->dynamics.gnss_max_speed_acc_kmh_x10 + (delta * 5),
+                                                                                    10u,
+                                                                                    300u);
+            break;
+        case 20u:
+            settings->dynamics.gnss_max_head_acc_deg_x10 = motor_buttons_clamp_u16((int32_t)settings->dynamics.gnss_max_head_acc_deg_x10 + (delta * 5),
+                                                                                   10u,
+                                                                                   450u);
+            break;
+        case 21u:
+            settings->dynamics.gnss_bias_tau_ms = motor_buttons_clamp_u16((int32_t)settings->dynamics.gnss_bias_tau_ms + (delta * 50),
+                                                                          100u,
+                                                                          5000u);
+            break;
+        case 22u:
+            settings->dynamics.gnss_outlier_gate_mg = motor_buttons_clamp_u16((int32_t)settings->dynamics.gnss_outlier_gate_mg + (delta * 10),
+                                                                              50u,
+                                                                              1000u);
+            break;
+        case 23u:
+            settings->dynamics.obd_stale_timeout_ms = motor_buttons_clamp_u16((int32_t)settings->dynamics.obd_stale_timeout_ms + (delta * 10),
+                                                                              50u,
+                                                                              2000u);
+            break;
+        case 24u:
+        case 25u:
+        case 26u:
+            changed = 0u;
             break;
         default:
+            changed = 0u;
             break;
         }
         break;
@@ -427,12 +609,17 @@ static void motor_buttons_adjust_setting_row(int8_t delta)
         switch (state->ui.selected_index)
         {
         case 0u:
-            settings->maintenance.due_soon_distance_m = (uint32_t)((int32_t)settings->maintenance.due_soon_distance_m + (delta * 1000));
+            settings->maintenance.due_soon_distance_m = motor_buttons_clamp_u32((int64_t)settings->maintenance.due_soon_distance_m + ((int64_t)delta * 1000),
+                                                                                0u,
+                                                                                500000u);
             break;
         case 1u:
-            settings->maintenance.due_soon_days = (uint16_t)((int32_t)settings->maintenance.due_soon_days + delta);
+            settings->maintenance.due_soon_days = motor_buttons_clamp_u16((int32_t)settings->maintenance.due_soon_days + delta,
+                                                                          0u,
+                                                                          3650u);
             break;
         default:
+            changed = 0u;
             break;
         }
         break;
@@ -441,7 +628,7 @@ static void motor_buttons_adjust_setting_row(int8_t delta)
         switch (state->ui.selected_index)
         {
         case 0u:
-            settings->obd.autoconnect_enabled = (settings->obd.autoconnect_enabled == 0u) ? 1u : 0u;
+            settings->obd.autoconnect_enabled = motor_buttons_toggle_u8(settings->obd.autoconnect_enabled);
             break;
         case 1u:
             settings->obd.preferred_speed_source = (settings->obd.preferred_speed_source == (uint8_t)APP_BIKE_SPEED_SOURCE_GNSS)
@@ -449,12 +636,17 @@ static void motor_buttons_adjust_setting_row(int8_t delta)
                                                  : (uint8_t)APP_BIKE_SPEED_SOURCE_GNSS;
             break;
         case 2u:
-            settings->obd.coolant_warn_temp_c_x10 = (uint16_t)((int32_t)settings->obd.coolant_warn_temp_c_x10 + (delta * 5));
+            settings->obd.coolant_warn_temp_c_x10 = motor_buttons_clamp_u16((int32_t)settings->obd.coolant_warn_temp_c_x10 + (delta * 5),
+                                                                            500u,
+                                                                            1500u);
             break;
         case 3u:
-            settings->obd.shift_light_rpm = (uint16_t)((int32_t)settings->obd.shift_light_rpm + (delta * 250));
+            settings->obd.shift_light_rpm = motor_buttons_clamp_u16((int32_t)settings->obd.shift_light_rpm + (delta * 250),
+                                                                    1000u,
+                                                                    20000u);
             break;
         default:
+            changed = 0u;
             break;
         }
         break;
@@ -463,25 +655,29 @@ static void motor_buttons_adjust_setting_row(int8_t delta)
         switch (state->ui.selected_index)
         {
         case 0u:
-            settings->system.menu_wrap_enabled = (settings->system.menu_wrap_enabled == 0u) ? 1u : 0u;
+            settings->system.menu_wrap_enabled = motor_buttons_toggle_u8(settings->system.menu_wrap_enabled);
             break;
         case 1u:
-            settings->system.ride_summary_popup_enabled = (settings->system.ride_summary_popup_enabled == 0u) ? 1u : 0u;
+            settings->system.ride_summary_popup_enabled = motor_buttons_toggle_u8(settings->system.ride_summary_popup_enabled);
             break;
         case 2u:
-            settings->system.show_debug_stubs = (settings->system.show_debug_stubs == 0u) ? 1u : 0u;
+            settings->system.show_debug_stubs = motor_buttons_toggle_u8(settings->system.show_debug_stubs);
             break;
         default:
+            changed = 0u;
             break;
         }
         break;
 
     default:
+        changed = 0u;
         break;
     }
 
-    Motor_Settings_Commit();
-    Motor_State_RequestRedraw();
+    if (changed != 0u)
+    {
+        motor_buttons_commit_settings_and_refresh();
+    }
 }
 
 static void motor_buttons_execute_setting_action(void)
@@ -512,10 +708,22 @@ static void motor_buttons_execute_setting_action(void)
         break;
 
     case MOTOR_SCREEN_SETTINGS_DYNAMICS:
-        if (state->ui.selected_index == 8u)
+        switch (state->ui.selected_index)
         {
+        case 24u:
             Motor_Dynamics_RequestZeroCapture();
-            Motor_State_ShowToast("ZERO CAPTURE", 1200u);
+            Motor_State_ShowToast("ZERO REQ", 1200u);
+            break;
+        case 25u:
+            Motor_Dynamics_RequestHardRezero();
+            Motor_State_ShowToast("HARD REZERO", 1200u);
+            break;
+        case 26u:
+            Motor_Dynamics_RequestGyroBiasCalibration();
+            Motor_State_ShowToast("GYRO CAL", 1200u);
+            break;
+        default:
+            break;
         }
         break;
 
@@ -546,6 +754,7 @@ static void motor_buttons_execute_setting_action(void)
         if (state->ui.selected_index == 3u)
         {
             Motor_Settings_ResetToDefaults();
+            motor_buttons_commit_settings_and_refresh();
             Motor_State_ShowToast("FACTORY", 1200u);
         }
         break;

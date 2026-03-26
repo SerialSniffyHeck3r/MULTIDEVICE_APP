@@ -76,6 +76,14 @@ typedef enum
     VARIO_MENU_ITEM_DAMPING,
     VARIO_MENU_ITEM_INT_AVG,
     VARIO_MENU_ITEM_FLIGHT_START,
+    VARIO_MENU_ITEM_MANUAL_MC,
+    VARIO_MENU_ITEM_FINAL_GLIDE_MARGIN,
+    VARIO_MENU_ITEM_POLAR_V1,
+    VARIO_MENU_ITEM_POLAR_S1,
+    VARIO_MENU_ITEM_POLAR_V2,
+    VARIO_MENU_ITEM_POLAR_S2,
+    VARIO_MENU_ITEM_POLAR_V3,
+    VARIO_MENU_ITEM_POLAR_S3,
     VARIO_MENU_ITEM_VARIO_SCALE,
     VARIO_MENU_ITEM_ALT2_CAPTURE,
     VARIO_MENU_ITEM_ALT3_RESET,
@@ -139,6 +147,14 @@ static const vario_menu_item_t s_vario_category_flight_items[] = {
     VARIO_MENU_ITEM_HEADING_SOURCE,
     VARIO_MENU_ITEM_INT_AVG,
     VARIO_MENU_ITEM_FLIGHT_START,
+    VARIO_MENU_ITEM_MANUAL_MC,
+    VARIO_MENU_ITEM_FINAL_GLIDE_MARGIN,
+    VARIO_MENU_ITEM_POLAR_V1,
+    VARIO_MENU_ITEM_POLAR_S1,
+    VARIO_MENU_ITEM_POLAR_V2,
+    VARIO_MENU_ITEM_POLAR_S2,
+    VARIO_MENU_ITEM_POLAR_V3,
+    VARIO_MENU_ITEM_POLAR_S3,
     VARIO_MENU_ITEM_VARIO_SCALE,
     VARIO_MENU_ITEM_ALT2_CAPTURE,
     VARIO_MENU_ITEM_ALT3_RESET,
@@ -304,6 +320,66 @@ static void vario_settings_sanitize_audio_thresholds(void)
     if (s_vario_settings.sink_continuous_off_threshold_cms < s_vario_settings.sink_continuous_threshold_cms)
     {
         s_vario_settings.sink_continuous_off_threshold_cms = s_vario_settings.sink_continuous_threshold_cms;
+    }
+}
+
+static void vario_settings_sanitize_glide_computer(void)
+{
+    /* ---------------------------------------------------------------------- */
+    /*  3점 polar + 수동 MC 계약                                               */
+    /*                                                                        */
+    /*  - speed1 < speed2 < speed3                                            */
+    /*  - sink1 <= sink2 <= sink3                                             */
+    /*  - 각 속도 포인트는 최소 5.0 km/h 이상 간격을 둔다.                    */
+    /*  - sink 값은 +cm/s magnitude 로 저장한다.                              */
+    /* ---------------------------------------------------------------------- */
+    s_vario_settings.manual_mccready_cms =
+        (int16_t)vario_settings_clamp_s32((int32_t)s_vario_settings.manual_mccready_cms,
+                                          0,
+                                          500);
+    s_vario_settings.final_glide_safety_margin_m =
+        vario_settings_clamp_u16(s_vario_settings.final_glide_safety_margin_m,
+                                 0u,
+                                 500u);
+
+    s_vario_settings.polar_speed1_kmh_x10 =
+        vario_settings_clamp_u16(s_vario_settings.polar_speed1_kmh_x10, 300u, 1200u);
+    s_vario_settings.polar_speed2_kmh_x10 =
+        vario_settings_clamp_u16(s_vario_settings.polar_speed2_kmh_x10, 350u, 1600u);
+    s_vario_settings.polar_speed3_kmh_x10 =
+        vario_settings_clamp_u16(s_vario_settings.polar_speed3_kmh_x10, 400u, 2200u);
+
+    if (s_vario_settings.polar_speed2_kmh_x10 <= (uint16_t)(s_vario_settings.polar_speed1_kmh_x10 + 50u))
+    {
+        s_vario_settings.polar_speed2_kmh_x10 = (uint16_t)(s_vario_settings.polar_speed1_kmh_x10 + 50u);
+    }
+    if (s_vario_settings.polar_speed3_kmh_x10 <= (uint16_t)(s_vario_settings.polar_speed2_kmh_x10 + 50u))
+    {
+        s_vario_settings.polar_speed3_kmh_x10 = (uint16_t)(s_vario_settings.polar_speed2_kmh_x10 + 50u);
+    }
+    s_vario_settings.polar_speed3_kmh_x10 =
+        vario_settings_clamp_u16(s_vario_settings.polar_speed3_kmh_x10, 400u, 2200u);
+
+    s_vario_settings.polar_sink1_cms =
+        (int16_t)vario_settings_clamp_s32((int32_t)s_vario_settings.polar_sink1_cms,
+                                          30,
+                                          300);
+    s_vario_settings.polar_sink2_cms =
+        (int16_t)vario_settings_clamp_s32((int32_t)s_vario_settings.polar_sink2_cms,
+                                          40,
+                                          500);
+    s_vario_settings.polar_sink3_cms =
+        (int16_t)vario_settings_clamp_s32((int32_t)s_vario_settings.polar_sink3_cms,
+                                          60,
+                                          800);
+
+    if (s_vario_settings.polar_sink2_cms < s_vario_settings.polar_sink1_cms)
+    {
+        s_vario_settings.polar_sink2_cms = s_vario_settings.polar_sink1_cms;
+    }
+    if (s_vario_settings.polar_sink3_cms < s_vario_settings.polar_sink2_cms)
+    {
+        s_vario_settings.polar_sink3_cms = s_vario_settings.polar_sink2_cms;
     }
 }
 
@@ -744,6 +820,29 @@ static void vario_settings_format_speed_threshold(char *buf, size_t buf_len, uin
     snprintf(buf, buf_len, "%.1f %s", (double)speed_disp, Vario_Settings_GetSpeedUnitText());
 }
 
+static void vario_settings_format_positive_sink(char *buf, size_t buf_len, int16_t sink_cms)
+{
+    float sink_mps;
+    float disp;
+
+    if ((buf == NULL) || (buf_len == 0u))
+    {
+        return;
+    }
+
+    sink_mps = ((float)sink_cms) * 0.01f;
+    disp = Vario_Settings_VSpeedMpsToDisplayFloat(sink_mps);
+
+    if (s_vario_settings.vspeed_unit == VARIO_VSPEED_UNIT_FPM)
+    {
+        snprintf(buf, buf_len, "%ld %s", (long)lroundf(disp), Vario_Settings_GetVSpeedUnitText());
+    }
+    else
+    {
+        snprintf(buf, buf_len, "%.2f %s", (double)disp, Vario_Settings_GetVSpeedUnitText());
+    }
+}
+
 static void vario_settings_format_alt2_ref(char *buf, size_t buf_len, int32_t altitude_cm)
 {
     if ((buf == NULL) || (buf_len == 0u))
@@ -811,6 +910,14 @@ void Vario_Settings_Init(void)
     s_vario_settings.sink_continuous_threshold_cms = -250;
     s_vario_settings.sink_continuous_off_threshold_cms = -180;
     s_vario_settings.flight_start_speed_kmh_x10    = 50u;
+    s_vario_settings.manual_mccready_cms           = 150;
+    s_vario_settings.final_glide_safety_margin_m   = 120u;
+    s_vario_settings.polar_speed1_kmh_x10          = 700u;
+    s_vario_settings.polar_sink1_cms               = 65;
+    s_vario_settings.polar_speed2_kmh_x10          = 950u;
+    s_vario_settings.polar_sink2_cms               = 78;
+    s_vario_settings.polar_speed3_kmh_x10          = 1300u;
+    s_vario_settings.polar_sink3_cms               = 120;
     s_vario_settings.log_enabled                   = 1u;
     s_vario_settings.log_interval_seconds          = 1u;
     s_vario_settings.bluetooth_echo_enabled        = 0u;
@@ -829,6 +936,7 @@ void Vario_Settings_Init(void)
     s_vario_settings.show_gs_bar                   = 1u;
 
     vario_settings_sanitize_audio_thresholds();
+    vario_settings_sanitize_glide_computer();
 }
 
 const vario_settings_t *Vario_Settings_Get(void)
@@ -1929,6 +2037,50 @@ void Vario_Settings_GetCategoryItemText(vario_settings_category_t category,
             vario_settings_format_speed_threshold(out_value, value_len, settings->flight_start_speed_kmh_x10);
             break;
 
+        case VARIO_MENU_ITEM_MANUAL_MC:
+            snprintf(out_label, label_len, "Manual MC");
+            vario_settings_format_positive_sink(out_value, value_len, settings->manual_mccready_cms);
+            break;
+
+        case VARIO_MENU_ITEM_FINAL_GLIDE_MARGIN:
+            snprintf(out_label, label_len, "FG Margin");
+            snprintf(out_value,
+                     value_len,
+                     "%ld %s",
+                     (long)Vario_Settings_AltitudeMetersToDisplayRounded((float)settings->final_glide_safety_margin_m),
+                     Vario_Settings_GetAltitudeUnitText());
+            break;
+
+        case VARIO_MENU_ITEM_POLAR_V1:
+            snprintf(out_label, label_len, "Polar V1");
+            vario_settings_format_speed_threshold(out_value, value_len, settings->polar_speed1_kmh_x10);
+            break;
+
+        case VARIO_MENU_ITEM_POLAR_S1:
+            snprintf(out_label, label_len, "Polar S1");
+            vario_settings_format_positive_sink(out_value, value_len, settings->polar_sink1_cms);
+            break;
+
+        case VARIO_MENU_ITEM_POLAR_V2:
+            snprintf(out_label, label_len, "Polar V2");
+            vario_settings_format_speed_threshold(out_value, value_len, settings->polar_speed2_kmh_x10);
+            break;
+
+        case VARIO_MENU_ITEM_POLAR_S2:
+            snprintf(out_label, label_len, "Polar S2");
+            vario_settings_format_positive_sink(out_value, value_len, settings->polar_sink2_cms);
+            break;
+
+        case VARIO_MENU_ITEM_POLAR_V3:
+            snprintf(out_label, label_len, "Polar V3");
+            vario_settings_format_speed_threshold(out_value, value_len, settings->polar_speed3_kmh_x10);
+            break;
+
+        case VARIO_MENU_ITEM_POLAR_S3:
+            snprintf(out_label, label_len, "Polar S3");
+            vario_settings_format_positive_sink(out_value, value_len, settings->polar_sink3_cms);
+            break;
+
         case VARIO_MENU_ITEM_VARIO_SCALE:
         {
             uint8_t vario_scale_x10;
@@ -2179,6 +2331,86 @@ void Vario_Settings_AdjustCategoryItem(vario_settings_category_t category,
 
         case VARIO_MENU_ITEM_FLIGHT_START:
             Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_FLIGHT_START_SPEED, direction);
+            break;
+
+        case VARIO_MENU_ITEM_MANUAL_MC:
+            s_vario_settings.manual_mccready_cms =
+                (int16_t)(s_vario_settings.manual_mccready_cms + ((int16_t)direction * 10));
+            vario_settings_sanitize_glide_computer();
+            break;
+
+        case VARIO_MENU_ITEM_FINAL_GLIDE_MARGIN:
+        {
+            int32_t next_margin_m;
+
+            next_margin_m = (int32_t)s_vario_settings.final_glide_safety_margin_m + ((int32_t)direction * 10);
+            if (next_margin_m < 0)
+            {
+                next_margin_m = 0;
+            }
+            s_vario_settings.final_glide_safety_margin_m = (uint16_t)next_margin_m;
+            vario_settings_sanitize_glide_computer();
+            break;
+        }
+
+        case VARIO_MENU_ITEM_POLAR_V1:
+        {
+            int32_t next_speed_x10;
+
+            next_speed_x10 = (int32_t)s_vario_settings.polar_speed1_kmh_x10 + ((int32_t)direction * 20);
+            if (next_speed_x10 < 0)
+            {
+                next_speed_x10 = 0;
+            }
+            s_vario_settings.polar_speed1_kmh_x10 = (uint16_t)next_speed_x10;
+            vario_settings_sanitize_glide_computer();
+            break;
+        }
+
+        case VARIO_MENU_ITEM_POLAR_S1:
+            s_vario_settings.polar_sink1_cms =
+                (int16_t)(s_vario_settings.polar_sink1_cms + ((int16_t)direction * 5));
+            vario_settings_sanitize_glide_computer();
+            break;
+
+        case VARIO_MENU_ITEM_POLAR_V2:
+        {
+            int32_t next_speed_x10;
+
+            next_speed_x10 = (int32_t)s_vario_settings.polar_speed2_kmh_x10 + ((int32_t)direction * 20);
+            if (next_speed_x10 < 0)
+            {
+                next_speed_x10 = 0;
+            }
+            s_vario_settings.polar_speed2_kmh_x10 = (uint16_t)next_speed_x10;
+            vario_settings_sanitize_glide_computer();
+            break;
+        }
+
+        case VARIO_MENU_ITEM_POLAR_S2:
+            s_vario_settings.polar_sink2_cms =
+                (int16_t)(s_vario_settings.polar_sink2_cms + ((int16_t)direction * 5));
+            vario_settings_sanitize_glide_computer();
+            break;
+
+        case VARIO_MENU_ITEM_POLAR_V3:
+        {
+            int32_t next_speed_x10;
+
+            next_speed_x10 = (int32_t)s_vario_settings.polar_speed3_kmh_x10 + ((int32_t)direction * 20);
+            if (next_speed_x10 < 0)
+            {
+                next_speed_x10 = 0;
+            }
+            s_vario_settings.polar_speed3_kmh_x10 = (uint16_t)next_speed_x10;
+            vario_settings_sanitize_glide_computer();
+            break;
+        }
+
+        case VARIO_MENU_ITEM_POLAR_S3:
+            s_vario_settings.polar_sink3_cms =
+                (int16_t)(s_vario_settings.polar_sink3_cms + ((int16_t)direction * 5));
+            vario_settings_sanitize_glide_computer();
             break;
 
         case VARIO_MENU_ITEM_VARIO_SCALE:

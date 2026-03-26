@@ -340,14 +340,52 @@ typedef struct
 /* -------------------------------------------------------------------------- */
 typedef struct
 {
+    /* ---------------------------------------------------------------------- */
+    /*  서비스 활성 / 외부 aid 정책                                            */
+    /* ---------------------------------------------------------------------- */
+    uint8_t  enabled;
     uint8_t  auto_zero_on_boot;
     uint8_t  gnss_aid_enabled;
     uint8_t  obd_aid_enabled;
+
+    /* ---------------------------------------------------------------------- */
+    /*  장착 축 / yaw trim                                                      */
+    /* ---------------------------------------------------------------------- */
     uint8_t  mount_forward_axis;                /* app_bike_axis_t raw                   */
     uint8_t  mount_left_axis;                   /* app_bike_axis_t raw                   */
     int16_t  mount_yaw_trim_deg_x10;
+
+    /* ---------------------------------------------------------------------- */
+    /*  shared BIKE_DYNAMICS tuning mirror                                     */
+    /*                                                                          */
+    /*  중요한 ownership 규칙                                                   */
+    /*  - canonical low-level owner는 APP_STATE.settings.bike 이다.            */
+    /*  - Motor_App는 rider-facing settings 저장소를 별도로 유지하되,          */
+    /*    Commit 시 아래 항목들을 shared setting으로 그대로 미러링한다.        */
+    /*  - 따라서 high-level UI는 Motor settings만 수정하고, 실제 estimator는   */
+    /*    shared BIKE_DYNAMICS service가 그 값을 사용한다.                     */
+    /* ---------------------------------------------------------------------- */
+    uint16_t imu_accel_lsb_per_g;
+    uint16_t imu_gyro_lsb_per_dps_x10;
+    uint16_t imu_gravity_tau_ms;
+    uint16_t imu_linear_tau_ms;
+    uint16_t imu_attitude_accel_gate_mg;
+    uint16_t imu_jerk_gate_mg_per_s;
+    uint16_t imu_predict_min_trust_permille;
+    uint16_t imu_stale_timeout_ms;
+
+    uint16_t output_deadband_mg;
+    uint16_t output_clip_mg;
     uint16_t lean_display_tau_ms;
+    uint16_t grade_display_tau_ms;
     uint16_t accel_display_tau_ms;
+
+    uint16_t gnss_min_speed_kmh_x10;
+    uint16_t gnss_max_speed_acc_kmh_x10;
+    uint16_t gnss_max_head_acc_deg_x10;
+    uint16_t gnss_bias_tau_ms;
+    uint16_t gnss_outlier_gate_mg;
+    uint16_t obd_stale_timeout_ms;
 } motor_dynamics_settings_t;
 
 /* -------------------------------------------------------------------------- */
@@ -462,15 +500,55 @@ typedef struct
 /* -------------------------------------------------------------------------- */
 typedef struct
 {
+    /* ---------------------------------------------------------------------- */
+    /*  low-level canonical flags / routing                                     */
+    /*                                                                          */
+    /*  이 구조체는 intentionally two-layer shape를 가진다.                    */
+    /*                                                                          */
+    /*  1) est_*                                                               */
+    /*     - shared BIKE_DYNAMICS가 publish 한 canonical 추정 결과             */
+    /*     - logger / peak detector / future post-ride analysis 가 사용        */
+    /*                                                                          */
+    /*  2) display-facing alias fields                                          */
+    /*     - 현재 UI가 바로 쓰는 bank_deg_x10 / lat_accel_mg 등                */
+    /*     - 현 시점에서는 est_*를 그대로 mirror 하되,                         */
+    /*       이후 UI-only smoothing을 넣더라도 logger는 영향을 받지 않게       */
+    /*       구조를 미리 분리해 둔다.                                           */
+    /* ---------------------------------------------------------------------- */
     bool     initialized;
     bool     zero_valid;
     bool     imu_valid;
+    bool     gnss_aid_valid;
     bool     gnss_heading_valid;
     bool     obd_speed_valid;
     uint16_t confidence_permille;
     uint8_t  speed_source;                         /* app_bike_speed_source_t raw        */
-    uint8_t  heading_source;                       /* app_bike_heading_source_t raw      */
+    uint8_t  estimator_mode;                      /* app_bike_estimator_mode_t raw      */
+    uint8_t  heading_source;                      /* app_bike_heading_source_t raw      */
+    uint8_t  reserved0;
+    uint32_t last_source_update_ms;
+    uint32_t last_zero_capture_ms;
 
+    /* ---------------------------------------------------------------------- */
+    /*  canonical estimator outputs                                             */
+    /* ---------------------------------------------------------------------- */
+    int16_t  est_bank_deg_x10;
+    int16_t  est_grade_deg_x10;
+    int16_t  est_bank_rate_dps_x10;
+    int16_t  est_grade_rate_dps_x10;
+    int16_t  est_heading_deg_x10;
+    int16_t  est_yaw_rate_dps_x10;
+
+    int32_t  est_lat_accel_mg;
+    int32_t  est_lon_accel_mg;
+    int32_t  est_lat_accel_imu_mg;
+    int32_t  est_lon_accel_imu_mg;
+    int32_t  lat_bias_mg;
+    int32_t  lon_bias_mg;
+
+    /* ---------------------------------------------------------------------- */
+    /*  display-facing mirror                                                   */
+    /* ---------------------------------------------------------------------- */
     int16_t  bank_deg_x10;
     int16_t  grade_deg_x10;
     int16_t  bank_rate_dps_x10;
@@ -482,9 +560,10 @@ typedef struct
     int32_t  lon_accel_mg;
     int32_t  lat_accel_imu_mg;
     int32_t  lon_accel_imu_mg;
-    int32_t  lat_bias_mg;
-    int32_t  lon_bias_mg;
 
+    /* ---------------------------------------------------------------------- */
+    /*  session peaks / history                                                 */
+    /* ---------------------------------------------------------------------- */
     int16_t  max_left_bank_deg_x10;
     int16_t  max_right_bank_deg_x10;
     int32_t  max_left_lat_mg;

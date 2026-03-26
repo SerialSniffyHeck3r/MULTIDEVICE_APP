@@ -953,30 +953,43 @@ static void vario_display_format_peak_vario(char *buf, size_t buf_len, float var
 
 static void vario_display_format_glide_ratio(char *buf, size_t buf_len, const vario_runtime_t *rt)
 {
-    float sink_mps;
-    float glide_ratio;
-
     if ((buf == NULL) || (buf_len == 0u))
     {
         return;
     }
 
-    if (rt == NULL)
+    if ((rt == NULL) || (rt->glide_ratio_slow_valid == false))
     {
         snprintf(buf, buf_len, "--.-");
         return;
     }
 
-    sink_mps = -rt->baro_vario_mps;
-    if ((sink_mps <= 0.15f) || (rt->ground_speed_kmh <= 1.0f))
+    snprintf(buf,
+             buf_len,
+             "%.1f",
+             (double)vario_display_clampf(rt->glide_ratio_slow, 0.0f, 99.9f));
+}
+
+static void vario_display_format_glide_ratio_value(char *buf,
+                                                   size_t buf_len,
+                                                   bool valid,
+                                                   float glide_ratio)
+{
+    if ((buf == NULL) || (buf_len == 0u))
+    {
+        return;
+    }
+
+    if (valid == false)
     {
         snprintf(buf, buf_len, "--.-");
         return;
     }
 
-    glide_ratio = (rt->ground_speed_kmh / 3.6f) / sink_mps;
-    glide_ratio = vario_display_clampf(glide_ratio, 0.0f, 99.9f);
-    snprintf(buf, buf_len, "%.1f", (double)glide_ratio);
+    snprintf(buf,
+             buf_len,
+             "%.1f",
+             (double)vario_display_clampf(glide_ratio, 0.0f, 99.9f));
 }
 
 static void vario_display_format_nav_distance(char *buf,
@@ -2179,9 +2192,16 @@ static void vario_display_draw_top_left_metrics(u8g2_t *u8g2,
                                                 const vario_runtime_t *rt)
 {
     char    glide_text[12];
+    char    inst_text[12];
+    char    slow_text[12];
+    char    avg_text[12];
+    char    line_text[20];
     int16_t x;
     int16_t top_y;
     int16_t suffix_x;
+    int16_t main_h;
+    int16_t line_h;
+    int16_t line_y;
 
     if ((u8g2 == NULL) || (v == NULL) || (rt == NULL))
     {
@@ -2193,13 +2213,23 @@ static void vario_display_draw_top_left_metrics(u8g2_t *u8g2,
 
     /* ---------------------------------------------------------------------- */
     /* 좌상단 활공비                                                           */
-    /* - 다른 UI 는 그대로 두고, 활공비 블록만 "상단에 딱 붙는" top align 으로    */
-    /*   다시 그린다.                                                          */
-    /* - 값/":1" 둘 다 ALT2/ALT3 와 같은 계열 글꼴을 유지한다.                  */
-    /* - baseline draw 를 쓰면 글꼴 ascent 만큼 아래로 내려가 보이므로,           */
-    /*   여기서는 font position 을 top 으로 바꿔 정확히 화면 상단에 맞춘다.      */
+    /* - main value 는 slow glide ratio 를 사용한다.                           */
+    /* - 바로 아래에 Inst / Slow / Avg 3개를 모두 작게 붙여서                 */
+    /*   현재 path 의미를 눈으로 바로 검증할 수 있게 한다.                    */
     /* ---------------------------------------------------------------------- */
     vario_display_format_glide_ratio(glide_text, sizeof(glide_text), rt);
+    vario_display_format_glide_ratio_value(inst_text,
+                                           sizeof(inst_text),
+                                           rt->glide_ratio_instant_valid,
+                                           rt->glide_ratio_instant);
+    vario_display_format_glide_ratio_value(slow_text,
+                                           sizeof(slow_text),
+                                           rt->glide_ratio_slow_valid,
+                                           rt->glide_ratio_slow);
+    vario_display_format_glide_ratio_value(avg_text,
+                                           sizeof(avg_text),
+                                           rt->glide_ratio_average_valid,
+                                           rt->glide_ratio_average);
 
     u8g2_SetFontPosTop(u8g2);
     u8g2_SetFont(u8g2, VARIO_UI_FONT_ALT2_VALUE);
@@ -2208,6 +2238,27 @@ static void vario_display_draw_top_left_metrics(u8g2_t *u8g2,
     suffix_x = (int16_t)(x + u8g2_GetStrWidth(u8g2, glide_text) + 2);
     u8g2_SetFont(u8g2, VARIO_UI_FONT_ALT2_UNIT);
     u8g2_DrawStr(u8g2, suffix_x, top_y, ":1");
+
+    main_h = vario_display_get_font_height(u8g2, VARIO_UI_FONT_ALT2_VALUE);
+    line_h = vario_display_get_font_height(u8g2, VARIO_UI_FONT_BOTTOM_MAX_LABEL);
+    if (line_h <= 0)
+    {
+        line_h = 6;
+    }
+
+    line_y = (int16_t)(top_y + main_h + 1);
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_BOTTOM_MAX_LABEL);
+
+    snprintf(line_text, sizeof(line_text), "I %s", inst_text);
+    u8g2_DrawStr(u8g2, x, line_y, line_text);
+    line_y = (int16_t)(line_y + line_h + 1);
+
+    snprintf(line_text, sizeof(line_text), "S %s", slow_text);
+    u8g2_DrawStr(u8g2, x, line_y, line_text);
+    line_y = (int16_t)(line_y + line_h + 1);
+
+    snprintf(line_text, sizeof(line_text), "A %s", avg_text);
+    u8g2_DrawStr(u8g2, x, line_y, line_text);
     u8g2_SetFontPosBaseline(u8g2);
 }
 
@@ -2237,6 +2288,108 @@ static void vario_display_draw_top_center_clock(u8g2_t *u8g2,
 }
 
 
+
+static void vario_display_draw_lower_left_glide_computer(u8g2_t *u8g2,
+                                                            const vario_viewport_t *v,
+                                                            const vario_runtime_t *rt)
+{
+    char    line1[24];
+    char    line2[24];
+    char    line3[24];
+    char    line4[24];
+    int16_t x;
+    int16_t y;
+    int16_t line_h;
+    float   mc_disp;
+    float   ete_disp;
+    long    wind_speed_disp;
+    long    stf_disp;
+    long    delta_disp;
+    long    arrival_disp;
+    long    eas_disp;
+
+    if ((u8g2 == NULL) || (v == NULL) || (rt == NULL))
+    {
+        return;
+    }
+
+    x = (int16_t)(v->x + VARIO_UI_SIDE_BAR_W + 4);
+    y = (int16_t)(v->y + v->h - 43);
+    line_h = vario_display_get_font_height(u8g2, VARIO_UI_FONT_BOTTOM_MAX_LABEL);
+    if (line_h <= 0)
+    {
+        line_h = 6;
+    }
+
+    mc_disp = Vario_Settings_VSpeedMpsToDisplayFloat(rt->manual_mccready_mps);
+    ete_disp = Vario_Settings_VSpeedMpsToDisplayFloat(rt->estimated_te_vario_mps);
+    wind_speed_disp = (long)Vario_Settings_SpeedToDisplayRounded(rt->wind_speed_kmh);
+    stf_disp = (long)Vario_Settings_SpeedToDisplayRounded(rt->speed_to_fly_kmh);
+    delta_disp = (long)Vario_Settings_SpeedToDisplayRounded(vario_display_absf(rt->speed_command_delta_kmh));
+    arrival_disp = (long)Vario_Settings_AltitudeMetersToDisplayRounded(rt->arrival_height_m);
+    eas_disp = (long)Vario_Settings_SpeedToDisplayRounded(rt->estimated_airspeed_kmh);
+
+    if (rt->wind_valid != false)
+    {
+        snprintf(line1,
+                 sizeof(line1),
+                 "W%03ld/%02ld MC%.1f",
+                 (long)lroundf(rt->wind_from_deg),
+                 wind_speed_disp,
+                 (double)mc_disp);
+    }
+    else
+    {
+        snprintf(line1, sizeof(line1), "W---/-- MC%.1f", (double)mc_disp);
+    }
+
+    if (rt->speed_to_fly_valid != false)
+    {
+        snprintf(line2,
+                 sizeof(line2),
+                 "STF%03ld d%c%02ld",
+                 stf_disp,
+                 (rt->speed_command_delta_kmh >= 0.0f) ? '+' : '-',
+                 delta_disp);
+    }
+    else
+    {
+        snprintf(line2, sizeof(line2), "STF--- d--");
+    }
+
+    if (rt->final_glide_valid != false)
+    {
+        snprintf(line3,
+                 sizeof(line3),
+                 "FG%04.1f A%+4ld",
+                 (double)vario_display_clampf(rt->required_glide_ratio, 0.0f, 99.9f),
+                 arrival_disp);
+    }
+    else
+    {
+        snprintf(line3, sizeof(line3), "FG--.- A----");
+    }
+
+    if (rt->estimated_te_valid != false)
+    {
+        snprintf(line4, sizeof(line4), "eTE%+.1f eA%03ld", (double)ete_disp, eas_disp);
+    }
+    else
+    {
+        snprintf(line4, sizeof(line4), "eTE--.- eA---");
+    }
+
+    u8g2_SetFontPosTop(u8g2);
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_BOTTOM_MAX_LABEL);
+    u8g2_DrawStr(u8g2, x, y, line1);
+    y = (int16_t)(y + line_h + 1);
+    u8g2_DrawStr(u8g2, x, y, line2);
+    y = (int16_t)(y + line_h + 1);
+    u8g2_DrawStr(u8g2, x, y, line3);
+    y = (int16_t)(y + line_h + 1);
+    u8g2_DrawStr(u8g2, x, y, line4);
+    u8g2_SetFontPosBaseline(u8g2);
+}
 
 static void vario_display_draw_bottom_center_flight_time(u8g2_t *u8g2,
                                                          const vario_viewport_t *v,
@@ -3741,6 +3894,7 @@ void Vario_Display_RenderFlightPage(u8g2_t *u8g2, vario_flight_page_mode_t mode)
 
     vario_display_draw_vario_value_block(u8g2, v, rt);
     vario_display_draw_speed_value_block(u8g2, v, rt);
+    vario_display_draw_lower_left_glide_computer(u8g2, v, rt);
     vario_display_draw_bottom_center_flight_time(u8g2, v, rt);
 
     Vario_Display_DrawRawOverlay(u8g2, v);

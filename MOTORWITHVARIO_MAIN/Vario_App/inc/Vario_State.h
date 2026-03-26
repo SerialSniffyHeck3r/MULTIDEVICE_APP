@@ -100,7 +100,15 @@ typedef struct
     bool     derived_valid;
     bool     flight_active;
     bool     trail_valid;
-    bool     glide_ratio_valid;
+    bool     glide_ratio_valid;          /* compatibility mirror = glide_ratio_slow_valid */
+    bool     glide_ratio_instant_valid;
+    bool     glide_ratio_slow_valid;
+    bool     glide_ratio_average_valid;
+    bool     wind_valid;
+    bool     target_valid;
+    bool     speed_to_fly_valid;
+    bool     final_glide_valid;
+    bool     estimated_te_valid;
 
     /* ---------------------------------------------------------------------- */
     /*  원시/중간 표시값                                                        */
@@ -132,11 +140,37 @@ typedef struct
     /*  - APP_ALTITUDE fast vario path를 app-layer second filter 없이 그대로    */
     /*    전달한다.                                                             */
     /*                                                                          */
-    /*  average_vario_mps                                                       */
-    /*  - Flytec 스타일 integrating / average vario 용 최근 평균 상승률         */
+    /*  average_vario_mps / average_speed_kmh                                   */
+    /*  - integrating/average window에 대한 최근 평균 상승률 / 평균 GS          */
     /*                                                                          */
-    /*  glide_ratio                                                             */
-    /*  - 최근 평균 sink 와 최근 평균 GS 로 계산한 활공비                        */
+    /*  glide_ratio_*                                                           */
+    /*  - instantaneous : fast bar / fast GS 기반                               */
+    /*  - slow          : 큰 숫자 표시와 같은 publish 값 기반                   */
+    /*  - average       : integrating window 기반                               */
+    /*  - glide_ratio   : 기존 코드 호환용 mirror, slow 값과 같은 의미          */
+    /*                                                                          */
+    /*  estimated_airspeed_kmh                                                  */
+    /*  - GPS ground vector와 circling wind estimate로 복원한 "추정 TAS"        */
+    /*  - pitot가 없으므로 최종 truth는 아니며 glide computer 보조치다.         */
+    /*                                                                          */
+    /*  wind_speed_kmh / wind_from_deg                                          */
+    /*  - circling drift 기반 wind estimate                                     */
+    /*  - bearing은 "바람이 불어오는 방향" 표기                               */
+    /*                                                                          */
+    /*  manual_mccready_mps / speed_to_fly_kmh                                  */
+    /*  - 사용자가 넣은 수동 MC 와 그에 따른 block STF                         */
+    /*                                                                          */
+    /*  speed_command_delta_kmh                                                 */
+    /*  - + 값이면 현재 추정 airspeed보다 더 빨리 가야 함                       */
+    /*                                                                          */
+    /*  target_distance_m / target_bearing_deg / target_altitude_m              */
+    /*  - 현재 구현에서는 flight start/home 기준 목표                           */
+    /*                                                                          */
+    /*  required_glide_ratio / arrival_height_m                                 */
+    /*  - final glide 판단 보조치                                               */
+    /*                                                                          */
+    /*  estimated_te_vario_mps                                                  */
+    /*  - pitot 없는 조건에서 속도변화항을 더한 "추정 TE"                     */
     /*                                                                          */
     /*  alt1_absolute_m                                                         */
     /*  - Flytec ALT1 개념: absolute altitude                                   */
@@ -168,7 +202,23 @@ typedef struct
     float    max_top_vario_mps;
     float    max_speed_kmh;
     float    average_vario_mps;
+    float    average_speed_kmh;
     float    glide_ratio;
+    float    glide_ratio_instant;
+    float    glide_ratio_slow;
+    float    glide_ratio_average;
+    float    estimated_airspeed_kmh;
+    float    wind_speed_kmh;
+    float    wind_from_deg;
+    float    manual_mccready_mps;
+    float    speed_to_fly_kmh;
+    float    speed_command_delta_kmh;
+    float    target_distance_m;
+    float    target_bearing_deg;
+    float    target_altitude_m;
+    float    required_glide_ratio;
+    float    arrival_height_m;
+    float    estimated_te_vario_mps;
     float    alt1_absolute_m;
     float    alt2_relative_m;
     float    pressure_altitude_std_m;

@@ -1,6 +1,7 @@
 #include "Vario_State.h"
 
 #include "Vario_Settings.h"
+#include "Vario_GlideComputer.h"
 
 #include <math.h>
 #include <stddef.h>
@@ -71,6 +72,30 @@
 #define VARIO_STATE_FLIGHT_END_VARIO_MPS 0.30f
 #endif
 
+#ifndef VARIO_STATE_TAKEOFF_SOFT_SPEED_RATIO
+#define VARIO_STATE_TAKEOFF_SOFT_SPEED_RATIO 0.70f
+#endif
+
+#ifndef VARIO_STATE_TAKEOFF_MIN_DISPLACEMENT_M
+#define VARIO_STATE_TAKEOFF_MIN_DISPLACEMENT_M 35.0f
+#endif
+
+#ifndef VARIO_STATE_TAKEOFF_MIN_ALT_GAIN_M
+#define VARIO_STATE_TAKEOFF_MIN_ALT_GAIN_M 12.0f
+#endif
+
+#ifndef VARIO_STATE_TAKEOFF_FALLBACK_VARIO_MPS
+#define VARIO_STATE_TAKEOFF_FALLBACK_VARIO_MPS 0.90f
+#endif
+
+#ifndef VARIO_STATE_LANDING_MAX_DRIFT_M
+#define VARIO_STATE_LANDING_MAX_DRIFT_M 35.0f
+#endif
+
+#ifndef VARIO_STATE_LANDING_MAX_ALT_DELTA_M
+#define VARIO_STATE_LANDING_MAX_ALT_DELTA_M 12.0f
+#endif
+
 #ifndef VARIO_STATE_ALTITUDE_JUMP_LIMIT_M
 #define VARIO_STATE_ALTITUDE_JUMP_LIMIT_M 40.0f
 #endif
@@ -87,6 +112,10 @@
 #define VARIO_STATE_EARTH_METERS_PER_DEG_LON 111319.5f
 #endif
 
+static float vario_state_distance_between_ll_deg_e7(int32_t lat1_e7,
+                                                    int32_t lon1_e7,
+                                                    int32_t lat2_e7,
+                                                    int32_t lon2_e7);
 
 static struct
 {
@@ -126,6 +155,23 @@ static struct
     /* ---------------------------------------------------------------------- */
     bool altitude_source_tracking_valid;
     vario_alt_source_t last_altitude_source;
+
+    /* ---------------------------------------------------------------------- */
+    /*  private flight-decision anchors                                        */
+    /*                                                                        */
+    /*  takeoff / landing 판단은 단순 속도 임계치만으로는 거짓 검출이 생기기    */
+    /*  쉽다. 그래서 candidate 시작 시점의 GPS/altitude anchor 를 private      */
+    /*  상태로 잡아 두고, 실제 이동거리 / 고도변화를 함께 확인한다.            */
+    /* ---------------------------------------------------------------------- */
+    bool    takeoff_anchor_valid;
+    int32_t takeoff_anchor_lat_e7;
+    int32_t takeoff_anchor_lon_e7;
+    float   takeoff_anchor_altitude_m;
+
+    bool    landing_anchor_valid;
+    int32_t landing_anchor_lat_e7;
+    int32_t landing_anchor_lon_e7;
+    float   landing_anchor_altitude_m;
 } s_vario_state;
 
 static float vario_state_absf(float value)
@@ -206,6 +252,28 @@ static float vario_state_wrap_pm180(float deg)
 static float vario_state_deg_to_rad(float deg)
 {
     return deg * (VARIO_STATE_PI / 180.0f);
+}
+
+static bool vario_state_compute_glide_ratio(float speed_kmh, float vario_mps, float *out_ratio)
+{
+    float sink_mps;
+    float glide_ratio;
+
+    if (out_ratio == NULL)
+    {
+        return false;
+    }
+
+    sink_mps = -vario_mps;
+    if ((sink_mps <= 0.15f) || (speed_kmh <= 1.0f))
+    {
+        *out_ratio = 0.0f;
+        return false;
+    }
+
+    glide_ratio = (speed_kmh / 3.6f) / sink_mps;
+    *out_ratio = vario_state_clampf(glide_ratio, 0.0f, 99.9f);
+    return true;
 }
 
 static uint8_t vario_state_wrap_cursor(uint8_t cursor, uint8_t count, int8_t direction)
@@ -774,41 +842,132 @@ static void vario_state_update_flight_logic(uint32_t now_ms)
 
 {
     const vario_settings_t *settings;
+    const app_gps_state_t  *gps;
     float                   start_speed_kmh;
+    float                   soft_start_speed_kmh;
     float                   positive_gain_step_m;
+    bool                    gps_motion_valid;
+    bool                    takeoff_candidate_active;
+    bool                    landing_candidate_active;
+    float                   anchor_distance_m;
+    float                   anchor_altitude_delta_m;
 
     settings = Vario_Settings_Get();
+    gps = &s_vario_state.runtime.gps;
     start_speed_kmh = ((float)settings->flight_start_speed_kmh_x10) * 0.1f;
+    soft_start_speed_kmh = start_speed_kmh * VARIO_STATE_TAKEOFF_SOFT_SPEED_RATIO;
 
-    if ((s_vario_state.runtime.flight_active == false) &&
-        ((s_vario_state.runtime.filtered_ground_speed_kmh >= start_speed_kmh) ||
-         (vario_state_absf(s_vario_state.runtime.filtered_vario_mps) >= 0.8f)))
+    gps_motion_valid = (s_vario_state.runtime.gps_valid != false) &&
+                       (gps->fix.valid != false) &&
+                       (gps->fix.fixOk != false) &&
+                       (gps->fix.fixType != 0u);
+
+    /* ---------------------------------------------------------------------- */
+    /*  takeoff detection                                                     */
+    /*                                                                        */
+    /*  기존 구현은 |vario| >= 0.8 만으로도 takeoff candidate를 세웠다.         */
+    /*  이 경로는 돌풍 / 손으로 흔든 상황 / 정지 상태 압력요동에서도 false       */
+    /*  positive를 만들 수 있으므로, 이제는 GPS motion evidence를 기본 조건으로 */
+    /*  삼고 displacement/altitude gain 확인까지 붙인다.                      */
+    /* ---------------------------------------------------------------------- */
+    if (s_vario_state.runtime.flight_active == false)
     {
-        if (s_vario_state.runtime.flight_takeoff_candidate_ms == 0u)
+        takeoff_candidate_active = false;
+
+        if (gps_motion_valid != false)
         {
-            s_vario_state.runtime.flight_takeoff_candidate_ms = now_ms;
+            takeoff_candidate_active =
+                (s_vario_state.runtime.filtered_ground_speed_kmh >= soft_start_speed_kmh) ||
+                (s_vario_state.runtime.gs_bar_speed_kmh >= start_speed_kmh) ||
+                ((vario_state_absf(s_vario_state.runtime.filtered_vario_mps) >= VARIO_STATE_TAKEOFF_FALLBACK_VARIO_MPS) &&
+                 (s_vario_state.runtime.filtered_ground_speed_kmh >= (soft_start_speed_kmh * 0.8f)));
+
+            if (takeoff_candidate_active != false)
+            {
+                if (s_vario_state.runtime.flight_takeoff_candidate_ms == 0u)
+                {
+                    s_vario_state.runtime.flight_takeoff_candidate_ms = now_ms;
+                    s_vario_state.takeoff_anchor_valid = true;
+                    s_vario_state.takeoff_anchor_lat_e7 = gps->fix.lat;
+                    s_vario_state.takeoff_anchor_lon_e7 = gps->fix.lon;
+                    s_vario_state.takeoff_anchor_altitude_m = s_vario_state.runtime.filtered_altitude_m;
+                }
+                else if (s_vario_state.takeoff_anchor_valid != false)
+                {
+                    anchor_distance_m = vario_state_distance_between_ll_deg_e7(s_vario_state.takeoff_anchor_lat_e7,
+                                                                              s_vario_state.takeoff_anchor_lon_e7,
+                                                                              gps->fix.lat,
+                                                                              gps->fix.lon);
+                    anchor_altitude_delta_m = s_vario_state.runtime.filtered_altitude_m -
+                                              s_vario_state.takeoff_anchor_altitude_m;
+
+                    if (((now_ms - s_vario_state.runtime.flight_takeoff_candidate_ms) >=
+                         VARIO_STATE_FLIGHT_START_CONFIRM_MS) &&
+                        ((s_vario_state.runtime.filtered_ground_speed_kmh >= start_speed_kmh) ||
+                         (s_vario_state.runtime.gs_bar_speed_kmh >= (start_speed_kmh + 2.0f)) ||
+                         (anchor_distance_m >= VARIO_STATE_TAKEOFF_MIN_DISPLACEMENT_M) ||
+                         ((anchor_altitude_delta_m >= VARIO_STATE_TAKEOFF_MIN_ALT_GAIN_M) &&
+                          (s_vario_state.runtime.filtered_ground_speed_kmh >= soft_start_speed_kmh))))
+                    {
+                        Vario_GlideComputer_ResetReference();
+
+                        s_vario_state.runtime.flight_active = true;
+                        s_vario_state.runtime.flight_start_ms = now_ms;
+                        s_vario_state.runtime.flight_takeoff_candidate_ms = 0u;
+                        s_vario_state.runtime.flight_landing_candidate_ms = 0u;
+                        s_vario_state.runtime.flight_time_s = 0u;
+                        s_vario_state.runtime.alt3_accum_gain_m = 0.0f;
+                        s_vario_state.runtime.max_top_vario_mps = 0.0f;
+                        s_vario_state.runtime.max_speed_kmh = 0.0f;
+                        s_vario_state.runtime.last_accum_altitude_m = s_vario_state.runtime.filtered_altitude_m;
+                        s_vario_state.takeoff_anchor_valid = false;
+                        s_vario_state.landing_anchor_valid = false;
+                        s_vario_state.redraw_request = 1u;
+                    }
+                }
+            }
+            else
+            {
+                s_vario_state.runtime.flight_takeoff_candidate_ms = 0u;
+                s_vario_state.takeoff_anchor_valid = false;
+            }
         }
-        else if ((now_ms - s_vario_state.runtime.flight_takeoff_candidate_ms) >=
-                 VARIO_STATE_FLIGHT_START_CONFIRM_MS)
+        else if ((s_vario_state.runtime.filtered_ground_speed_kmh >= start_speed_kmh) &&
+                 (vario_state_absf(s_vario_state.runtime.filtered_vario_mps) >= VARIO_STATE_TAKEOFF_FALLBACK_VARIO_MPS))
         {
-            s_vario_state.runtime.flight_active = true;
-            s_vario_state.runtime.flight_start_ms = now_ms;
-            s_vario_state.runtime.flight_landing_candidate_ms = 0u;
-            s_vario_state.runtime.flight_time_s = 0u;
-            s_vario_state.runtime.alt3_accum_gain_m = 0.0f;
-            s_vario_state.runtime.max_top_vario_mps = 0.0f;
-            s_vario_state.runtime.max_speed_kmh = 0.0f;
-            s_vario_state.runtime.last_accum_altitude_m = s_vario_state.runtime.filtered_altitude_m;
-            s_vario_state.redraw_request = 1u;
+            if (s_vario_state.runtime.flight_takeoff_candidate_ms == 0u)
+            {
+                s_vario_state.runtime.flight_takeoff_candidate_ms = now_ms;
+            }
+            else if ((now_ms - s_vario_state.runtime.flight_takeoff_candidate_ms) >=
+                     VARIO_STATE_FLIGHT_START_CONFIRM_MS)
+            {
+                Vario_GlideComputer_ResetReference();
+
+                s_vario_state.runtime.flight_active = true;
+                s_vario_state.runtime.flight_start_ms = now_ms;
+                s_vario_state.runtime.flight_takeoff_candidate_ms = 0u;
+                s_vario_state.runtime.flight_landing_candidate_ms = 0u;
+                s_vario_state.runtime.flight_time_s = 0u;
+                s_vario_state.runtime.alt3_accum_gain_m = 0.0f;
+                s_vario_state.runtime.max_top_vario_mps = 0.0f;
+                s_vario_state.runtime.max_speed_kmh = 0.0f;
+                s_vario_state.runtime.last_accum_altitude_m = s_vario_state.runtime.filtered_altitude_m;
+                s_vario_state.takeoff_anchor_valid = false;
+                s_vario_state.landing_anchor_valid = false;
+                s_vario_state.redraw_request = 1u;
+            }
+        }
+        else
+        {
+            s_vario_state.runtime.flight_takeoff_candidate_ms = 0u;
+            s_vario_state.takeoff_anchor_valid = false;
         }
     }
-    else if ((s_vario_state.runtime.flight_active == false) &&
-             (s_vario_state.runtime.filtered_ground_speed_kmh < start_speed_kmh) &&
-             (vario_state_absf(s_vario_state.runtime.filtered_vario_mps) < 0.8f))
-    {
-        s_vario_state.runtime.flight_takeoff_candidate_ms = 0u;
-    }
 
+    /* ---------------------------------------------------------------------- */
+    /*  in-flight metrics + landing detection                                 */
+    /* ---------------------------------------------------------------------- */
     if (s_vario_state.runtime.flight_active != false)
     {
         s_vario_state.runtime.flight_time_s = (now_ms - s_vario_state.runtime.flight_start_ms) / 1000u;
@@ -830,25 +989,66 @@ static void vario_state_update_flight_logic(uint32_t now_ms)
         }
         s_vario_state.runtime.last_accum_altitude_m = s_vario_state.runtime.filtered_altitude_m;
 
-        if ((s_vario_state.runtime.filtered_ground_speed_kmh <= VARIO_STATE_FLIGHT_END_SPEED_KMH) &&
-            (vario_state_absf(s_vario_state.runtime.filtered_vario_mps) <= VARIO_STATE_FLIGHT_END_VARIO_MPS))
+        landing_candidate_active =
+            (s_vario_state.runtime.filtered_ground_speed_kmh <= VARIO_STATE_FLIGHT_END_SPEED_KMH) &&
+            (vario_state_absf(s_vario_state.runtime.filtered_vario_mps) <= VARIO_STATE_FLIGHT_END_VARIO_MPS);
+
+        if (landing_candidate_active != false)
         {
             if (s_vario_state.runtime.flight_landing_candidate_ms == 0u)
             {
                 s_vario_state.runtime.flight_landing_candidate_ms = now_ms;
+
+                if (gps_motion_valid != false)
+                {
+                    s_vario_state.landing_anchor_valid = true;
+                    s_vario_state.landing_anchor_lat_e7 = gps->fix.lat;
+                    s_vario_state.landing_anchor_lon_e7 = gps->fix.lon;
+                    s_vario_state.landing_anchor_altitude_m = s_vario_state.runtime.filtered_altitude_m;
+                }
+                else
+                {
+                    s_vario_state.landing_anchor_valid = false;
+                }
             }
             else if ((now_ms - s_vario_state.runtime.flight_landing_candidate_ms) >=
                      VARIO_STATE_FLIGHT_LAND_CONFIRM_MS)
             {
-                s_vario_state.runtime.flight_active = false;
-                s_vario_state.runtime.flight_takeoff_candidate_ms = 0u;
-                s_vario_state.runtime.flight_landing_candidate_ms = 0u;
-                s_vario_state.redraw_request = 1u;
+                if ((s_vario_state.landing_anchor_valid != false) && (gps_motion_valid != false))
+                {
+                    anchor_distance_m = vario_state_distance_between_ll_deg_e7(s_vario_state.landing_anchor_lat_e7,
+                                                                              s_vario_state.landing_anchor_lon_e7,
+                                                                              gps->fix.lat,
+                                                                              gps->fix.lon);
+                    anchor_altitude_delta_m = vario_state_absf(s_vario_state.runtime.filtered_altitude_m -
+                                                               s_vario_state.landing_anchor_altitude_m);
+
+                    if ((anchor_distance_m <= VARIO_STATE_LANDING_MAX_DRIFT_M) &&
+                        (anchor_altitude_delta_m <= VARIO_STATE_LANDING_MAX_ALT_DELTA_M))
+                    {
+                        s_vario_state.runtime.flight_active = false;
+                        s_vario_state.runtime.flight_takeoff_candidate_ms = 0u;
+                        s_vario_state.runtime.flight_landing_candidate_ms = 0u;
+                        s_vario_state.takeoff_anchor_valid = false;
+                        s_vario_state.landing_anchor_valid = false;
+                        s_vario_state.redraw_request = 1u;
+                    }
+                }
+                else
+                {
+                    s_vario_state.runtime.flight_active = false;
+                    s_vario_state.runtime.flight_takeoff_candidate_ms = 0u;
+                    s_vario_state.runtime.flight_landing_candidate_ms = 0u;
+                    s_vario_state.takeoff_anchor_valid = false;
+                    s_vario_state.landing_anchor_valid = false;
+                    s_vario_state.redraw_request = 1u;
+                }
             }
         }
         else
         {
             s_vario_state.runtime.flight_landing_candidate_ms = 0u;
+            s_vario_state.landing_anchor_valid = false;
         }
     }
 }
@@ -1032,6 +1232,21 @@ static float vario_state_average_recent(const float *history,
     return sum / (float)used;
 }
 
+static void vario_state_update_glide_ratio_fast_path(void)
+{
+    if (vario_state_compute_glide_ratio(s_vario_state.runtime.gs_bar_speed_kmh,
+                                        s_vario_state.runtime.fast_vario_bar_mps,
+                                        &s_vario_state.runtime.glide_ratio_instant) != false)
+    {
+        s_vario_state.runtime.glide_ratio_instant_valid = true;
+    }
+    else
+    {
+        s_vario_state.runtime.glide_ratio_instant = 0.0f;
+        s_vario_state.runtime.glide_ratio_instant_valid = false;
+    }
+}
+
 static void vario_state_update_integrated_metrics(void)
 {
     const vario_settings_t *settings;
@@ -1059,18 +1274,20 @@ static void vario_state_update_integrated_metrics(void)
                                                samples);
 
     s_vario_state.runtime.average_vario_mps = avg_vario_mps;
+    s_vario_state.runtime.average_speed_kmh = avg_speed_kmh;
 
     sink_mps = -avg_vario_mps;
-    if ((sink_mps > 0.15f) && (avg_speed_kmh > 1.0f))
+    (void)sink_mps;
+    if (vario_state_compute_glide_ratio(avg_speed_kmh,
+                                        avg_vario_mps,
+                                        &s_vario_state.runtime.glide_ratio_average) != false)
     {
-        s_vario_state.runtime.glide_ratio = (avg_speed_kmh / 3.6f) / sink_mps;
-        s_vario_state.runtime.glide_ratio = vario_state_clampf(s_vario_state.runtime.glide_ratio, 0.0f, 99.9f);
-        s_vario_state.runtime.glide_ratio_valid = true;
+        s_vario_state.runtime.glide_ratio_average_valid = true;
     }
     else
     {
-        s_vario_state.runtime.glide_ratio = 0.0f;
-        s_vario_state.runtime.glide_ratio_valid = false;
+        s_vario_state.runtime.glide_ratio_average = 0.0f;
+        s_vario_state.runtime.glide_ratio_average_valid = false;
     }
 }
 
@@ -1192,6 +1409,19 @@ static void vario_state_publish_5hz(uint32_t now_ms)
     s_vario_state.runtime.ground_speed_kmh = quant_gs_kmh;
     s_vario_state.runtime.alt2_relative_m = ((float)alt2_relative_cm) * 0.01f;
 
+    if (vario_state_compute_glide_ratio(quant_gs_kmh, quant_vario_mps, &s_vario_state.runtime.glide_ratio_slow) != false)
+    {
+        s_vario_state.runtime.glide_ratio_slow_valid = true;
+    }
+    else
+    {
+        s_vario_state.runtime.glide_ratio_slow = 0.0f;
+        s_vario_state.runtime.glide_ratio_slow_valid = false;
+    }
+
+    s_vario_state.runtime.glide_ratio = s_vario_state.runtime.glide_ratio_slow;
+    s_vario_state.runtime.glide_ratio_valid = s_vario_state.runtime.glide_ratio_slow_valid;
+
     if (alt->baro_valid != false)
     {
         s_vario_state.runtime.pressure_altitude_std_m =
@@ -1233,6 +1463,8 @@ void Vario_State_Init(void)
     s_vario_state.previous_main_mode = VARIO_MODE_SCREEN_1;
     s_vario_state.settings_category  = VARIO_SETTINGS_CATEGORY_SYSTEM;
     s_vario_state.redraw_request     = 1u;
+
+    Vario_GlideComputer_Init();
 }
 
 void Vario_State_Task(uint32_t now_ms)
@@ -1241,11 +1473,13 @@ void Vario_State_Task(uint32_t now_ms)
     vario_state_update_sensor_caches();
     vario_state_update_ground_speed();
     vario_state_update_display_filter(now_ms);
+    vario_state_update_glide_ratio_fast_path();
     vario_state_update_heading(now_ms);
     vario_state_update_clock();
     vario_state_update_flight_logic(now_ms);
     vario_state_update_trail();
     vario_state_publish_5hz(now_ms);
+    Vario_GlideComputer_Update(&s_vario_state.runtime, Vario_Settings_Get(), now_ms);
 
     s_vario_state.runtime.last_task_ms = now_ms;
 }
@@ -1487,9 +1721,37 @@ void Vario_State_ResetFlightMetrics(void)
     s_vario_state.runtime.max_top_vario_mps = 0.0f;
     s_vario_state.runtime.max_speed_kmh = 0.0f;
     s_vario_state.runtime.average_vario_mps = 0.0f;
+    s_vario_state.runtime.average_speed_kmh = 0.0f;
     s_vario_state.runtime.glide_ratio = 0.0f;
+    s_vario_state.runtime.glide_ratio_instant = 0.0f;
+    s_vario_state.runtime.glide_ratio_slow = 0.0f;
+    s_vario_state.runtime.glide_ratio_average = 0.0f;
     s_vario_state.runtime.glide_ratio_valid = false;
+    s_vario_state.runtime.glide_ratio_instant_valid = false;
+    s_vario_state.runtime.glide_ratio_slow_valid = false;
+    s_vario_state.runtime.glide_ratio_average_valid = false;
+    s_vario_state.runtime.wind_valid = false;
+    s_vario_state.runtime.target_valid = false;
+    s_vario_state.runtime.speed_to_fly_valid = false;
+    s_vario_state.runtime.final_glide_valid = false;
+    s_vario_state.runtime.estimated_te_valid = false;
+    s_vario_state.runtime.wind_speed_kmh = 0.0f;
+    s_vario_state.runtime.wind_from_deg = 0.0f;
+    s_vario_state.runtime.estimated_airspeed_kmh = 0.0f;
+    s_vario_state.runtime.manual_mccready_mps = 0.0f;
+    s_vario_state.runtime.speed_to_fly_kmh = 0.0f;
+    s_vario_state.runtime.speed_command_delta_kmh = 0.0f;
+    s_vario_state.runtime.target_distance_m = 0.0f;
+    s_vario_state.runtime.target_bearing_deg = 0.0f;
+    s_vario_state.runtime.target_altitude_m = 0.0f;
+    s_vario_state.runtime.required_glide_ratio = 0.0f;
+    s_vario_state.runtime.arrival_height_m = 0.0f;
+    s_vario_state.runtime.estimated_te_vario_mps = 0.0f;
     s_vario_state.runtime.last_accum_altitude_m = s_vario_state.runtime.filtered_altitude_m;
+    s_vario_state.takeoff_anchor_valid = false;
+    s_vario_state.landing_anchor_valid = false;
+
+    Vario_GlideComputer_ResetReference();
     s_vario_state.redraw_request = 1u;
 }
 

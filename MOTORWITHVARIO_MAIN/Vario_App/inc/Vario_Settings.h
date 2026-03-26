@@ -305,12 +305,18 @@ typedef struct
     uint8_t                display_temp_compensation;
 
     /* ---------------------------------------------------------------------- */
-    /*  디지털 표시/오디오용 필터 및 바리오 임계값                              */
+    /*  디지털 표시 damping / audio response / 바리오 임계값                  */
     /*                                                                        */
     /*  vario_damping_level                                                   */
-    /*  - 현재 제품 동작에서는 "표시 damping" 전용이 아니라                  */
-    /*    실제 fast vario / 오디오 attack/release / 저수준 tau mirror까지      */
-    /*    함께 움직이는 response knob 역할을 한다.                            */
+    /*  - 상위 제품 의미에서는 "숫자/표시 damping" 이다.                     */
+    /*  - 현재 배선에서는                                                     */
+    /*      1) 5Hz publish 숫자 hysteresis 폭                                 */
+    /*      2) display-friendly slow path 반응성                              */
+    /*      3) APP_ALTITUDE 저수준 tau / noise mirror                         */
+    /*    를 함께 움직인다.                                                   */
+    /*  - 중요한 점: 제품용 오디오 attack/release, cadence follow 는          */
+    /*    audio_response_level 이 담당한다.                                   */
+    /*    즉, damping 과 audio response 의 의미를 분리한다.                  */
     /*                                                                        */
     /*  climb_tone_threshold_cms                                              */
     /*  - 상승음이 처음 살아나는 임계값                                        */
@@ -336,6 +342,31 @@ typedef struct
     int16_t  sink_continuous_threshold_cms;
     int16_t  sink_continuous_off_threshold_cms;
     uint16_t flight_start_speed_kmh_x10;
+
+    /* ---------------------------------------------------------------------- */
+    /*  glide computer / polar / final glide                                  */
+    /*                                                                        */
+    /*  manual_mccready_cms                                                   */
+    /*  - 수동 McCready 값, cm/s                                              */
+    /*  - pitot 없이도 block speed-to-fly / final glide의 climb expectation   */
+    /*    으로 사용할 수 있다.                                                */
+    /*                                                                        */
+    /*  final_glide_safety_margin_m                                           */
+    /*  - arrival height 계산 시 항상 남겨 둘 안전 여유 고도                  */
+    /*                                                                        */
+    /*  polar_speed*_kmh_x10 / polar_sink*_cms                                */
+    /*  - 3점 polar 입력값                                                    */
+    /*  - speed 는 km/h * 10, sink 는 +cm/s (양의 sink magnitude)             */
+    /*  - Vario_GlideComputer 가 이 세 점으로 quadratic polar 를 복원한다.    */
+    /* ---------------------------------------------------------------------- */
+    int16_t  manual_mccready_cms;
+    uint16_t final_glide_safety_margin_m;
+    uint16_t polar_speed1_kmh_x10;
+    int16_t  polar_sink1_cms;
+    uint16_t polar_speed2_kmh_x10;
+    int16_t  polar_sink2_cms;
+    uint16_t polar_speed3_kmh_x10;
+    int16_t  polar_sink3_cms;
 
     /* ---------------------------------------------------------------------- */
     /*  로깅 / Bluetooth                                                      */
