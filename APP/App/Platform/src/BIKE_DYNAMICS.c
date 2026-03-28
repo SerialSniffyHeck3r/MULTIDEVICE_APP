@@ -90,6 +90,7 @@
 #define BIKE_DYN_GYRO_CAL_MIN_SAMPLES        (90u)
 #define BIKE_DYN_GYRO_CAL_MAX_SPEED_MMPS     (1500)
 #define BIKE_DYN_GYRO_CAL_MAX_GYRO_DPS       (6.0f)
+#define BIKE_DYN_GYRO_CAL_MAX_RAW_STARTUP_DPS (15.0f)
 
 /* -------------------------------------------------------------------------- */
 /*  GNSS aid hysteresis                                                        */
@@ -2186,39 +2187,74 @@ static bool BIKE_DYN_IsGyroCalibrationSampleGood(const app_bike_settings_t *sett
     float jerk_gate_mg_per_s;
     float stationary_conf_01;
     float gyro_mag_dps;
-
-    (void)selected_speed_mmps;
-    (void)speed_source;
+    bool  have_external_speed;
 
     if ((settings == 0) || (s_bike_runtime.imu_sample_valid == false))
     {
         return false;
     }
 
+    have_external_speed = (speed_source != (uint8_t)APP_BIKE_SPEED_SOURCE_IMU_FALLBACK) ? true : false;
+    if ((have_external_speed != false) &&
+        (BIKE_DYN_SpeedAbsMmps(selected_speed_mmps) > BIKE_DYN_GYRO_CAL_MAX_SPEED_MMPS))
+    {
+        return false;
+    }
+
     stationary_conf_01 = s_bike_runtime.last_stationary_conf_permille * 0.001f;
-    if (stationary_conf_01 < 0.96f)
+
+    /* ---------------------------------------------------------------------- */
+    /*  핵심 수정                                                               */
+    /*                                                                        */
+    /*  기존 구현은 "gyro bias가 아직 없을 때" 조차                           */
+    /*  stationary_conf(내부적으로 raw gyro 크기를 이미 포함)와                */
+    /*  raw gyro magnitude <= 6 dps 를 동시에 요구했다.                        */
+    /*                                                                        */
+    /*  그 결과 first-time calibration에서 raw bias가 조금만 큰 유닛은         */
+    /*  시작점부터 good sample이 하나도 쌓이지 못하고,                          */
+    /*  active=true / progress=0%% 에 머무는 순환 구조가 생겼다.                */
+    /*                                                                        */
+    /*  수정 정책                                                               */
+    /*  - bias가 이미 유효한 이후의 재보정은 기존처럼 엄격하게 본다.           */
+    /*  - bias가 아직 없는 최초 보정은 accel/jitter/speed 위주 still gate를     */
+    /*    사용하고, raw gyro 자체는 더 완화된 startup 임계값으로만 제한한다.    */
+    /* ---------------------------------------------------------------------- */
+    if ((s_bike_runtime.gyro_bias_valid != false) && (stationary_conf_01 < 0.96f))
     {
         return false;
     }
 
-    accel_gate_mg = (float)BIKE_DYN_ClampS32((int32_t)settings->imu_attitude_accel_gate_mg, 40, 250);
-    if (fabsf(s_bike_runtime.last_accel_norm_mg - BIKE_DYN_ONE_G_MG) > accel_gate_mg)
+    accel_gate_mg = (float)BIKE_DYN_ClampS32((int32_t)settings->imu_attitude_accel_gate_mg, 50, 300);
+    if (fabsf(s_bike_runtime.last_accel_norm_mg - BIKE_DYN_ONE_G_MG) > (accel_gate_mg * 1.15f))
     {
         return false;
     }
 
-    jerk_gate_mg_per_s = (float)BIKE_DYN_ClampS32((int32_t)settings->imu_jerk_gate_mg_per_s / 2, 250, 15000);
+    jerk_gate_mg_per_s = (float)BIKE_DYN_ClampS32((int32_t)settings->imu_jerk_gate_mg_per_s, 500, 20000);
     if (fabsf(s_bike_runtime.last_jerk_mg_per_s) > jerk_gate_mg_per_s)
     {
         return false;
     }
 
-    gyro_mag_dps = BIKE_DYN_SafeSqrtF((s_bike_runtime.last_gx_raw_dps * s_bike_runtime.last_gx_raw_dps) +
-                                      (s_bike_runtime.last_gy_raw_dps * s_bike_runtime.last_gy_raw_dps) +
-                                      (s_bike_runtime.last_gz_raw_dps * s_bike_runtime.last_gz_raw_dps));
-    if (gyro_mag_dps > BIKE_DYN_GYRO_CAL_MAX_GYRO_DPS)
+    if (s_bike_runtime.gyro_bias_valid != false)
     {
-        return false;
+        gyro_mag_dps = BIKE_DYN_SafeSqrtF((s_bike_runtime.last_gx_dps * s_bike_runtime.last_gx_dps) +
+                                          (s_bike_runtime.last_gy_dps * s_bike_runtime.last_gy_dps) +
+                                          (s_bike_runtime.last_gz_dps * s_bike_runtime.last_gz_dps));
+        if (gyro_mag_dps > BIKE_DYN_GYRO_CAL_MAX_GYRO_DPS)
+        {
+            return false;
+        }
+    }
+    else
+    {
+        gyro_mag_dps = BIKE_DYN_SafeSqrtF((s_bike_runtime.last_gx_raw_dps * s_bike_runtime.last_gx_raw_dps) +
+                                          (s_bike_runtime.last_gy_raw_dps * s_bike_runtime.last_gy_raw_dps) +
+                                          (s_bike_runtime.last_gz_raw_dps * s_bike_runtime.last_gz_raw_dps));
+        if (gyro_mag_dps > BIKE_DYN_GYRO_CAL_MAX_RAW_STARTUP_DPS)
+        {
+            return false;
+        }
     }
 
     return true;

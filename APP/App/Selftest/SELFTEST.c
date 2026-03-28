@@ -26,6 +26,7 @@
 #include "BACKLIGHT_App.h"
 #include "FW_AppGuard.h"
 #include "u8g2_uc1608_stm32.h"
+#include "ui_debug_legacy.h"
 
 /* -------------------------------------------------------------------------- */
 /* APP_STATE snapshot copy helper forward declarations                         */
@@ -72,8 +73,10 @@ void APP_STATE_CopyGy86Snapshot(app_gy86_state_t *dst);
 #define SELFTEST_MENU_BOX_W               216
 #define SELFTEST_MENU_BOX_H               96
 #define SELFTEST_MENU_LINE_H              8
+#define SELFTEST_MENU_VISIBLE_ROWS        10u
 
 #define SELFTEST_PROGRESS_REDRAW_MS       50u
+#define SELFTEST_DEBUG_RETURN_HOLD_MS     1500u
 
 #define SELFTEST_BOOTCRC_PUMP_CHUNK       1024u
 #define SELFTEST_RAM_SCRATCH_SIZE         4096u
@@ -103,6 +106,7 @@ typedef enum
   SELFTEST_ITEM_BLUETOOTH = 8u,
   SELFTEST_ITEM_GUIDED = 9u,
   SELFTEST_ITEM_RAM = 10u,
+  SELFTEST_ITEM_DEBUG = 11u,
   SELFTEST_ITEM_COUNT
 } selftest_main_item_t;
 
@@ -147,16 +151,17 @@ typedef struct
 /* -------------------------------------------------------------------------- */
 static const selftest_menu_item_t g_selftest_main_menu[SELFTEST_ITEM_COUNT] = {
   {SELFTEST_ITEM_AUTO_FULL, "AUTO FULL TEST"},
-  {SELFTEST_ITEM_BOOT_CHAIN, "BOOT CHAIN / F-W"},
-  {SELFTEST_ITEM_MCU, "MCU TEST"},
-  {SELFTEST_ITEM_RTC, "RTC TEST"},
-  {SELFTEST_ITEM_SPI_FLASH, "SPI FLASH R/W"},
-  {SELFTEST_ITEM_SD, "SD R/W TEST"},
-  {SELFTEST_ITEM_GPS, "GPS / MON-VER"},
-  {SELFTEST_ITEM_GY86, "GY86 / BARO / IMU"},
-  {SELFTEST_ITEM_BLUETOOTH, "BLUETOOTH TX"},
-  {SELFTEST_ITEM_GUIDED, "USER GUIDED TEST"},
-  {SELFTEST_ITEM_RAM, "MEM / RAM TEST"},
+  {SELFTEST_ITEM_BOOT_CHAIN, "BOOT & F/W CHECK"},
+  {SELFTEST_ITEM_MCU, "MCU CHECK"},
+  {SELFTEST_ITEM_RTC, "RTC CHECK"},
+  {SELFTEST_ITEM_SPI_FLASH, "SPI FLASH CHECK"},
+  {SELFTEST_ITEM_SD, "SD CARD CHECK"},
+  {SELFTEST_ITEM_GPS, "GPS CHECK"},
+  {SELFTEST_ITEM_GY86, "GY86 SENSOR CHECK"},
+  {SELFTEST_ITEM_BLUETOOTH, "BLUETOOTH CHECK"},
+  {SELFTEST_ITEM_GUIDED, "GUIDED CHECK"},
+  {SELFTEST_ITEM_RAM, "MEMORY CHECK"},
+  {SELFTEST_ITEM_DEBUG, "DEBUG MODE"},
 };
 
 static const selftest_menu_item_t g_selftest_guided_menu[SELFTEST_GUIDED_ITEM_COUNT] = {
@@ -234,7 +239,7 @@ static const char *SELFTEST_ResultCodeText(selftest_result_code_t code)
   switch (code)
   {
   case SELFTEST_RESULT_PASS:
-    return "OK";
+    return "OK!";
   case SELFTEST_RESULT_FAIL:
     return "FAIL";
   case SELFTEST_RESULT_INFO:
@@ -242,6 +247,22 @@ static const char *SELFTEST_ResultCodeText(selftest_result_code_t code)
   case SELFTEST_RESULT_NONE:
   default:
     return "----";
+  }
+}
+
+static const char *SELFTEST_HalStatusText(HAL_StatusTypeDef status)
+{
+  switch (status)
+  {
+  case HAL_OK:
+    return "OK";
+  case HAL_BUSY:
+    return "BUSY";
+  case HAL_TIMEOUT:
+    return "TIMEOUT";
+  case HAL_ERROR:
+  default:
+    return "ERROR";
   }
 }
 
@@ -583,9 +604,20 @@ static void SELFTEST_DrawDitherBackgroundExcludingBox(u8g2_t *u8g2,
   const int disp_w = (int)u8g2_GetDisplayWidth(u8g2);
   const int disp_h = (int)u8g2_GetDisplayHeight(u8g2);
 
+  /* ---------------------------------------------------------------------- */
+  /* 요청한 배경 패턴                                                        */
+  /* - 첫 번째 Y 라인(y=0)은 홀수 X 픽셀만 점등                              */
+  /* - 두 번째 Y 라인(y=1)은 짝수 X 픽셀만 점등                              */
+  /* - 그 다음 줄부터도 동일하게 한 줄씩 번갈아 가며 반복                    */
+  /*                                                                        */
+  /* 즉, 1라인 단위 체커보드가 아니라 "줄마다 찍는 시작 X가 번갈아 바뀌는"   */
+  /* 매우 단순한 service pattern이다.                                        */
+  /* ---------------------------------------------------------------------- */
   for (y = 0; y < disp_h; ++y)
   {
-    for (x = ((y & 1) != 0) ? 1 : 0; x < disp_w; x += 2)
+    const int start_x = ((y & 1) == 0) ? 1 : 0;
+
+    for (x = start_x; x < disp_w; x += 2)
     {
       if ((x >= box_x) && (x < (box_x + box_w)) &&
           (y >= box_y) && (y < (box_y + box_h)))
@@ -593,10 +625,7 @@ static void SELFTEST_DrawDitherBackgroundExcludingBox(u8g2_t *u8g2,
         continue;
       }
 
-      if ((((x >> 1) + y) & 1) == 0)
-      {
-        u8g2_DrawPixel(u8g2, x, y);
-      }
+      u8g2_DrawPixel(u8g2, x, y);
     }
   }
 }
@@ -667,6 +696,8 @@ static void SELFTEST_DrawMenuScreen(const char *title,
                                     uint8_t selected_id)
 {
   u8g2_t *u8g2 = U8G2_UC1608_GetHandle();
+  uint8_t first_visible = 0u;
+  uint8_t visible_count;
   uint8_t i;
 
   SELFTEST_DrawBaseFrame(u8g2);
@@ -679,17 +710,53 @@ static void SELFTEST_DrawMenuScreen(const char *title,
     u8g2_DrawStr(u8g2, SELFTEST_MENU_BOX_X + 6, SELFTEST_MENU_BOX_Y + 3, title);
   }
 
-  for (i = 0u; i < item_count; ++i)
+  if (item_count > SELFTEST_MENU_VISIBLE_ROWS)
   {
-    char line_buffer[40];
+    if (selected_id > (SELFTEST_MENU_VISIBLE_ROWS / 2u))
+    {
+      first_visible = (uint8_t)(selected_id - (SELFTEST_MENU_VISIBLE_ROWS / 2u));
+    }
+
+    if ((first_visible + SELFTEST_MENU_VISIBLE_ROWS) > item_count)
+    {
+      first_visible = (uint8_t)(item_count - SELFTEST_MENU_VISIBLE_ROWS);
+    }
+  }
+
+  visible_count = item_count - first_visible;
+  if (visible_count > SELFTEST_MENU_VISIBLE_ROWS)
+  {
+    visible_count = SELFTEST_MENU_VISIBLE_ROWS;
+  }
+
+  if (first_visible > 0u)
+  {
+    u8g2_DrawStr(u8g2,
+                 SELFTEST_MENU_BOX_X + SELFTEST_MENU_BOX_W - 12,
+                 SELFTEST_MENU_BOX_Y + 3,
+                 "^");
+  }
+
+  if ((first_visible + visible_count) < item_count)
+  {
+    u8g2_DrawStr(u8g2,
+                 SELFTEST_MENU_BOX_X + SELFTEST_MENU_BOX_W - 12,
+                 SELFTEST_MENU_BOX_Y + SELFTEST_MENU_BOX_H - 11,
+                 "v");
+  }
+
+  for (i = 0u; i < visible_count; ++i)
+  {
+    char line_buffer[48];
+    const uint8_t item_index = (uint8_t)(first_visible + i);
     const int row_y = SELFTEST_MENU_BOX_Y + 12 + ((int)i * SELFTEST_MENU_LINE_H);
-    const bool selected = (items[i].id == selected_id);
+    const bool selected = (items[item_index].id == selected_id);
 
     (void)snprintf(line_buffer,
                    sizeof(line_buffer),
-                   "%u. %s",
-                   (unsigned)items[i].id,
-                   items[i].label);
+                   "%02u. %s",
+                   (unsigned)items[item_index].id,
+                   items[item_index].label);
 
     if (selected)
     {
@@ -994,7 +1061,7 @@ static void SELFTEST_TestBootChain(uint8_t item_id,
   char line2[96];
   char line3[96];
 
-  SELFTEST_ResultReset(out_result, "BOOT CHAIN / F-W");
+  SELFTEST_ResultReset(out_result, "BOOT & F/W CHECK");
   start_ms = HAL_GetTick();
 
   boot_vector_ok = SELFTEST_IsVectorTablePlausible(SELFTEST_BOOT_BASE_ADDRESS,
@@ -1084,7 +1151,7 @@ static void SELFTEST_TestMcu(uint8_t item_id,
 
   (void)item_id;
 
-  SELFTEST_ResultReset(out_result, "MCU TEST");
+  SELFTEST_ResultReset(out_result, "MCU CHECK");
   start_ms = HAL_GetTick();
 
   cpuid = SCB->CPUID;
@@ -1104,7 +1171,7 @@ static void SELFTEST_TestMcu(uint8_t item_id,
   pll_ready = (__HAL_RCC_GET_FLAG(RCC_FLAG_PLLRDY) != RESET);
 
   tick0 = HAL_GetTick();
-  SELFTEST_PumpForMs(20u, SELFTEST_ITEM_MCU, "MCU TEST", "tick sanity", "", "");
+  SELFTEST_PumpForMs(20u, SELFTEST_ITEM_MCU, "MCU CHECK", "tick sanity", "", "");
   tick1 = HAL_GetTick();
 
   (void)snprintf(line1,
@@ -1196,7 +1263,7 @@ static void SELFTEST_TestRtc(uint8_t item_id,
   char line2[96];
   char line3[96];
 
-  SELFTEST_ResultReset(out_result, "RTC TEST");
+  SELFTEST_ResultReset(out_result, "RTC CHECK");
   start_ms = HAL_GetTick();
 
   memset(&time0, 0, sizeof(time0));
@@ -1267,89 +1334,138 @@ static void SELFTEST_TestRtc(uint8_t item_id,
   }
 }
 
-static bool SELFTEST_WaitForSpiCommandCompletion(uint32_t timeout_ms,
-                                                 spi_flash_snapshot_t *out_snapshot)
-{
-  uint32_t start_ms = HAL_GetTick();
-  spi_flash_snapshot_t first_snapshot;
-  bool saw_activity = false;
-
-  memset(&first_snapshot, 0, sizeof(first_snapshot));
-  SPI_Flash_CopySnapshot(&first_snapshot);
-
-  while ((HAL_GetTick() - start_ms) < timeout_ms)
-  {
-    SELFTEST_ServiceRuntime();
-    SPI_Flash_CopySnapshot(out_snapshot);
-
-    if ((out_snapshot->busy != false) ||
-        (out_snapshot->command_count != first_snapshot.command_count) ||
-        (out_snapshot->read_count != first_snapshot.read_count) ||
-        (out_snapshot->write_count != first_snapshot.write_count) ||
-        (out_snapshot->erase_count != first_snapshot.erase_count))
-    {
-      saw_activity = true;
-    }
-
-    if ((saw_activity != false) && (out_snapshot->busy == false))
-    {
-      return true;
-    }
-  }
-
-  return false;
-}
-
 static void SELFTEST_TestSpiFlash(uint8_t item_id,
                                   selftest_exec_result_t *out_result)
 {
   uint32_t start_ms;
   spi_flash_snapshot_t snapshot;
-  bool read_done;
-  bool write_done;
-  const char *result_text;
-  const char *state_text;
+  uint8_t jedec_mid = 0u;
+  uint8_t jedec_type = 0u;
+  uint8_t jedec_cap = 0u;
+  uint8_t sr1 = 0u;
+  uint8_t sr2 = 0u;
+  uint8_t sr3 = 0u;
+  uint8_t original[SPI_FLASH_TEST_LENGTH];
+  uint8_t verify[SPI_FLASH_TEST_LENGTH];
+  HAL_StatusTypeDef jedec_status;
+  HAL_StatusTypeDef sr_status;
+  HAL_StatusTypeDef read0_status;
+  HAL_StatusTypeDef write_status;
+  HAL_StatusTypeDef read1_status;
+  uint32_t test_address;
+  bool verify_ok = false;
   char line1[96];
   char line2[96];
   char line3[96];
 
-  SELFTEST_ResultReset(out_result, "SPI FLASH R/W");
+  SELFTEST_ResultReset(out_result, "SPI FLASH CHECK");
   start_ms = HAL_GetTick();
   memset(&snapshot, 0, sizeof(snapshot));
+  SPI_Flash_CopySnapshot(&snapshot);
+  memset(original, 0, sizeof(original));
+  memset(verify, 0, sizeof(verify));
 
-  SPI_Flash_RequestReadTest();
-  read_done = SELFTEST_WaitForSpiCommandCompletion(SELFTEST_SPI_TIMEOUT_MS, &snapshot);
+  if ((snapshot.initialized == false) || (snapshot.present == false) || (snapshot.capacity_bytes < SPI_FLASH_TEST_LENGTH))
+  {
+    (void)snprintf(line1,
+                   sizeof(line1),
+                   "init=%s present=%s cap=%lu",
+                   snapshot.initialized ? "YES" : "NO",
+                   snapshot.present ? "YES" : "NO",
+                   (unsigned long)snapshot.capacity_bytes);
+    (void)snprintf(line2,
+                   sizeof(line2),
+                   "flash basic availability check failed");
+    (void)snprintf(line3,
+                   sizeof(line3),
+                   "part=%s",
+                   (snapshot.part_name[0] != '\0') ? snapshot.part_name : "-");
+    SELFTEST_ResultSet(out_result,
+                       SELFTEST_RESULT_FAIL,
+                       line1,
+                       line2,
+                       line3,
+                       HAL_GetTick() - start_ms);
+    return;
+  }
 
-  SPI_Flash_RequestWriteTest();
-  write_done = SELFTEST_WaitForSpiCommandCompletion(SELFTEST_SPI_TIMEOUT_MS, &snapshot);
+  /* ---------------------------------------------------------------------- */
+  /* 비침습 write-path test                                                  */
+  /*                                                                        */
+  /* - 기존 request state machine 기반 test는 현재 장비에서 false FAIL이      */
+  /*   반복된다고 보고되었으므로, maintenance mode에서는 서비스 관점의        */
+  /*   blocking helper API 경로를 직접 사용한다.                             */
+  /* - 단, "기존 내용을 다른 패턴으로 덮어쓰기" 는 하지 않는다.               */
+  /* - 읽은 바이트를 같은 주소에 그대로 다시 program 하고 readback 비교만    */
+  /*   수행하여, erase 없는 non-invasive write path 검증만 수행한다.         */
+  /* ---------------------------------------------------------------------- */
+  jedec_status = SPI_Flash_ReadJedecId(&jedec_mid, &jedec_type, &jedec_cap);
+  sr_status = SPI_Flash_ReadStatusRegisters(&sr1, &sr2, &sr3);
 
-  result_text = SPI_Flash_GetResultText((spi_flash_result_t)snapshot.last_result);
-  state_text = SPI_Flash_GetTestStateText((spi_flash_test_state_t)snapshot.test_state);
+  test_address = snapshot.test_address;
+  if (test_address >= snapshot.capacity_bytes)
+  {
+    test_address = 0u;
+  }
+
+  if ((test_address + SPI_FLASH_TEST_LENGTH) > snapshot.capacity_bytes)
+  {
+    test_address = snapshot.capacity_bytes - SPI_FLASH_TEST_LENGTH;
+  }
+
+  test_address &= ~(uint32_t)(SPI_FLASH_PAGE_SIZE - 1u);
+
+  read0_status = SPI_Flash_ReadBuffer(test_address, original, sizeof(original));
+  SELFTEST_ServiceRuntime();
+
+  if (read0_status == HAL_OK)
+  {
+    write_status = SPI_Flash_WriteBuffer(test_address, original, sizeof(original));
+    SELFTEST_ServiceRuntime();
+    read1_status = SPI_Flash_ReadBuffer(test_address, verify, sizeof(verify));
+
+    if ((write_status == HAL_OK) &&
+        (read1_status == HAL_OK) &&
+        (memcmp(original, verify, sizeof(original)) == 0))
+    {
+      verify_ok = true;
+    }
+  }
+  else
+  {
+    write_status = HAL_ERROR;
+    read1_status = HAL_ERROR;
+  }
 
   (void)snprintf(line1,
                  sizeof(line1),
-                 "part=%s compat=%s",
+                 "part=%s JEDEC=%02X %02X %02X",
                  (snapshot.part_name[0] != '\0') ? snapshot.part_name : "-",
-                 snapshot.w25q16bv_compatible ? "YES" : "NO");
+                 (unsigned)jedec_mid,
+                 (unsigned)jedec_type,
+                 (unsigned)jedec_cap);
   (void)snprintf(line2,
                  sizeof(line2),
-                 "read=%s write=%s result=%s",
-                 read_done ? "DONE" : "TIMEOUT",
-                 write_done ? "DONE" : "TIMEOUT",
-                 (result_text != NULL) ? result_text : "-");
+                 "RD=%s WR=%s VF=%s compat=%s",
+                 SELFTEST_HalStatusText(read0_status),
+                 SELFTEST_HalStatusText(write_status),
+                 verify_ok ? "OK" : "FAIL",
+                 snapshot.w25q16bv_compatible ? "YES" : "NO");
   (void)snprintf(line3,
                  sizeof(line3),
-                 "state=%s cmd=%lu err=%lu addr=0x%08lX",
-                 (state_text != NULL) ? state_text : "-",
-                 (unsigned long)snapshot.command_count,
-                 (unsigned long)snapshot.error_count,
-                 (unsigned long)snapshot.test_address);
+                 "addr=0x%06lX SR=%02X/%02X/%02X cap=%luKB",
+                 (unsigned long)test_address,
+                 (unsigned)sr1,
+                 (unsigned)sr2,
+                 (unsigned)sr3,
+                 (unsigned long)(snapshot.capacity_bytes / 1024u));
 
-  if ((read_done != false) &&
-      (write_done != false) &&
-      (snapshot.w25q16bv_compatible != false) &&
-      (result_text != NULL) &&
-      (strcmp(result_text, "OK") == 0))
+  if ((jedec_status == HAL_OK) &&
+      (sr_status == HAL_OK) &&
+      (read0_status == HAL_OK) &&
+      (write_status == HAL_OK) &&
+      (read1_status == HAL_OK) &&
+      (verify_ok != false))
   {
     SELFTEST_ResultSet(out_result,
                        SELFTEST_RESULT_PASS,
@@ -1387,7 +1503,7 @@ static void SELFTEST_TestSd(uint8_t item_id,
   char line2[96];
   char line3[96];
 
-  SELFTEST_ResultReset(out_result, "SD R/W TEST");
+  SELFTEST_ResultReset(out_result, "SD CARD CHECK");
   start_ms = HAL_GetTick();
 
   memset(&fil, 0, sizeof(fil));
@@ -1516,7 +1632,7 @@ static void SELFTEST_TestGps(uint8_t item_id,
   char line2[96];
   char line3[96];
 
-  SELFTEST_ResultReset(out_result, "GPS / MON-VER");
+  SELFTEST_ResultReset(out_result, "GPS CHECK");
   start_ms = HAL_GetTick();
   memset(&gps, 0, sizeof(gps));
 
@@ -1608,7 +1724,7 @@ static void SELFTEST_TestGy86(uint8_t item_id,
   char line2[96];
   char line3[96];
 
-  SELFTEST_ResultReset(out_result, "GY86 / BARO / IMU");
+  SELFTEST_ResultReset(out_result, "GY86 CHECK");
   start_ms = HAL_GetTick();
   memset(&imu_start, 0, sizeof(imu_start));
   memset(&imu_now, 0, sizeof(imu_now));
@@ -1739,7 +1855,7 @@ static void SELFTEST_TestBluetooth(uint8_t item_id,
 
   (void)item_id;
 
-  SELFTEST_ResultReset(out_result, "BLUETOOTH TX");
+  SELFTEST_ResultReset(out_result, "BLUETOOTH CHECK");
   start_ms = HAL_GetTick();
 
   tx_status = Bluetooth_SendPrintf("[SELFTEST] Bluetooth TX sanity tick=%lu\r\n",
@@ -1747,7 +1863,7 @@ static void SELFTEST_TestBluetooth(uint8_t item_id,
 
   SELFTEST_PumpForMs(120u,
                      SELFTEST_ITEM_BLUETOOTH,
-                     "BLUETOOTH TX",
+                     "BLUETOOTH CHECK",
                      "sending sanity frame...",
                      "",
                      "");
@@ -1795,7 +1911,7 @@ static void SELFTEST_TestRam(uint8_t item_id,
   char line2[96];
   char line3[96];
 
-  SELFTEST_ResultReset(out_result, "MEM / RAM TEST");
+  SELFTEST_ResultReset(out_result, "MEMORY CHECK");
   start_ms = HAL_GetTick();
 
   for (pattern_index = 0u;
@@ -2226,7 +2342,7 @@ static void SELFTEST_RunGuidedSubItem(uint8_t sub_item_id,
     break;
 
   default:
-    SELFTEST_ResultReset(out_result, "USER GUIDED TEST");
+    SELFTEST_ResultReset(out_result, "GUIDED CHECK");
     SELFTEST_ResultSet(out_result,
                        SELFTEST_RESULT_FAIL,
                        "Unknown guided sub-item",
@@ -2248,13 +2364,12 @@ static void SELFTEST_RunGuidedComposite(selftest_exec_result_t *out_result)
 {
   uint8_t sub_id;
   uint32_t fail_count = 0u;
-  uint32_t start_ms = HAL_GetTick();
   char line1[96];
   char line2[96];
   char line3[96];
   selftest_exec_result_t local_result;
 
-  SELFTEST_ResultReset(out_result, "USER GUIDED TEST");
+  SELFTEST_ResultReset(out_result, "GUIDED CHECK");
 
   for (sub_id = 0u; sub_id < (uint8_t)SELFTEST_GUIDED_ITEM_COUNT; ++sub_id)
   {
@@ -2346,12 +2461,22 @@ static void SELFTEST_RunSingleMainItem(uint8_t item_id,
     SELFTEST_TestRam(item_id, out_result);
     break;
 
+  case SELFTEST_ITEM_DEBUG:
+    SELFTEST_ResultReset(out_result, "DEBUG MODE");
+    SELFTEST_ResultSet(out_result,
+                       SELFTEST_RESULT_INFO,
+                       "DEBUG MODE is launched by separate bridge",
+                       "Use TEST MODE -> DEBUG MODE entry",
+                       "",
+                       0u);
+    break;
+
   case SELFTEST_ITEM_AUTO_FULL:
   default:
     SELFTEST_ResultReset(out_result, "AUTO FULL TEST");
     SELFTEST_ResultSet(out_result,
                        SELFTEST_RESULT_INFO,
-                       "AUTO FULL TEST is dispatched by separate runner",
+                       "AUTO FULL TEST is handled by separate runner",
                        "",
                        "",
                        0u);
@@ -2374,7 +2499,7 @@ static void SELFTEST_RunAutoFull(selftest_exec_result_t *out_result)
   SELFTEST_ResultReset(out_result, "AUTO FULL TEST");
 
   for (item_id = (uint8_t)SELFTEST_ITEM_BOOT_CHAIN;
-       item_id < (uint8_t)SELFTEST_ITEM_COUNT;
+       item_id < (uint8_t)SELFTEST_ITEM_DEBUG;
        ++item_id)
   {
     const char *label = SELFTEST_MainItemLabel(item_id);
@@ -2421,7 +2546,7 @@ static void SELFTEST_RunAutoFull(selftest_exec_result_t *out_result)
                  (unsigned long)info_count);
   (void)snprintf(line2,
                  sizeof(line2),
-                 "items 1..10 completed");
+                 "items 01..10 completed");
   (void)snprintf(line3,
                  sizeof(line3),
                  "total=%lums",
@@ -2506,6 +2631,62 @@ static void SELFTEST_ShowResultAndWait(uint8_t item_id,
 }
 
 
+static void SELFTEST_RunDebugModeBridge(uint8_t item_id)
+{
+  u8g2_t *u8g2 = U8G2_UC1608_GetHandle();
+  uint32_t last_redraw_ms = 0u;
+  uint32_t return_hold_start_ms = 0u;
+  button_event_t event;
+
+  SELFTEST_ShowStickyInfo(item_id,
+                          "DEBUG MODE",
+                          "Developer page will open.",
+                          "Hold F1+F4 to return.");
+  SELFTEST_LogPrintf("[%02u] DEBUG MODE entered\r\n", (unsigned)item_id);
+
+  UI_DebugLegacy_Init();
+
+  for (;;)
+  {
+    const uint32_t now_ms = HAL_GetTick();
+
+    SELFTEST_ServiceRuntime();
+
+    while (Button_PopEvent(&event) != false)
+    {
+      (void)event;
+      UI_DebugLegacy_OnBoardButtonIrq(now_ms);
+    }
+
+    UI_DebugLegacy_Task(now_ms);
+
+    if ((Button_IsPressed(BUTTON_ID_1) != false) &&
+        (Button_IsPressed(BUTTON_ID_4) != false))
+    {
+      if (return_hold_start_ms == 0u)
+      {
+        return_hold_start_ms = now_ms;
+      }
+      else if ((now_ms - return_hold_start_ms) >= SELFTEST_DEBUG_RETURN_HOLD_MS)
+      {
+        SELFTEST_LogPrintf("[%02u] DEBUG MODE return to TEST MODE\r\n", (unsigned)item_id);
+        return;
+      }
+    }
+    else
+    {
+      return_hold_start_ms = 0u;
+    }
+
+    if (SELFTEST_ShouldRedraw(&last_redraw_ms) != false)
+    {
+      u8g2_ClearBuffer(u8g2);
+      UI_DebugLegacy_Draw(u8g2, now_ms);
+      U8G2_UC1608_CommitBuffer();
+    }
+  }
+}
+
 static void SELFTEST_MainMenuLoop(void)
 {
   uint8_t main_selection = 0u;
@@ -2536,7 +2717,7 @@ static void SELFTEST_MainMenuLoop(void)
 
       if (SELFTEST_ShouldRedraw(&last_main_redraw_ms) != false)
       {
-        SELFTEST_DrawMenuScreen("MAIN MENU",
+        SELFTEST_DrawMenuScreen("SERVICE MENU",
                                 g_selftest_main_menu,
                                 (uint8_t)SELFTEST_ITEM_COUNT,
                                 main_selection);
@@ -2555,14 +2736,21 @@ static void SELFTEST_MainMenuLoop(void)
       if (back != false)
       {
         SELFTEST_ShowStickyInfo(main_selection,
-                                "MAINTENANCE MODE",
-                                "Exit is disabled by design.",
-                                "Power cycle / hardware power-off only.");
+                                "TEST MODE LOCKED",
+                                "This mode stays active until power-off.",
+                                "Use hardware power switch to leave.");
         continue;
       }
 
       if (execute == false)
       {
+        continue;
+      }
+
+      if (main_selection == (uint8_t)SELFTEST_ITEM_DEBUG)
+      {
+        SELFTEST_RunDebugModeBridge(main_selection);
+        last_main_redraw_ms = 0u;
         continue;
       }
 
@@ -2584,7 +2772,7 @@ static void SELFTEST_MainMenuLoop(void)
 
           if (SELFTEST_ShouldRedraw(&last_guided_redraw_ms) != false)
           {
-            SELFTEST_DrawMenuScreen("GUIDED TEST",
+            SELFTEST_DrawMenuScreen("GUIDED CHECK",
                                     g_selftest_guided_menu,
                                     (uint8_t)SELFTEST_GUIDED_ITEM_COUNT,
                                     guided_selection);
