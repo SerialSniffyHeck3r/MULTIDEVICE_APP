@@ -84,14 +84,6 @@
 #define APP_ALTITUDE_PRESSURE_CM_PER_HPA_AT_SEA_LEVEL 843.0f
 #endif
 
-#ifndef APP_ALTITUDE_PRESSURE_CORRECTION_MIN_HPA_X100
-#define APP_ALTITUDE_PRESSURE_CORRECTION_MIN_HPA_X100 (-2000)
-#endif
-
-#ifndef APP_ALTITUDE_PRESSURE_CORRECTION_MAX_HPA_X100
-#define APP_ALTITUDE_PRESSURE_CORRECTION_MAX_HPA_X100 (2000)
-#endif
-
 #ifndef APP_ALTITUDE_BARO_ADAPTIVE_NOISE_TAU_MS
 #define APP_ALTITUDE_BARO_ADAPTIVE_NOISE_TAU_MS 350u
 #endif
@@ -608,28 +600,6 @@ static float APP_ALTITUDE_ClampF(float value, float min_value, float max_value)
         return max_value;
     }
     return value;
-}
-
-static float APP_ALTITUDE_GetPressureCorrectionHpa(const app_altitude_settings_t *settings)
-{
-    int32_t correction_hpa_x100;
-
-    if (settings == NULL)
-    {
-        return 0.0f;
-    }
-
-    correction_hpa_x100 = settings->pressure_correction_hpa_x100;
-    if (correction_hpa_x100 < APP_ALTITUDE_PRESSURE_CORRECTION_MIN_HPA_X100)
-    {
-        correction_hpa_x100 = APP_ALTITUDE_PRESSURE_CORRECTION_MIN_HPA_X100;
-    }
-    else if (correction_hpa_x100 > APP_ALTITUDE_PRESSURE_CORRECTION_MAX_HPA_X100)
-    {
-        correction_hpa_x100 = APP_ALTITUDE_PRESSURE_CORRECTION_MAX_HPA_X100;
-    }
-
-    return ((float)correction_hpa_x100) * 0.01f;
 }
 
 static uint32_t APP_ALTITUDE_ClampU32(uint32_t value, uint32_t min_value, uint32_t max_value)
@@ -3453,6 +3423,7 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
     float dt_s;
     float baro_dt_s;
     float pressure_raw_hpa;
+    float pressure_corrected_hpa;
     float pressure_prefilt_hpa;
     float qnh_manual_hpa;
     float qnh_equiv_hpa;
@@ -3525,6 +3496,7 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
     gps_quality_permille = 0u;
 
     pressure_raw_hpa = 0.0f;
+    pressure_corrected_hpa = 0.0f;
     pressure_prefilt_hpa = s_altitude_runtime.pressure_prefilt_hpa;
     qnh_equiv_hpa = s_altitude_runtime.qnh_equiv_filt_hpa;
     alt_std_cm = 0.0f;
@@ -3553,6 +3525,7 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
 
     qnh_manual_hpa = ((float)settings->manual_qnh_hpa_x100) * 0.01f;
     qnh_manual_hpa = APP_ALTITUDE_ClampF(qnh_manual_hpa, 800.0f, 1100.0f);
+    pressure_corrected_hpa = pressure_raw_hpa + (((float)settings->pressure_correction_hpa_x100) * 0.01f);
 
     /* ------------------------------------------------------------------ */
     /*  BARO path                                                           */
@@ -3581,18 +3554,23 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
         pressure_raw_hpa = ((float)baro->pressure_hpa_x100) * 0.01f;
 
         /* ------------------------------------------------------------------ */
-        /*  pressure correction                                                 */
+        /*  installation / static bias correction                              */
         /*                                                                    */
-        /*  사용자 correction 값은 QNH를 바꾸는 설정이 아니라,                 */
-        /*  센서 static offset을 low-level pressure path에 더하는 장치 보정값이다.*/
+        /*  correction은 QNH를 바꾸는 항목이 아니다.                           */
+        /*  센서 raw static pressure에 additive bias를 먼저 적용한 뒤          */
+        /*  그 corrected pressure를                                            */
+        /*  - baro median/prefilter                                            */
+        /*  - QNH altitude                                                     */
+        /*  - FL / standard altitude                                           */
+        /*  - Smart Fuse / display path                                        */
+        /*  전부의 공통 입력으로 사용한다.                                     */
         /*                                                                    */
-        /*  따라서 correction은                                               */
-        /*  - prefilter 이전 raw pressure에 먼저 적용하고                     */
-        /*  - 이후의 pressure LPF / baro altitude / baro vario / fused path   */
-        /*    전체가 같은 corrected pressure를 공유하도록 한다.              */
+        /*  반대로 pressure_raw_hpa_x100 publish 값은 실제 raw 센서값을        */
+        /*  그대로 남겨, 현장 로그에서 센서 원본과 correction 적용 결과를      */
+        /*  분리해서 볼 수 있게 유지한다.                                      */
         /* ------------------------------------------------------------------ */
-        pressure_raw_hpa += APP_ALTITUDE_GetPressureCorrectionHpa(settings);
-        pressure_prefilt_hpa = APP_ALTITUDE_UpdatePressurePrefilter(pressure_raw_hpa);
+        pressure_corrected_hpa = pressure_raw_hpa + (((float)settings->pressure_correction_hpa_x100) * 0.01f);
+        pressure_prefilt_hpa = APP_ALTITUDE_UpdatePressurePrefilter(pressure_corrected_hpa);
 
         if ((s_altitude_runtime.pressure_filt_hpa <= 0.0f) || (alt_prev->baro_valid == false))
         {
@@ -3627,6 +3605,7 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
     else if (alt_prev->baro_valid != false)
     {
         pressure_raw_hpa = ((float)alt_prev->pressure_raw_hpa_x100) * 0.01f;
+        pressure_corrected_hpa = pressure_raw_hpa + (((float)settings->pressure_correction_hpa_x100) * 0.01f);
         pressure_prefilt_hpa = ((float)alt_prev->pressure_prefilt_hpa_x100) * 0.01f;
         alt_std_cm = (float)alt_prev->alt_pressure_std_cm;
         alt_qnh_cm = (float)alt_prev->alt_qnh_manual_cm;
