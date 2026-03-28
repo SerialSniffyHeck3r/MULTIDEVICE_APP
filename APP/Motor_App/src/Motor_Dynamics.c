@@ -41,6 +41,8 @@ static motor_dynamics_runtime_t s_runtime;
 #define MOTOR_DYN_ZERO_HINT_ACCEL_MG            220
 #define MOTOR_DYN_ZERO_HINT_JERK_MG_PER_S      3500
 #define MOTOR_DYN_ZERO_HINT_MIN_TRUST           250u
+#define MOTOR_DYN_ZERO_HINT_GYRO_STILL_DPS_X10   35
+#define MOTOR_DYN_ZERO_HINT_WAIT_TRUST_MS      1000u
 #define MOTOR_DYN_ZERO_HINT_STOP_KMH_X10         10u
 
 static void motor_dyn_reset_history(motor_dynamics_state_t *dyn)
@@ -298,10 +300,22 @@ static const char *motor_dyn_format_zero_popup(uint32_t now_ms,
         return "LEVEL BIKE FOR ZERO";
     }
 
-    if (motor_dyn_abs_i32((int32_t)bike->imu_accel_norm_mg - 1000) > MOTOR_DYN_ZERO_HINT_ACCEL_MG)
+    /* ---------------------------------------------------------------------- */
+    /*  message ordering fix                                                   */
+    /*                                                                        */
+    /*  기존 구현은 accel norm 편차를 jerk보다 먼저 검사해서,                   */
+    /*  단순히 손으로 흔든 상황에서도 "CHECK MOUNT ANGLE" 이 먼저 뜰 수 있었다. */
+    /*                                                                        */
+    /*  accel norm은 mount angle을 직접 말해 주는 값이 아니다.                 */
+    /*  정지 상태에서 기기를 기울여도 norm은 여전히 거의 1g 이기 때문이다.     */
+    /*                                                                        */
+    /*  따라서 motion 징후(gyro / jerk)를 먼저 보고,                           */
+    /*  accel norm 편차는 "추가 힘/압력/충격이 걸렸다"는 의미로만 해석한다.     */
+    /* ---------------------------------------------------------------------- */
+    if (motor_dyn_abs_i32((int32_t)bike->yaw_rate_dps_x10) > MOTOR_DYN_ZERO_HINT_GYRO_STILL_DPS_X10)
     {
-        motor_dyn_set_line2(line2, line2_size, "CHECK MOUNT ANGLE");
-        return "KEEP BIKE LEVEL";
+        motor_dyn_set_line2(line2, line2_size, "WAIT FOR GYRO STILL");
+        return "HOLD MORE STILL";
     }
 
     if (motor_dyn_abs_i32(bike->imu_jerk_mg_per_s) > MOTOR_DYN_ZERO_HINT_JERK_MG_PER_S)
@@ -310,9 +324,26 @@ static const char *motor_dyn_format_zero_popup(uint32_t now_ms,
         return "HOLD MORE STILL";
     }
 
-    if (bike->imu_attitude_trust_permille < MOTOR_DYN_ZERO_HINT_MIN_TRUST)
+    if (motor_dyn_abs_i32((int32_t)bike->imu_accel_norm_mg - 1000) > MOTOR_DYN_ZERO_HINT_ACCEL_MG)
     {
-        motor_dyn_set_line2(line2, line2_size, "KEEP BIKE STILL");
+        motor_dyn_set_line2(line2, line2_size, "REMOVE EXTRA FORCE");
+        return "REST ON FLAT SURFACE";
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /*  trust는 startup 참고 정보로만 사용한다.                                */
+    /*                                                                        */
+    /*  low-level zero gate는 이제 raw accel/gyro/jerk/speed stillness를      */
+    /*  직접 사용하므로, trust가 잠깐 낮다고 popup을 계속                      */
+    /*  "WAIT ATTITUDE SETTLE" 에 묶어 둘 필요가 없다.                         */
+    /*                                                                        */
+    /*  따라서 IMU가 막 살아난 직후의 짧은 구간에서만 이 메시지를 허용하고,    */
+    /*  그 이후에는 사용자를 계속 "HOLD STILL 1.5s" 경로로 안내한다.          */
+    /* ---------------------------------------------------------------------- */
+    if (((uint32_t)(now_ms - s_runtime.cal_flow_start_ms) < MOTOR_DYN_ZERO_HINT_WAIT_TRUST_MS) &&
+        (bike->imu_attitude_trust_permille < MOTOR_DYN_ZERO_HINT_MIN_TRUST))
+    {
+        motor_dyn_set_line2(line2, line2_size, "FILTER LOCKING");
         return "WAIT ATTITUDE SETTLE";
     }
 
@@ -325,6 +356,7 @@ static const char *motor_dyn_format_zero_popup(uint32_t now_ms,
     motor_dyn_set_line2(line2, line2_size, "HOLD STILL 1.5s");
     return "LEVEL BIKE FOR ZERO";
 }
+
 
 
 static void motor_dyn_run_calibration_supervisor(uint32_t now_ms,

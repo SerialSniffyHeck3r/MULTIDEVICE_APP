@@ -122,15 +122,18 @@ typedef enum
 /* -------------------------------------------------------------------------- */
 /*  ALT2 mode                                                                 */
 /*                                                                            */
-/*  RELATIVE     : Flytec ALT2 기본 개념. 사용자가 잡은 기준고도 대비 상대고도  */
-/*  ABSOLUTE     : ALT1 과 같은 absolute altitude 를 ALT2 자리에도 표시        */
-/*  GPS          : GPS hMSL altitude                                           */
-/*  FLIGHT_LEVEL : 1013.25 hPa 기준 pressure altitude 를 FL 로 표시            */
+/*  RELATIVE     : 사용자가 캡처한 ALT1 기준점 대비 상대고도                   */
+/*  ABSOLUTE     : ALT1 과 같은 법적/대회용 barometric absolute altitude      */
+/*  SMART_FUSE   : 저수준 fused altitude 중 가장 신뢰할 수 있는 assisted 경로  */
+/*                 를 자동 선택해서 표시                                      */
+/*  GPS          : GPS hMSL altitude                                          */
+/*  FLIGHT_LEVEL : 1013.25 hPa 기준 pressure altitude 를 FL 로 표시           */
 /* -------------------------------------------------------------------------- */
 typedef enum
 {
     VARIO_ALT2_MODE_RELATIVE = 0u,
     VARIO_ALT2_MODE_ABSOLUTE,
+    VARIO_ALT2_MODE_SMART_FUSE,
     VARIO_ALT2_MODE_GPS,
     VARIO_ALT2_MODE_FLIGHT_LEVEL,
     VARIO_ALT2_MODE_COUNT
@@ -139,11 +142,10 @@ typedef enum
 /* -------------------------------------------------------------------------- */
 /*  ALT source                                                                */
 /*                                                                            */
-/*  DISPLAY      : APP_ALTITUDE 가 최종 UI용으로 공개한 alt_display_cm         */
-/*  QNH_MANUAL   : APP_ALTITUDE가 APP_STATE에 publish한 manual-QNH 결과 사용    */
-/*  FUSED_NOIMU  : IMU 미사용 fused altitude                                  */
-/*  FUSED_IMU    : IMU 보조 fused altitude                                    */
-/*  GPS_HMSL     : GPS hMSL                                                    */
+/*  중요                                                                      */
+/*  - 이 enum은 이제 user-facing menu가 아니라 내부 compatibility용이다.      */
+/*  - ALT1은 별도 source 선택 없이 legal barometric path로 고정한다.          */
+/*  - assisted / GPS / FL 등은 ALT2 mode에서 사용자에게 노출한다.            */
 /* -------------------------------------------------------------------------- */
 typedef enum
 {
@@ -179,6 +181,7 @@ typedef enum
 typedef enum
 {
     VARIO_QUICKSET_ITEM_QNH = 0u,
+    VARIO_QUICKSET_ITEM_PRESSURE_CORRECTION,
     VARIO_QUICKSET_ITEM_ALT_UNIT,
     VARIO_QUICKSET_ITEM_ALT2_MODE,
     VARIO_QUICKSET_ITEM_ALT2_UNIT,
@@ -189,6 +192,7 @@ typedef enum
     VARIO_QUICKSET_ITEM_TIME_FORMAT,
     VARIO_QUICKSET_ITEM_COORD_FORMAT,
     VARIO_QUICKSET_ITEM_ALT_SOURCE,
+    VARIO_QUICKSET_ITEM_IMU_ASSIST,
     VARIO_QUICKSET_ITEM_HEADING_SOURCE,
     VARIO_QUICKSET_ITEM_VARIO_DAMPING,
     VARIO_QUICKSET_ITEM_AUDIO_RESPONSE,
