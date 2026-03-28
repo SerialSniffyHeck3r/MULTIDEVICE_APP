@@ -3594,10 +3594,12 @@ static void vario_display_draw_vario_value_block(u8g2_t *u8g2,
     int16_t max_box_h;
     int16_t te_meta_x;
     int16_t te_meta_y;
-    int16_t te_meta_w;
     int16_t te_value_x;
     int16_t te_value_y;
     int16_t te_value_w;
+    int16_t te_label_y;
+    int16_t te_label_h;
+    uint8_t te_value_in_meta_row;
 
     if ((u8g2 == NULL) || (v == NULL) || (rt == NULL))
     {
@@ -3626,6 +3628,7 @@ static void vario_display_draw_vario_value_block(u8g2_t *u8g2,
     vario_display_format_peak_vario(max_text, sizeof(max_text), rt->max_top_vario_mps);
 
     te_meta_x = (int16_t)(v->x + VARIO_UI_SIDE_BAR_W + 2 + VARIO_UI_BOTTOM_META_BOX_W + 3);
+    te_value_in_meta_row = 0u;
 
     if ((settings == NULL) || (settings->show_max_vario != 0u))
     {
@@ -3645,21 +3648,43 @@ static void vario_display_draw_vario_value_block(u8g2_t *u8g2,
                                         max_text);
 
         /* ------------------------------------------------------------------ */
-        /* max VARIO row 우측 Est.TE label                                     */
+        /* Est.TE compact block                                                */
         /*                                                                      */
-        /* meta row 에 label 을 두고,                                           */
-        /* 바로 아래 reserved row 에 실제 Estimated TE 값을 별도로 그린다.      */
+        /* 사용자의 최신 요구사항                                              */
+        /* - 기존 굵은 "Est.TE" 텍스트가 있던 자리에 실제 값을 놓는다.          */
+        /* - 값은 고정 폭 "-99.9" 슬롯 안에서 right align 한다.                 */
+        /* - 라벨은 그 값 바로 위 2 px 위치에, unit 폰트로 작게 그린다.          */
+        /* - 이 변경 외의 다른 레이아웃은 건드리지 않는다.                      */
         /* ------------------------------------------------------------------ */
         te_meta_x = (int16_t)(max_box_x + VARIO_UI_BOTTOM_META_BOX_W + 3);
         te_meta_y = max_box_y;
-        te_meta_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_BOTTOM_MAX_VALUE, "Est.TE");
+        te_value_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_ALT2_UNIT, "-99.9");
+        te_label_h = vario_display_get_font_height(u8g2, VARIO_UI_FONT_ALT2_UNIT);
+        if (te_label_h <= 0)
+        {
+            te_label_h = 8;
+        }
+        te_label_y = (int16_t)(te_meta_y - te_label_h - 2);
+
+        vario_display_draw_text_box_top(u8g2,
+                                        te_meta_x,
+                                        te_label_y,
+                                        te_value_w,
+                                        VARIO_UI_ALIGN_RIGHT,
+                                        VARIO_UI_FONT_ALT2_UNIT,
+                                        "Est.TE");
+
+        vario_display_format_estimated_te_value(te_value_text,
+                                                sizeof(te_value_text),
+                                                rt);
         vario_display_draw_text_box_top(u8g2,
                                         te_meta_x,
                                         te_meta_y,
-                                        te_meta_w,
-                                        VARIO_UI_ALIGN_LEFT,
-                                        VARIO_UI_FONT_BOTTOM_MAX_VALUE,
-                                        "Est.TE");
+                                        te_value_w,
+                                        VARIO_UI_ALIGN_RIGHT,
+                                        VARIO_UI_FONT_ALT2_UNIT,
+                                        te_value_text);
+        te_value_in_meta_row = 1u;
     }
 
     vario_display_draw_fixed_vario_current_value(u8g2,
@@ -3670,28 +3695,27 @@ static void vario_display_draw_vario_value_block(u8g2_t *u8g2,
                                                  value_text,
                                                  rt->baro_vario_mps);
 
-    /* ---------------------------------------------------------------------- */
-    /* Estimated TE lower row                                                  */
-    /*                                                                        */
-    /* 현행 요구사항                                                           */
-    /* - Est.TE label 은 meta row 에 유지한다.                                 */
-    /* - 그 바로 아래 reserved row 에 실제 Estimated TE 값을 표시한다.         */
-    /* - 값은 "-XX.X" 슬롯 폭을 가진 fixed box 안에서 right align 한다.        */
-    /* - 숫자가 바뀌어도 anchor 가 움직이지 않도록 width 를 고정한다.          */
-    /* ---------------------------------------------------------------------- */
-    vario_display_format_estimated_te_value(te_value_text,
-                                                  sizeof(te_value_text),
-                                                  rt);
-    te_value_x = te_meta_x;
-    te_value_y = vario_display_get_vario_estimated_te_top_y(u8g2, v);
-    te_value_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_ALT2_UNIT, "-99.9");
-    vario_display_draw_text_box_top(u8g2,
-                                    te_value_x,
-                                    te_value_y,
-                                    te_value_w,
-                                    VARIO_UI_ALIGN_RIGHT,
-                                    VARIO_UI_FONT_ALT2_UNIT,
-                                    te_value_text);
+    if (te_value_in_meta_row == 0u)
+    {
+        /* ------------------------------------------------------------------ */
+        /* show_max_vario 가 꺼진 기존 배치 fallback                            */
+        /*                                                                      */
+        /* 이 경로는 기존 동작을 보존하기 위해 유지한다.                        */
+        /* ------------------------------------------------------------------ */
+        vario_display_format_estimated_te_value(te_value_text,
+                                                sizeof(te_value_text),
+                                                rt);
+        te_value_x = te_meta_x;
+        te_value_y = vario_display_get_vario_estimated_te_top_y(u8g2, v);
+        te_value_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_ALT2_UNIT, "-99.9");
+        vario_display_draw_text_box_top(u8g2,
+                                        te_value_x,
+                                        te_value_y,
+                                        te_value_w,
+                                        VARIO_UI_ALIGN_RIGHT,
+                                        VARIO_UI_FONT_ALT2_UNIT,
+                                        te_value_text);
+    }
 
     (void)settings;
 }

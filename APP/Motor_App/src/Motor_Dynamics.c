@@ -33,10 +33,15 @@ typedef struct
 
 static motor_dynamics_runtime_t s_runtime;
 
-#define MOTOR_DYN_CAL_POPUP_HOLD_MS        1200u
-#define MOTOR_DYN_CAL_POPUP_REFRESH_MS      400u
-#define MOTOR_DYN_MANUAL_ZERO_POPUP_MAX_MS 12000u
-#define MOTOR_DYN_BOOT_IMU_READY_STALE_MS    500u
+#define MOTOR_DYN_CAL_POPUP_HOLD_MS           1200u
+#define MOTOR_DYN_CAL_POPUP_REFRESH_MS          400u
+#define MOTOR_DYN_MANUAL_ZERO_POPUP_MAX_MS    12000u
+#define MOTOR_DYN_BOOT_IMU_READY_STALE_MS       500u
+#define MOTOR_DYN_BOOT_ZERO_HINT_ESCALATE_MS   8000u
+#define MOTOR_DYN_ZERO_HINT_ACCEL_MG            220
+#define MOTOR_DYN_ZERO_HINT_JERK_MG_PER_S      3500
+#define MOTOR_DYN_ZERO_HINT_MIN_TRUST           250u
+#define MOTOR_DYN_ZERO_HINT_STOP_KMH_X10         10u
 
 static void motor_dyn_reset_history(motor_dynamics_state_t *dyn)
 {
@@ -255,6 +260,73 @@ static bool motor_dyn_is_imu_ready(uint32_t now_ms, const app_bike_state_t *bike
     return true;
 }
 
+static int32_t motor_dyn_abs_i32(int32_t value)
+{
+    return (value < 0) ? -value : value;
+}
+
+static void motor_dyn_set_line2(char *dst, size_t dst_size, const char *src)
+{
+    if ((dst == 0) || (dst_size == 0u))
+    {
+        return;
+    }
+
+    if (src == 0)
+    {
+        dst[0] = '\0';
+        return;
+    }
+
+    (void)snprintf(dst, dst_size, "%s", src);
+}
+
+static const char *motor_dyn_format_zero_popup(uint32_t now_ms,
+                                               const app_bike_state_t *bike,
+                                               char *line2,
+                                               size_t line2_size)
+{
+    if (motor_dyn_is_imu_ready(now_ms, bike) == false)
+    {
+        motor_dyn_set_line2(line2, line2_size, "CHECK IMU DATA");
+        return "WAITING FOR IMU";
+    }
+
+    if ((uint32_t)motor_dyn_abs_i32((int32_t)bike->speed_kmh_x10) > MOTOR_DYN_ZERO_HINT_STOP_KMH_X10)
+    {
+        motor_dyn_set_line2(line2, line2_size, "STOP VEHICLE");
+        return "LEVEL BIKE FOR ZERO";
+    }
+
+    if (motor_dyn_abs_i32((int32_t)bike->imu_accel_norm_mg - 1000) > MOTOR_DYN_ZERO_HINT_ACCEL_MG)
+    {
+        motor_dyn_set_line2(line2, line2_size, "CHECK MOUNT ANGLE");
+        return "KEEP BIKE LEVEL";
+    }
+
+    if (motor_dyn_abs_i32(bike->imu_jerk_mg_per_s) > MOTOR_DYN_ZERO_HINT_JERK_MG_PER_S)
+    {
+        motor_dyn_set_line2(line2, line2_size, "WAIT FOR STABLE HOLD");
+        return "HOLD MORE STILL";
+    }
+
+    if (bike->imu_attitude_trust_permille < MOTOR_DYN_ZERO_HINT_MIN_TRUST)
+    {
+        motor_dyn_set_line2(line2, line2_size, "KEEP BIKE STILL");
+        return "WAIT ATTITUDE SETTLE";
+    }
+
+    if ((uint32_t)(now_ms - s_runtime.cal_flow_start_ms) >= MOTOR_DYN_BOOT_ZERO_HINT_ESCALATE_MS)
+    {
+        motor_dyn_set_line2(line2, line2_size, "VERIFY AXIS SETUP");
+        return "CHECK AXIS / MOUNT";
+    }
+
+    motor_dyn_set_line2(line2, line2_size, "HOLD STILL 1.5s");
+    return "LEVEL BIKE FOR ZERO";
+}
+
+
 static void motor_dyn_run_calibration_supervisor(uint32_t now_ms,
                                                  const app_bike_state_t *bike)
 {
@@ -383,25 +455,39 @@ static void motor_dyn_run_calibration_supervisor(uint32_t now_ms,
         break;
 
     case MOTOR_DYN_CAL_FLOW_BOOT_ZERO:
-        if ((bike->zero_valid == false) && (s_runtime.cal_request_sent == 0u))
+    {
+        const char *line1_ptr;
+
+        if (bike->zero_valid != false)
+        {
+            motor_dyn_finish_cal_flow("CAL OK");
+            break;
+        }
+
+        if (motor_dyn_is_imu_ready(now_ms, bike) == false)
+        {
+            s_runtime.cal_request_sent = 0u;
+            motor_dyn_show_cal_popup(now_ms,
+                                     "CALIB REQUIRED!",
+                                     "WAITING FOR IMU",
+                                     "CHECK IMU DATA");
+            break;
+        }
+
+        if (s_runtime.cal_request_sent == 0u)
         {
             Motor_Dynamics_RequestZeroCapture();
             s_runtime.cal_request_sent = 1u;
             s_runtime.cal_expected_zero_capture_ms = bike->last_zero_capture_ms;
         }
 
-        if ((bike->zero_valid != false) ||
-            (bike->last_zero_capture_ms != s_runtime.cal_expected_zero_capture_ms))
-        {
-            motor_dyn_finish_cal_flow("CAL OK");
-            break;
-        }
-
+        line1_ptr = motor_dyn_format_zero_popup(now_ms, bike, line2, sizeof(line2));
         motor_dyn_show_cal_popup(now_ms,
                                  "CALIB REQUIRED!",
-                                 (bike->imu_valid != false) ? "LEVEL BIKE FOR ZERO" : "WAITING FOR IMU",
-                                 (bike->imu_valid != false) ? "HOLD STILL 1.5s" : "CHECK IMU DATA");
+                                 line1_ptr,
+                                 line2);
         break;
+    }
 
     case MOTOR_DYN_CAL_FLOW_MANUAL_GYRO:
         if ((bike->gyro_bias_valid != false) &&
@@ -439,6 +525,9 @@ static void motor_dyn_run_calibration_supervisor(uint32_t now_ms,
         break;
 
     case MOTOR_DYN_CAL_FLOW_MANUAL_ZERO:
+    {
+        const char *line1_ptr;
+
         if (bike->last_zero_capture_ms != s_runtime.cal_expected_zero_capture_ms)
         {
             motor_dyn_finish_cal_flow("ZERO OK");
@@ -458,11 +547,13 @@ static void motor_dyn_run_calibration_supervisor(uint32_t now_ms,
             break;
         }
 
+        line1_ptr = motor_dyn_format_zero_popup(now_ms, bike, line2, sizeof(line2));
         motor_dyn_show_cal_popup(now_ms,
                                  "ZERO CAPTURE",
-                                 (bike->imu_valid != false) ? "LEVEL BIKE / HOLD" : "WAITING FOR IMU",
-                                 (bike->imu_valid != false) ? "WAIT FOR STABLE HOLD" : "CHECK IMU DATA");
+                                 line1_ptr,
+                                 line2);
         break;
+    }
 
     case MOTOR_DYN_CAL_FLOW_NONE:
     default:
