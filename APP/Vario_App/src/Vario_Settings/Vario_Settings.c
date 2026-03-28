@@ -31,16 +31,31 @@ static vario_settings_t s_vario_settings;
 #define VARIO_SETTINGS_QNH_SNAPSHOT_MIN_HPA_X100   80000
 #define VARIO_SETTINGS_QNH_SNAPSHOT_MAX_HPA_X100  110000
 
-#define VARIO_SETTINGS_PRESSURE_CORR_MIN_HPA_X100 (-2000)
-#define VARIO_SETTINGS_PRESSURE_CORR_MAX_HPA_X100 (2000)
+/* -------------------------------------------------------------------------- */
+/*  Static / installation pressure correction                                  */
+/*                                                                            */
+/*  correction은 QNH와 다른 서랍이다.                                         */
+/*  - QNH        : 외부 기준 sea-level pressure                               */
+/*  - correction : 기기 / 하우징 / static port 편차 보정                      */
+/*                                                                            */
+/*  단위는 0.01 hPa 고정소수점이고, runtime 범위는 ±10.00 hPa로 제한한다.      */
+/*  현장 보정 항목으로는 충분히 넓고, 잘못된 입력으로 QNH 의미를 훼손하지도    */
+/*  않게 하려는 타협값이다.                                                   */
+/* -------------------------------------------------------------------------- */
+#define VARIO_SETTINGS_BARO_CORR_DEFAULT_HPA_X100         0
+#define VARIO_SETTINGS_BARO_CORR_RUNTIME_MIN_HPA_X100 -1000
+#define VARIO_SETTINGS_BARO_CORR_RUNTIME_MAX_HPA_X100  1000
+#define VARIO_SETTINGS_BARO_CORR_SNAPSHOT_MIN_HPA_X100 -5000
+#define VARIO_SETTINGS_BARO_CORR_SNAPSHOT_MAX_HPA_X100  5000
 
 typedef enum
 {
     VARIO_MENU_ITEM_QNH = 0u,
-    VARIO_MENU_ITEM_PRESSURE_CORRECTION,
+    VARIO_MENU_ITEM_BARO_CORRECTION,
     VARIO_MENU_ITEM_ALT_UNIT,
     VARIO_MENU_ITEM_ALT2_MODE,
     VARIO_MENU_ITEM_ALT2_UNIT,
+    VARIO_MENU_ITEM_ALT3_MODE,
     VARIO_MENU_ITEM_VSPEED_UNIT,
     VARIO_MENU_ITEM_SPEED_UNIT,
     VARIO_MENU_ITEM_PRESSURE_UNIT,
@@ -48,8 +63,8 @@ typedef enum
     VARIO_MENU_ITEM_TIME_FORMAT,
     VARIO_MENU_ITEM_COORD_FORMAT,
     VARIO_MENU_ITEM_ALT_SOURCE,
-    VARIO_MENU_ITEM_IMU_ASSIST,
     VARIO_MENU_ITEM_HEADING_SOURCE,
+    VARIO_MENU_ITEM_IMU_ASSIST,
     VARIO_MENU_ITEM_BACKLIGHT_MODE,
     VARIO_MENU_ITEM_BRIGHTNESS,
     VARIO_MENU_ITEM_CONTRAST,
@@ -147,11 +162,12 @@ static const vario_menu_item_t s_vario_category_log_items[] = {
 
 static const vario_menu_item_t s_vario_category_flight_items[] = {
     VARIO_MENU_ITEM_QNH,
-    VARIO_MENU_ITEM_PRESSURE_CORRECTION,
+    VARIO_MENU_ITEM_BARO_CORRECTION,
     VARIO_MENU_ITEM_ALT2_MODE,
     VARIO_MENU_ITEM_ALT2_UNIT,
-    VARIO_MENU_ITEM_IMU_ASSIST,
+    VARIO_MENU_ITEM_ALT3_MODE,
     VARIO_MENU_ITEM_HEADING_SOURCE,
+    VARIO_MENU_ITEM_IMU_ASSIST,
     VARIO_MENU_ITEM_INT_AVG,
     VARIO_MENU_ITEM_FLIGHT_START,
     VARIO_MENU_ITEM_TRAINER,
@@ -248,16 +264,31 @@ static void vario_settings_store_manual_qnh_to_app_state(int32_t qnh_hpa_x100)
 static int32_t vario_settings_clamp_pressure_correction_x100(int32_t correction_hpa_x100)
 {
     return vario_settings_clamp_s32(correction_hpa_x100,
-                                    VARIO_SETTINGS_PRESSURE_CORR_MIN_HPA_X100,
-                                    VARIO_SETTINGS_PRESSURE_CORR_MAX_HPA_X100);
+                                    VARIO_SETTINGS_BARO_CORR_RUNTIME_MIN_HPA_X100,
+                                    VARIO_SETTINGS_BARO_CORR_RUNTIME_MAX_HPA_X100);
 }
 
 static int32_t vario_settings_read_pressure_correction_from_app_state(void)
 {
     app_settings_t shared_settings;
+    int32_t        correction_hpa_x100;
 
     APP_STATE_CopySettingsSnapshot(&shared_settings);
-    return vario_settings_clamp_pressure_correction_x100((int32_t)shared_settings.altitude.pressure_correction_hpa_x100);
+    correction_hpa_x100 = shared_settings.altitude.pressure_correction_hpa_x100;
+
+    if ((correction_hpa_x100 < VARIO_SETTINGS_BARO_CORR_SNAPSHOT_MIN_HPA_X100) ||
+        (correction_hpa_x100 > VARIO_SETTINGS_BARO_CORR_SNAPSHOT_MAX_HPA_X100))
+    {
+        if ((s_vario_settings.pressure_correction_hpa_x100 >= VARIO_SETTINGS_BARO_CORR_RUNTIME_MIN_HPA_X100) &&
+            (s_vario_settings.pressure_correction_hpa_x100 <= VARIO_SETTINGS_BARO_CORR_RUNTIME_MAX_HPA_X100))
+        {
+            return s_vario_settings.pressure_correction_hpa_x100;
+        }
+
+        return VARIO_SETTINGS_BARO_CORR_DEFAULT_HPA_X100;
+    }
+
+    return vario_settings_clamp_pressure_correction_x100(correction_hpa_x100);
 }
 
 static void vario_settings_store_pressure_correction_to_app_state(int32_t correction_hpa_x100)
@@ -268,58 +299,13 @@ static void vario_settings_store_pressure_correction_to_app_state(int32_t correc
     clamped_correction_hpa_x100 = vario_settings_clamp_pressure_correction_x100(correction_hpa_x100);
 
     APP_STATE_CopySettingsSnapshot(&shared_settings);
-    if ((int32_t)shared_settings.altitude.pressure_correction_hpa_x100 != clamped_correction_hpa_x100)
+    if (shared_settings.altitude.pressure_correction_hpa_x100 != clamped_correction_hpa_x100)
     {
-        shared_settings.altitude.pressure_correction_hpa_x100 = (int16_t)clamped_correction_hpa_x100;
+        shared_settings.altitude.pressure_correction_hpa_x100 = clamped_correction_hpa_x100;
         APP_STATE_StoreSettingsSnapshot(&shared_settings);
     }
-}
 
-static bool vario_settings_read_imu_assist_from_app_state(void)
-{
-    app_settings_t shared_settings;
-
-    APP_STATE_CopySettingsSnapshot(&shared_settings);
-    return (shared_settings.altitude.imu_aid_enabled != 0u) ? true : false;
-}
-
-static void vario_settings_store_imu_assist_to_app_state(bool enabled)
-{
-    app_settings_t shared_settings;
-    uint8_t        enabled_u8;
-
-    enabled_u8 = (enabled != false) ? 1u : 0u;
-
-    APP_STATE_CopySettingsSnapshot(&shared_settings);
-    if (shared_settings.altitude.imu_aid_enabled != enabled_u8)
-    {
-        shared_settings.altitude.imu_aid_enabled = enabled_u8;
-        APP_STATE_StoreSettingsSnapshot(&shared_settings);
-    }
-}
-
-static float vario_settings_get_pressure_correction_display_float(void)
-{
-    return Vario_Settings_PressureHpaToDisplayFloat(((float)vario_settings_read_pressure_correction_from_app_state()) * 0.01f);
-}
-
-static void vario_settings_format_pressure_correction_text(char *buf, size_t buf_len)
-{
-    if ((buf == NULL) || (buf_len == 0u))
-    {
-        return;
-    }
-
-    snprintf(buf,
-             buf_len,
-             "%.2f %s",
-             (double)vario_settings_get_pressure_correction_display_float(),
-             Vario_Settings_GetPressureUnitText());
-}
-
-static const char *vario_settings_get_imu_assist_text(void)
-{
-    return (vario_settings_read_imu_assist_from_app_state() != false) ? "AUTO" : "OFF";
+    s_vario_settings.pressure_correction_hpa_x100 = clamped_correction_hpa_x100;
 }
 
 static uint16_t vario_settings_clamp_u16(uint16_t value, uint16_t min_v, uint16_t max_v)
@@ -710,6 +696,28 @@ static void vario_settings_cycle_alt2_mode(int8_t direction)
     s_vario_settings.alt2_mode = (vario_alt2_mode_t)next;
 }
 
+static void vario_settings_cycle_alt3_mode(int8_t direction)
+{
+    int32_t next;
+
+    if (direction == 0)
+    {
+        return;
+    }
+
+    next = (int32_t)s_vario_settings.alt3_mode + ((direction > 0) ? 1 : -1);
+    if (next < 0)
+    {
+        next = (int32_t)VARIO_ALT3_MODE_COUNT - 1;
+    }
+    else if (next >= (int32_t)VARIO_ALT3_MODE_COUNT)
+    {
+        next = 0;
+    }
+
+    s_vario_settings.alt3_mode = (vario_alt3_mode_t)next;
+}
+
 static void vario_settings_cycle_alt_source(int8_t direction)
 {
     int32_t next;
@@ -754,6 +762,29 @@ static void vario_settings_cycle_heading_source(int8_t direction)
     }
 
     s_vario_settings.heading_source = (vario_heading_source_t)next;
+}
+
+static void vario_settings_cycle_imu_assist_mode(int8_t direction)
+{
+    int32_t next;
+
+    if (direction == 0)
+    {
+        return;
+    }
+
+    next = (int32_t)s_vario_settings.imu_assist_mode + ((direction > 0) ? 1 : -1);
+
+    if (next < 0)
+    {
+        next = (int32_t)VARIO_IMU_ASSIST_COUNT - 1;
+    }
+    else if (next >= (int32_t)VARIO_IMU_ASSIST_COUNT)
+    {
+        next = 0;
+    }
+
+    s_vario_settings.imu_assist_mode = (vario_imu_assist_mode_t)next;
 }
 
 static void vario_settings_cycle_compass_span(int8_t direction)
@@ -951,6 +982,7 @@ void Vario_Settings_Init(void)
     /*  맞춰 둔다.                                                             */
     /* ---------------------------------------------------------------------- */
     s_vario_settings.qnh_hpa_x100                  = vario_settings_read_manual_qnh_from_app_state();
+    s_vario_settings.pressure_correction_hpa_x100  = vario_settings_read_pressure_correction_from_app_state();
     s_vario_settings.alt2_reference_cm             = 0;
     s_vario_settings.altitude_unit                 = VARIO_ALT_UNIT_METER;
     s_vario_settings.alt2_unit                     = VARIO_ALT_UNIT_FEET;
@@ -961,8 +993,10 @@ void Vario_Settings_Init(void)
     s_vario_settings.time_format                   = VARIO_TIME_FORMAT_24H;
     s_vario_settings.coord_format                  = VARIO_COORD_FORMAT_DDMM_MMM;
     s_vario_settings.alt2_mode                     = VARIO_ALT2_MODE_RELATIVE;
+    s_vario_settings.alt3_mode                     = VARIO_ALT3_MODE_GAIN;
     s_vario_settings.altitude_source               = VARIO_ALT_SOURCE_DISPLAY;
     s_vario_settings.heading_source                = VARIO_HEADING_SOURCE_AUTO;
+    s_vario_settings.imu_assist_mode               = VARIO_IMU_ASSIST_OFF;
     s_vario_settings.audio_enabled                 = 1u;
     s_vario_settings.audio_volume_percent          = 75u;
     s_vario_settings.beep_only_when_flying         = 1u;
@@ -1032,6 +1066,7 @@ const vario_settings_t *Vario_Settings_Get(void)
     /*  stale mirror를 보지 않도록 getter 진입 시점에 동기화해 둔다.          */
     /* ---------------------------------------------------------------------- */
     s_vario_settings.qnh_hpa_x100 = vario_settings_read_manual_qnh_from_app_state();
+    s_vario_settings.pressure_correction_hpa_x100 = vario_settings_read_pressure_correction_from_app_state();
     return &s_vario_settings;
 }
 
@@ -1046,15 +1081,26 @@ void Vario_Settings_SetManualQnhHpaX100(int32_t qnh_hpa_x100)
     vario_settings_store_manual_qnh_to_app_state(qnh_hpa_x100);
 }
 
+int32_t Vario_Settings_GetPressureCorrectionHpaX100(void)
+{
+    s_vario_settings.pressure_correction_hpa_x100 = vario_settings_read_pressure_correction_from_app_state();
+    return s_vario_settings.pressure_correction_hpa_x100;
+}
+
+void Vario_Settings_SetPressureCorrectionHpaX100(int32_t correction_hpa_x100)
+{
+    vario_settings_store_pressure_correction_to_app_state(correction_hpa_x100);
+}
+
 void Vario_Settings_AdjustQuickSet(vario_quickset_item_t item, int8_t direction)
 {
     const vario_runtime_t *rt;
     int32_t                qnh_step_x100;
-    int32_t                pressure_correction_step_x100;
+    int32_t                corr_step_x100;
 
     rt = Vario_State_GetRuntime();
     qnh_step_x100 = (s_vario_settings.pressure_unit == VARIO_PRESSURE_UNIT_INHG) ? 34 : 10;
-    pressure_correction_step_x100 = (s_vario_settings.pressure_unit == VARIO_PRESSURE_UNIT_INHG) ? 34 : 1;
+    corr_step_x100 = (s_vario_settings.pressure_unit == VARIO_PRESSURE_UNIT_INHG) ? 34 : 1;
 
     switch (item)
     {
@@ -1063,9 +1109,9 @@ void Vario_Settings_AdjustQuickSet(vario_quickset_item_t item, int8_t direction)
                                                ((int32_t)direction * qnh_step_x100));
             break;
 
-        case VARIO_QUICKSET_ITEM_PRESSURE_CORRECTION:
-            vario_settings_store_pressure_correction_to_app_state(vario_settings_read_pressure_correction_from_app_state() +
-                                                                  ((int32_t)direction * pressure_correction_step_x100));
+        case VARIO_QUICKSET_ITEM_BARO_CORRECTION:
+            Vario_Settings_SetPressureCorrectionHpaX100(Vario_Settings_GetPressureCorrectionHpaX100() +
+                                                        ((int32_t)direction * corr_step_x100));
             break;
 
         case VARIO_QUICKSET_ITEM_ALT_UNIT:
@@ -1077,6 +1123,13 @@ void Vario_Settings_AdjustQuickSet(vario_quickset_item_t item, int8_t direction)
             break;
 
         case VARIO_QUICKSET_ITEM_ALT2_UNIT:
+            vario_settings_cycle_alt_unit_field(&s_vario_settings.alt2_unit, direction);
+            break;
+
+        case VARIO_QUICKSET_ITEM_ALT3_MODE:
+            vario_settings_cycle_alt3_mode(direction);
+            break;
+
             vario_settings_cycle_alt_unit_field(&s_vario_settings.alt2_unit, direction);
             break;
 
@@ -1108,15 +1161,12 @@ void Vario_Settings_AdjustQuickSet(vario_quickset_item_t item, int8_t direction)
             vario_settings_cycle_alt_source(direction);
             break;
 
-        case VARIO_QUICKSET_ITEM_IMU_ASSIST:
-            if (direction != 0)
-            {
-                vario_settings_store_imu_assist_to_app_state(vario_settings_read_imu_assist_from_app_state() == false);
-            }
-            break;
-
         case VARIO_QUICKSET_ITEM_HEADING_SOURCE:
             vario_settings_cycle_heading_source(direction);
+            break;
+
+        case VARIO_QUICKSET_ITEM_IMU_ASSIST:
+            vario_settings_cycle_imu_assist_mode(direction);
             break;
 
         case VARIO_QUICKSET_ITEM_VARIO_DAMPING:
@@ -1501,6 +1551,23 @@ void Vario_Settings_FormatQnhText(char *buf, size_t buf_len)
              Vario_Settings_GetPressureUnitText());
 }
 
+void Vario_Settings_FormatBaroCorrectionText(char *buf, size_t buf_len)
+{
+    float correction_display;
+
+    if ((buf == NULL) || (buf_len == 0u))
+    {
+        return;
+    }
+
+    correction_display = Vario_Settings_PressureHpaToDisplayFloat(((float)Vario_Settings_GetPressureCorrectionHpaX100()) * 0.01f);
+    snprintf(buf,
+             buf_len,
+             "%+.2f %s",
+             (double)correction_display,
+             Vario_Settings_GetPressureUnitText());
+}
+
 int32_t Vario_Settings_GetQnhDisplayWhole(void)
 {
     float display;
@@ -1778,19 +1845,60 @@ const char *Vario_Settings_GetAlt2ModeTextForMode(vario_alt2_mode_t mode)
         case VARIO_ALT2_MODE_ABSOLUTE:
             return "ABS";
 
-        case VARIO_ALT2_MODE_SMART_FUSE:
-            return "SMART FUSE";
-
         case VARIO_ALT2_MODE_GPS:
             return "GPS";
 
         case VARIO_ALT2_MODE_FLIGHT_LEVEL:
             return "FL";
 
+        case VARIO_ALT2_MODE_SMART_FUSE:
+            return "SMART";
+
         case VARIO_ALT2_MODE_RELATIVE:
         case VARIO_ALT2_MODE_COUNT:
         default:
             return "REL";
+    }
+}
+
+const char *Vario_Settings_GetAlt3ModeText(void)
+{
+    return Vario_Settings_GetAlt3ModeTextForMode(s_vario_settings.alt3_mode);
+}
+
+const char *Vario_Settings_GetAlt3ModeTextForMode(vario_alt3_mode_t mode)
+{
+    switch (mode)
+    {
+        case VARIO_ALT3_MODE_THERMAL:
+            return "THERM";
+
+        case VARIO_ALT3_MODE_ARRIVAL:
+            return "ARR";
+
+        case VARIO_ALT3_MODE_GAIN:
+        case VARIO_ALT3_MODE_COUNT:
+        default:
+            return "GAIN";
+    }
+}
+
+const char *Vario_Settings_GetImuAssistModeText(void)
+{
+    return Vario_Settings_GetImuAssistModeTextForMode(s_vario_settings.imu_assist_mode);
+}
+
+const char *Vario_Settings_GetImuAssistModeTextForMode(vario_imu_assist_mode_t mode)
+{
+    switch (mode)
+    {
+        case VARIO_IMU_ASSIST_AUTO:
+            return "AUTO";
+
+        case VARIO_IMU_ASSIST_OFF:
+        case VARIO_IMU_ASSIST_COUNT:
+        default:
+            return "OFF";
     }
 }
 
@@ -1935,9 +2043,9 @@ void Vario_Settings_GetCategoryItemText(vario_settings_category_t category,
             Vario_Settings_FormatQnhText(out_value, value_len);
             break;
 
-        case VARIO_MENU_ITEM_PRESSURE_CORRECTION:
-            snprintf(out_label, label_len, "Correction");
-            vario_settings_format_pressure_correction_text(out_value, value_len);
+        case VARIO_MENU_ITEM_BARO_CORRECTION:
+            snprintf(out_label, label_len, "Baro Corr");
+            Vario_Settings_FormatBaroCorrectionText(out_value, value_len);
             break;
 
         case VARIO_MENU_ITEM_ALT_UNIT:
@@ -1953,6 +2061,11 @@ void Vario_Settings_GetCategoryItemText(vario_settings_category_t category,
         case VARIO_MENU_ITEM_ALT2_UNIT:
             snprintf(out_label, label_len, "ALT2 Unit");
             snprintf(out_value, value_len, "%s", Vario_Settings_GetAltitudeUnitTextForUnit(settings->alt2_unit));
+            break;
+
+        case VARIO_MENU_ITEM_ALT3_MODE:
+            snprintf(out_label, label_len, "ALT3 Mode");
+            snprintf(out_value, value_len, "%s", Vario_Settings_GetAlt3ModeText());
             break;
 
         case VARIO_MENU_ITEM_VSPEED_UNIT:
@@ -1990,14 +2103,14 @@ void Vario_Settings_GetCategoryItemText(vario_settings_category_t category,
             snprintf(out_value, value_len, "%s", Vario_Settings_GetAltitudeSourceText());
             break;
 
-        case VARIO_MENU_ITEM_IMU_ASSIST:
-            snprintf(out_label, label_len, "IMU Assist");
-            snprintf(out_value, value_len, "%s", vario_settings_get_imu_assist_text());
-            break;
-
         case VARIO_MENU_ITEM_HEADING_SOURCE:
             snprintf(out_label, label_len, "Heading Src");
             snprintf(out_value, value_len, "%s", Vario_Settings_GetHeadingSourceText());
+            break;
+
+        case VARIO_MENU_ITEM_IMU_ASSIST:
+            snprintf(out_label, label_len, "IMU Assist");
+            snprintf(out_value, value_len, "%s", Vario_Settings_GetImuAssistModeText());
             break;
 
         case VARIO_MENU_ITEM_BACKLIGHT_MODE:
@@ -2281,8 +2394,8 @@ void Vario_Settings_AdjustCategoryItem(vario_settings_category_t category,
             Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_QNH, direction);
             break;
 
-        case VARIO_MENU_ITEM_PRESSURE_CORRECTION:
-            Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_PRESSURE_CORRECTION, direction);
+        case VARIO_MENU_ITEM_BARO_CORRECTION:
+            Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_BARO_CORRECTION, direction);
             break;
 
         case VARIO_MENU_ITEM_ALT_UNIT:
@@ -2295,6 +2408,10 @@ void Vario_Settings_AdjustCategoryItem(vario_settings_category_t category,
 
         case VARIO_MENU_ITEM_ALT2_UNIT:
             Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_ALT2_UNIT, direction);
+            break;
+
+        case VARIO_MENU_ITEM_ALT3_MODE:
+            Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_ALT3_MODE, direction);
             break;
 
         case VARIO_MENU_ITEM_VSPEED_UNIT:
@@ -2325,12 +2442,12 @@ void Vario_Settings_AdjustCategoryItem(vario_settings_category_t category,
             Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_ALT_SOURCE, direction);
             break;
 
-        case VARIO_MENU_ITEM_IMU_ASSIST:
-            Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_IMU_ASSIST, direction);
-            break;
-
         case VARIO_MENU_ITEM_HEADING_SOURCE:
             Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_HEADING_SOURCE, direction);
+            break;
+
+        case VARIO_MENU_ITEM_IMU_ASSIST:
+            Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_IMU_ASSIST, direction);
             break;
 
         case VARIO_MENU_ITEM_BACKLIGHT_MODE:

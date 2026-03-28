@@ -444,11 +444,7 @@ static vario_display_dynamic_t s_vario_ui_dynamic =
     VARIO_NAV_TARGET_START,
     VARIO_UI_DEFAULT_WP_LAT_E7,
     VARIO_UI_DEFAULT_WP_LON_E7,
-    (VARIO_UI_DEFAULT_WP_VALID != 0u) ? true : false,
-    false,
-    0u,
-    0.0f,
-    0.0f
+    (VARIO_UI_DEFAULT_WP_VALID != 0u) ? true : false
 };
 
 /* -------------------------------------------------------------------------- */
@@ -908,43 +904,6 @@ static long vario_display_get_flight_level_from_unit_bank(const vario_runtime_t 
     }
 
     return lroundf(fl_value_ft);
-}
-
-static const app_altitude_linear_units_t *vario_display_select_smart_fuse_units(const vario_runtime_t *rt)
-{
-    if (rt == NULL)
-    {
-        return NULL;
-    }
-
-    /* ---------------------------------------------------------------------- */
-    /*  SMART FUSE                                                            */
-    /*                                                                        */
-    /*  Alt2의 SMART FUSE는 내부 파이프 이름을 직접 노출하지 않고,             */
-    /*  현재 low-level이 제공하는 assisted absolute altitude 중                */
-    /*  가장 도움이 되는 경로를 자동 선택해서 보여 주는 user-facing 모드다.   */
-    /*                                                                        */
-    /*  우선순위                                                              */
-    /*  1) IMU aided fused altitude                                            */
-    /*  2) baro + GPS anchor fused altitude                                    */
-    /*  3) baro가 없으면 GPS altitude fallback                                 */
-    /* ---------------------------------------------------------------------- */
-    if ((rt->baro_valid != false) && (rt->altitude.imu_vector_valid != false))
-    {
-        return &rt->altitude.units.alt_fused_imu;
-    }
-
-    if (rt->baro_valid != false)
-    {
-        return &rt->altitude.units.alt_fused_noimu;
-    }
-
-    if (rt->gps_valid != false)
-    {
-        return &rt->altitude.units.alt_gps_hmsl;
-    }
-
-    return NULL;
 }
 
 static void vario_display_format_altitude_with_unit(char *buf,
@@ -3112,8 +3071,8 @@ static void vario_display_format_alt2_text(char *value_buf,
             /* ALT2가 absolute mode일 때도 ALT1과 같은 5Hz filtered absolute       */
             /* 숫자를 사용한다.                                                    */
             /*                                                                    */
-            /* 현재 Alt1은 legal/competition용 barometric path로 고정이므로        */
-            /* 여기서는 그 숫자를 그대로 복제해서 보여 주기만 한다.              */
+            /* source 선택 자체는 여전히 Vario_State 쪽 altitude_source 규칙을      */
+            /* 따른다. 여기서는 오직 "표시 숫자"만 같은 cadence로 맞춘다.        */
             /* ------------------------------------------------------------------ */
             vario_display_format_filtered_selected_altitude(value_buf,
                                                             value_len,
@@ -3126,15 +3085,11 @@ static void vario_display_format_alt2_text(char *value_buf,
             break;
 
         case VARIO_ALT2_MODE_SMART_FUSE:
-        {
-            const app_altitude_linear_units_t *smart_fuse_units;
-
-            smart_fuse_units = vario_display_select_smart_fuse_units(rt);
-            if (smart_fuse_units != NULL)
+            if (rt->baro_valid != false)
             {
                 vario_display_format_altitude_from_unit_bank(value_buf,
                                                              value_len,
-                                                             smart_fuse_units,
+                                                             &rt->altitude.units.alt_fused_noimu,
                                                              settings->alt2_unit);
             }
             else
@@ -3146,7 +3101,6 @@ static void vario_display_format_alt2_text(char *value_buf,
                      "%s",
                      Vario_Settings_GetAltitudeUnitTextForUnit(settings->alt2_unit));
             break;
-        }
 
         case VARIO_ALT2_MODE_GPS:
             if (rt->gps_valid != false)
@@ -3202,6 +3156,58 @@ static void vario_display_format_alt2_text(char *value_buf,
     }
 }
 
+static void vario_display_format_alt3_text(char *value_buf,
+                                           size_t value_len,
+                                           char *unit_buf,
+                                           size_t unit_len,
+                                           const vario_runtime_t *rt,
+                                           const vario_settings_t *settings)
+{
+    if ((value_buf == NULL) || (value_len == 0u) || (unit_buf == NULL) || (unit_len == 0u) ||
+        (rt == NULL) || (settings == NULL))
+    {
+        return;
+    }
+
+    switch (settings->alt3_mode)
+    {
+        case VARIO_ALT3_MODE_THERMAL:
+            vario_display_format_altitude_with_unit(value_buf,
+                                                    value_len,
+                                                    rt->alt3_thermal_gain_m,
+                                                    settings->altitude_unit);
+            break;
+
+        case VARIO_ALT3_MODE_ARRIVAL:
+            if (rt->final_glide_valid != false)
+            {
+                vario_display_format_altitude_with_unit(value_buf,
+                                                        value_len,
+                                                        rt->arrival_height_m,
+                                                        settings->altitude_unit);
+            }
+            else
+            {
+                snprintf(value_buf, value_len, "-----");
+            }
+            break;
+
+        case VARIO_ALT3_MODE_GAIN:
+        case VARIO_ALT3_MODE_COUNT:
+        default:
+            vario_display_format_altitude_with_unit(value_buf,
+                                                    value_len,
+                                                    rt->alt3_accum_gain_m,
+                                                    settings->altitude_unit);
+            break;
+    }
+
+    snprintf(unit_buf,
+             unit_len,
+             "%s",
+             Vario_Settings_GetAltitudeUnitTextForUnit(settings->altitude_unit));
+}
+
 static void vario_display_draw_top_right_altitudes(u8g2_t *u8g2,
                                                    const vario_viewport_t *v,
                                                    const vario_runtime_t *rt)
@@ -3211,6 +3217,7 @@ static void vario_display_draw_top_right_altitudes(u8g2_t *u8g2,
     char    alt2_text[24];
     char    alt3_text[24];
     char    alt2_unit_buf[8];
+    char    alt3_unit_buf[8];
     const char *alt1_unit;
     const char *alt2_unit;
     const char *alt3_unit;
@@ -3248,10 +3255,10 @@ static void vario_display_draw_top_right_altitudes(u8g2_t *u8g2,
                                                     rt,
                                                     settings->altitude_unit);
     vario_display_format_alt2_text(alt2_text, sizeof(alt2_text), alt2_unit_buf, sizeof(alt2_unit_buf), rt, settings);
-    vario_display_format_altitude_with_unit(alt3_text, sizeof(alt3_text), rt->alt3_accum_gain_m, settings->altitude_unit);
+    vario_display_format_alt3_text(alt3_text, sizeof(alt3_text), alt3_unit_buf, sizeof(alt3_unit_buf), rt, settings);
     alt1_unit = Vario_Settings_GetAltitudeUnitTextForUnit(settings->altitude_unit);
     alt2_unit = alt2_unit_buf;
-    alt3_unit = Vario_Settings_GetAltitudeUnitTextForUnit(settings->altitude_unit);
+    alt3_unit = alt3_unit_buf;
 
     unit_box_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_ALT1_UNIT, "ft");
     {

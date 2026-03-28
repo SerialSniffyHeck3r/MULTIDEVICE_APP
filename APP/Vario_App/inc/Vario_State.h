@@ -174,15 +174,15 @@ typedef struct
     /*  - pitot 없는 조건에서 속도변화항을 더한 "추정 TE"                     */
     /*                                                                          */
     /*  alt1_absolute_m                                                         */
-    /*  - 법적 / 대회 규정용 Alt1 absolute altitude                            */
-    /*  - manual QNH 기반의 barometric display altitude를                      */
-    /*    compatibility 용 meter float로 옮긴 값이다.                          */
-    /*  - fused / GPS path는 Alt1에 섞지 않는다.                               */
+    /*  - Flytec ALT1 개념: absolute altitude                                   */
+    /*  - 중요: meter 숫자를 다시 feet로 바꾸기 위한 "표시 전용 양자화값" 이   */
+    /*    아니라, canonical centimeter source를 그대로 meter float로 옮긴      */
+    /*    compatibility field다.                                               */
     /*                                                                          */
     /*  alt2_relative_m                                                         */
     /*  - ALT2 relative mode 의 backing field                                  */
-    /*  - 사용자가 캡처한 ALT1 기준점과 현재 Alt1의 차이를                     */
-    /*    centimeter 해상도로 먼저 계산한 뒤 meter float로 싣는다.             */
+    /*  - alt2_reference_cm 과 selected altitude cm 의 차이를                  */
+    /*    먼저 centimeter 해상도로 계산한 뒤 meter float로 싣는다.             */
     /*    따라서 feet 표시가 1m 계단에 묶이지 않는다.                          */
     /*                                                                          */
     /*  pressure_altitude_std_m                                                 */
@@ -192,9 +192,12 @@ typedef struct
     /*  - ALT2 를 FL mode 로 쓸 때 renderer 가 이 값을 사용한다.               */
     /*                                                                          */
     /*  alt3_accum_gain_m                                                       */
-    /*  - takeoff 또는 수동 reset 이후의 ALT3 relative altitude                */
-    /*  - 필드명은 legacy 호환 때문에 유지하지만, 의미는 누적 gain이 아니라    */
-    /*    resettable signed delta altitude다.                                  */
+    /*  - Flytec ALT3 개념: 누적 상승고도                                       */
+    /*                                                                          */
+    /*  alt3_thermal_gain_m                                                     */
+    /*  - Digifly 계열 thermalling gain 개념                                   */
+    /*  - sink / 저점 진입 시 자동으로 기준점을 재설정한 뒤                    */
+    /*    현재 고도와의 차이를 보여 준다.                                       */
     /* ---------------------------------------------------------------------- */
     float    baro_altitude_m;
     float    baro_vario_mps;
@@ -226,6 +229,7 @@ typedef struct
     float    alt2_relative_m;
     float    pressure_altitude_std_m;
     float    alt3_accum_gain_m;
+    float    alt3_thermal_gain_m;
 
     /* ---------------------------------------------------------------------- */
     /*  내부 필터 상태                                                          */
@@ -237,7 +241,7 @@ typedef struct
     float    filtered_ground_speed_kmh;
     float    observer_velocity_mps;
     float    last_measured_altitude_m;
-    float    last_accum_altitude_m;   /* ALT3 reference altitude */
+    float    last_accum_altitude_m;
     float    last_heading_deg;
     float    last_published_ground_speed_kmh;
     int8_t   speed_trend;

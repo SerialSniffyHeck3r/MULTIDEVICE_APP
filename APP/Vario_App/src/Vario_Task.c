@@ -322,6 +322,20 @@ static void vario_task_apply_platform_settings(void)
         platform_settings_dirty = 1u;
     }
 
+    if (platform_settings.altitude.pressure_correction_hpa_x100 != settings->pressure_correction_hpa_x100)
+    {
+        platform_settings.altitude.pressure_correction_hpa_x100 = settings->pressure_correction_hpa_x100;
+        platform_settings_dirty = 1u;
+    }
+
+    if (platform_settings.altitude.imu_aid_enabled !=
+        ((settings->imu_assist_mode == VARIO_IMU_ASSIST_AUTO) ? 1u : 0u))
+    {
+        platform_settings.altitude.imu_aid_enabled =
+            (settings->imu_assist_mode == VARIO_IMU_ASSIST_AUTO) ? 1u : 0u;
+        platform_settings_dirty = 1u;
+    }
+
     if (platform_settings.altitude.debug_audio_enabled != ((settings->audio_enabled != 0u) ? 1u : 0u))
     {
         platform_settings.altitude.debug_audio_enabled = (settings->audio_enabled != 0u) ? 1u : 0u;
@@ -329,10 +343,10 @@ static void vario_task_apply_platform_settings(void)
     }
 
     if (platform_settings.altitude.debug_audio_source !=
-        ((settings->altitude_source == VARIO_ALT_SOURCE_FUSED_IMU) ? 1u : 0u))
+        ((settings->imu_assist_mode == VARIO_IMU_ASSIST_AUTO) ? 1u : 0u))
     {
         platform_settings.altitude.debug_audio_source =
-            (settings->altitude_source == VARIO_ALT_SOURCE_FUSED_IMU) ? 1u : 0u;
+            (settings->imu_assist_mode == VARIO_IMU_ASSIST_AUTO) ? 1u : 0u;
         platform_settings_dirty = 1u;
     }
 
