@@ -157,7 +157,7 @@ static void APP_STATE_ApplyDefaultSettingsUnlocked(void)
                /* ------------------------------------------------------------------ */
                g_app_state.settings.altitude.rest_display_enabled           = 1u;
                g_app_state.settings.altitude.zupt_enabled                   = 1u;
-               g_app_state.settings.altitude.reserved_rest0                 = 0u;
+               g_app_state.settings.altitude.pressure_correction_hpa_x100   = 0;
                g_app_state.settings.altitude.rest_detect_vario_cms          = 12u;
                g_app_state.settings.altitude.rest_detect_accel_mg           = 15u;
                g_app_state.settings.altitude.rest_display_tau_ms            = 2600u;

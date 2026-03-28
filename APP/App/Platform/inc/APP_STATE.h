@@ -232,21 +232,27 @@ typedef struct
     uint16_t display_lpf_tau_ms;
 
     /* ---------------------------------------------------------------------- */
-    /*  정지 상태(rest) 전용 display 안정화                                    */
+    /*  정지 상태(rest) 전용 display 안정화 + pressure correction              */
     /*                                                                        */
     /*  core filter / fast vario는 그대로 두고                                 */
     /*  "최종 화면값" 만 더 천천히 따라가게 만드는 계층이다.                  */
     /*                                                                        */
-    /*  rest_display_enabled      : 표시 전용 stabilizer on/off               */
-    /*  rest_detect_vario_cms     : 정지 판정용 slow vario 임계값             */
-    /*  rest_detect_accel_mg      : 정지 판정용 IMU specific-force 임계값     */
-    /*  rest_display_tau_ms       : 정지 시 display LPF 시정수                */
-    /*  rest_display_hold_cm      : 이 범위 이내의 미세 변화는 화면값 유지    */
-    /*  zupt_enabled              : 정지 상태일 때 velocity=0 pseudo update   */
+    /*  rest_display_enabled          : 표시 전용 stabilizer on/off           */
+    /*  pressure_correction_hpa_x100  : 센서 pressure path에 더하는 기기 보정   */
+    /*                                  값, 단위는 0.01 hPa                  */
+    /*  rest_detect_vario_cms         : 정지 판정용 slow vario 임계값         */
+    /*  rest_detect_accel_mg          : 정지 판정용 IMU specific-force 임계값 */
+    /*  rest_display_tau_ms           : 정지 시 display LPF 시정수            */
+    /*  rest_display_hold_cm          : 이 범위 이내의 미세 변화는 화면값 유지*/
+    /*  zupt_enabled                  : 정지 상태일 때 velocity=0 pseudo update*/
+    /*                                                                        */
+    /*  주의                                                                  */
+    /*  - 이 보정은 manual QNH를 대체하지 않는다.                             */
+    /*  - pressure sensor의 고정 오프셋을 low-level에서 미세 조정하는 용도다. */
     /* ---------------------------------------------------------------------- */
     uint8_t  rest_display_enabled;
     uint8_t  zupt_enabled;
-    uint16_t reserved_rest0;
+    int16_t  pressure_correction_hpa_x100;
     uint16_t rest_detect_vario_cms;
     uint16_t rest_detect_accel_mg;
     uint16_t rest_display_tau_ms;

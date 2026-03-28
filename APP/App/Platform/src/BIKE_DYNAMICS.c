@@ -83,6 +83,11 @@
 #define BIKE_DYN_ZERO_CAPTURE_SETTLE_MS      (350u)
 #define BIKE_DYN_ZERO_CAPTURE_TARGET_GOOD_MS (1500u)
 #define BIKE_DYN_ZERO_CAPTURE_MIN_SAMPLES    (60u)
+#define BIKE_DYN_ZERO_CAPTURE_TIMEOUT_MS     (12000u)
+#define BIKE_DYN_ZERO_CAPTURE_RESTART_MS     (400u)
+#define BIKE_DYN_ZERO_CAPTURE_MAX_GYRO_DPS   (3.5f)
+#define BIKE_DYN_ZERO_CAPTURE_MAX_RAW_DPS    (8.0f)
+#define BIKE_DYN_ZERO_CAPTURE_ACCEL_SCALE    (1.20f)
 
 #define BIKE_DYN_GYRO_CAL_SETTLE_MS          (600u)
 #define BIKE_DYN_GYRO_CAL_TARGET_GOOD_MS     (1800u)
@@ -164,6 +169,7 @@ typedef struct
     /*  zero capture dwell bookkeeping                                          */
     /* ---------------------------------------------------------------------- */
     uint32_t zero_capture_settle_until_ms;
+    uint32_t zero_capture_start_ms;
     uint32_t zero_capture_good_ms;
     uint32_t zero_capture_sample_count;
 
@@ -556,6 +562,92 @@ static void BIKE_DYN_AxisEnumToUnitVec(uint8_t axis_enum,
     if (y != 0) { *y = ly; }
     if (z != 0) { *z = lz; }
 }
+
+static bool BIKE_DYN_IsAxisEnumValid(uint8_t axis_enum)
+{
+    switch ((app_bike_axis_t)axis_enum)
+    {
+    case APP_BIKE_AXIS_POS_X:
+    case APP_BIKE_AXIS_NEG_X:
+    case APP_BIKE_AXIS_POS_Y:
+    case APP_BIKE_AXIS_NEG_Y:
+    case APP_BIKE_AXIS_POS_Z:
+    case APP_BIKE_AXIS_NEG_Z:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static uint8_t BIKE_DYN_AxisEnumBaseIndex(uint8_t axis_enum)
+{
+    switch ((app_bike_axis_t)axis_enum)
+    {
+    case APP_BIKE_AXIS_POS_X:
+    case APP_BIKE_AXIS_NEG_X:
+        return 0u;
+    case APP_BIKE_AXIS_POS_Y:
+    case APP_BIKE_AXIS_NEG_Y:
+        return 1u;
+    case APP_BIKE_AXIS_POS_Z:
+    case APP_BIKE_AXIS_NEG_Z:
+        return 2u;
+    default:
+        return 0u;
+    }
+}
+
+static void BIKE_DYN_GetSanitizedMountAxes(const app_bike_settings_t *settings,
+                                           uint8_t *out_forward_axis,
+                                           uint8_t *out_left_axis)
+{
+    uint8_t forward_axis;
+    uint8_t left_axis;
+
+    forward_axis = APP_BIKE_AXIS_POS_X;
+    left_axis    = APP_BIKE_AXIS_POS_Y;
+
+    if (settings != 0)
+    {
+        if (BIKE_DYN_IsAxisEnumValid(settings->mount_forward_axis) != false)
+        {
+            forward_axis = settings->mount_forward_axis;
+        }
+
+        if (BIKE_DYN_IsAxisEnumValid(settings->mount_left_axis) != false)
+        {
+            left_axis = settings->mount_left_axis;
+        }
+    }
+
+    if (BIKE_DYN_AxisEnumBaseIndex(forward_axis) == BIKE_DYN_AxisEnumBaseIndex(left_axis))
+    {
+        switch (BIKE_DYN_AxisEnumBaseIndex(forward_axis))
+        {
+        case 0u:
+            left_axis = APP_BIKE_AXIS_POS_Y;
+            break;
+        case 1u:
+            left_axis = APP_BIKE_AXIS_POS_X;
+            break;
+        case 2u:
+        default:
+            left_axis = APP_BIKE_AXIS_POS_X;
+            break;
+        }
+    }
+
+    if (out_forward_axis != 0)
+    {
+        *out_forward_axis = forward_axis;
+    }
+
+    if (out_left_axis != 0)
+    {
+        *out_left_axis = left_axis;
+    }
+}
+
 
 /* -------------------------------------------------------------------------- */
 /*  Rodrigues rotation                                                          */
@@ -1394,14 +1486,31 @@ static bool BIKE_DYN_BuildMountLevelAxes(const app_bike_settings_t *settings,
     float discard_up_x;
     float discard_up_y;
     float discard_up_z;
+    uint8_t forward_axis;
+    uint8_t left_axis;
 
     if (settings == 0)
     {
         return false;
     }
 
-    BIKE_DYN_AxisEnumToUnitVec(settings->mount_forward_axis, &fwd_hint_x, &fwd_hint_y, &fwd_hint_z);
-    BIKE_DYN_AxisEnumToUnitVec(settings->mount_left_axis,    &left_hint_x, &left_hint_y, &left_hint_z);
+    /* ---------------------------------------------------------------------- */
+    /*  mount axis sanitize                                                    */
+    /*                                                                        */
+    /*  최신 레포에서는 사용자 설정을 그대로 신뢰하면                          */
+    /*  forward/left 축이 같은 축으로 저장된 경우                               */
+    /*  zero basis rebuild가 끝없이 실패할 수 있다.                             */
+    /*                                                                        */
+    /*  여기서는 private helper에서 최소한의 정규화를 적용한다.                */
+    /*  - invalid enum -> 기본값으로 교정                                       */
+    /*  - 같은 축 / 정반대 축 조합 -> 직교 기본축으로 교정                      */
+    /*                                                                        */
+    /*  public settings ABI는 유지하고, low-level 내부 계산에만 적용한다.       */
+    /* ---------------------------------------------------------------------- */
+    BIKE_DYN_GetSanitizedMountAxes(settings, &forward_axis, &left_axis);
+
+    BIKE_DYN_AxisEnumToUnitVec(forward_axis, &fwd_hint_x, &fwd_hint_y, &fwd_hint_z);
+    BIKE_DYN_AxisEnumToUnitVec(left_axis,    &left_hint_x, &left_hint_y, &left_hint_z);
 
     return BIKE_DYN_BuildAxesFromUpAndHints(up_x,
                                             up_y,
@@ -1424,8 +1533,115 @@ static bool BIKE_DYN_BuildMountLevelAxes(const app_bike_settings_t *settings,
                                             &discard_up_z);
 }
 
+
+/* forward declarations used by zero-service static gravity reseed ----------- */
+static void BIKE_DYN_QuatSetFromAccelNoYaw(float ax_g, float ay_g, float az_g);
+static void BIKE_DYN_UpdateGravityVectorFromQuat(void);
+static bool BIKE_DYN_BuildStaticUpFromAccel(const app_bike_settings_t *settings,
+                                            float *out_up_x,
+                                            float *out_up_y,
+                                            float *out_up_z)
+{
+    float accel_gate_mg;
+    float up_x;
+    float up_y;
+    float up_z;
+
+    if ((settings == 0) ||
+        (out_up_x == 0) ||
+        (out_up_y == 0) ||
+        (out_up_z == 0) ||
+        (s_bike_runtime.imu_sample_valid == false))
+    {
+        return false;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /*  zero capture는 "정지 상태의 현재 자세를 새 기준으로 삼는" 서비스다.     */
+    /*                                                                        */
+    /*  따라서 이 구간에서는 observer trust보다                                */
+    /*  현재 accelerometer의 1g 정지 측정을 더 직접적으로 신뢰하는 편이         */
+    /*  훨씬 안전하다.                                                          */
+    /*                                                                        */
+    /*  accel norm이 1g 근처일 때만 현재 raw accel을 world-up 후보로 사용한다. */
+    /* ---------------------------------------------------------------------- */
+    accel_gate_mg = (float)BIKE_DYN_ClampS32((int32_t)settings->imu_attitude_accel_gate_mg,
+                                             50,
+                                             300);
+
+    if (fabsf(s_bike_runtime.last_accel_norm_mg - BIKE_DYN_ONE_G_MG) >
+        BIKE_DYN_ClampF(accel_gate_mg * BIKE_DYN_ZERO_CAPTURE_ACCEL_SCALE,
+                        160.0f,
+                        320.0f))
+    {
+        return false;
+    }
+
+    up_x = s_bike_runtime.last_ax_g;
+    up_y = s_bike_runtime.last_ay_g;
+    up_z = s_bike_runtime.last_az_g;
+
+    if (BIKE_DYN_Normalize3(&up_x, &up_y, &up_z) == false)
+    {
+        return false;
+    }
+
+    *out_up_x = up_x;
+    *out_up_y = up_y;
+    *out_up_z = up_z;
+    return true;
+}
+
+static bool BIKE_DYN_ForceGravityFromStaticAccel(const app_bike_settings_t *settings)
+{
+    float up_x;
+    float up_y;
+    float up_z;
+
+    if (BIKE_DYN_BuildStaticUpFromAccel(settings, &up_x, &up_y, &up_z) == false)
+    {
+        return false;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /*  circular startup lock breaker                                          */
+    /*                                                                        */
+    /*  현재 zero 서비스는 "현재 정지 자세를 기준으로 삼아라" 이므로,           */
+    /*  서비스가 진행 중인 동안에는 yaw를 버린 accel-only roll/pitch seed를     */
+    /*  다시 꽂아도 의미가 맞다.                                                */
+    /*                                                                        */
+    /*  이렇게 하면 observer trust가 낮아서 zero가 막히고,                     */
+    /*  zero가 안 돼서 observer가 다시 안정되지 못하는                          */
+    /*  순환 상태를 끊을 수 있다.                                               */
+    /* ---------------------------------------------------------------------- */
+    BIKE_DYN_QuatSetFromAccelNoYaw(s_bike_runtime.last_ax_g,
+                                   s_bike_runtime.last_ay_g,
+                                   s_bike_runtime.last_az_g);
+    BIKE_DYN_UpdateGravityVectorFromQuat();
+
+    if (s_bike_runtime.gravity_valid == false)
+    {
+        s_bike_runtime.gravity_est_x_s = up_x;
+        s_bike_runtime.gravity_est_y_s = up_y;
+        s_bike_runtime.gravity_est_z_s = up_z;
+        s_bike_runtime.gravity_valid = true;
+    }
+
+    if (s_bike_runtime.last_attitude_trust_permille < 350.0f)
+    {
+        s_bike_runtime.last_attitude_trust_permille = 350.0f;
+    }
+
+    return true;
+}
+
+
+
 static bool BIKE_DYN_RebuildZeroBasis(const app_bike_settings_t *settings)
 {
+    float source_up_x;
+    float source_up_y;
+    float source_up_z;
     float fwd_x;
     float fwd_y;
     float fwd_z;
@@ -1435,16 +1651,38 @@ static bool BIKE_DYN_RebuildZeroBasis(const app_bike_settings_t *settings)
     float up_x;
     float up_y;
     float up_z;
+    bool  have_static_up;
 
-    if ((settings == 0) || (s_bike_runtime.gravity_valid == false))
+    if (settings == 0)
     {
         return false;
     }
 
+    have_static_up = BIKE_DYN_BuildStaticUpFromAccel(settings,
+                                                     &source_up_x,
+                                                     &source_up_y,
+                                                     &source_up_z);
+
+    if (have_static_up != false)
+    {
+        (void)BIKE_DYN_ForceGravityFromStaticAccel(settings);
+    }
+    else
+    {
+        if (s_bike_runtime.gravity_valid == false)
+        {
+            return false;
+        }
+
+        source_up_x = s_bike_runtime.gravity_est_x_s;
+        source_up_y = s_bike_runtime.gravity_est_y_s;
+        source_up_z = s_bike_runtime.gravity_est_z_s;
+    }
+
     if (BIKE_DYN_BuildMountLevelAxes(settings,
-                                     s_bike_runtime.gravity_est_x_s,
-                                     s_bike_runtime.gravity_est_y_s,
-                                     s_bike_runtime.gravity_est_z_s,
+                                     source_up_x,
+                                     source_up_y,
+                                     source_up_z,
                                      &fwd_x,
                                      &fwd_y,
                                      &fwd_z,
@@ -1473,10 +1711,13 @@ static bool BIKE_DYN_RebuildZeroBasis(const app_bike_settings_t *settings)
     s_bike_runtime.zero_up_y_s   = up_y;
     s_bike_runtime.zero_up_z_s   = up_z;
 
-    s_bike_runtime.zero_valid              = true;
-    s_bike_runtime.last_zero_capture_ms    = s_bike_runtime.last_imu_timestamp_ms;
-    s_bike_runtime.zero_capture_good_ms    = 0u;
-    s_bike_runtime.zero_capture_sample_count = 0u;
+    s_bike_runtime.zero_valid                 = true;
+    s_bike_runtime.last_zero_capture_ms       = (s_bike_runtime.last_imu_timestamp_ms != 0u)
+                                              ? s_bike_runtime.last_imu_timestamp_ms
+                                              : s_bike_runtime.last_task_ms;
+    s_bike_runtime.zero_capture_start_ms      = 0u;
+    s_bike_runtime.zero_capture_good_ms       = 0u;
+    s_bike_runtime.zero_capture_sample_count  = 0u;
 
     /* ---------------------------------------------------------------------- */
     /*  새 기준을 잡는 순간 표시각은 0으로 만든다.                              */
@@ -1495,6 +1736,7 @@ static bool BIKE_DYN_RebuildZeroBasis(const app_bike_settings_t *settings)
 
     return true;
 }
+
 
 static bool BIKE_DYN_BuildCurrentLevelAxes(float *out_fwd_x,
                                            float *out_fwd_y,
@@ -2152,32 +2394,106 @@ static bool BIKE_DYN_IsZeroCaptureSampleGood(const app_bike_settings_t *settings
                                              int32_t selected_speed_mmps,
                                              uint8_t speed_source)
 {
-    float stationary_conf_01;
+    float accel_gate_mg;
+    float jerk_gate_mg_per_s;
+    float gyro_mag_dps;
+    float dummy_fwd_x;
+    float dummy_fwd_y;
+    float dummy_fwd_z;
+    float dummy_left_x;
+    float dummy_left_y;
+    float dummy_left_z;
+    float up_x;
+    float up_y;
+    float up_z;
+    bool  have_external_speed;
 
-    (void)selected_speed_mmps;
-    (void)speed_source;
-
-    if ((settings == 0) ||
-        (s_bike_runtime.gravity_valid == false) ||
-        (s_bike_runtime.imu_sample_valid == false))
+    if ((settings == 0) || (s_bike_runtime.imu_sample_valid == false))
     {
         return false;
     }
 
-    stationary_conf_01 = s_bike_runtime.last_stationary_conf_permille * 0.001f;
+    have_external_speed =
+        (speed_source != (uint8_t)APP_BIKE_SPEED_SOURCE_IMU_FALLBACK) ? true : false;
 
-    if (stationary_conf_01 < 0.92f)
+    if ((have_external_speed != false) &&
+        (BIKE_DYN_SpeedAbsMmps(selected_speed_mmps) > BIKE_DYN_GYRO_CAL_MAX_SPEED_MMPS))
     {
         return false;
     }
 
-    if (s_bike_runtime.last_attitude_trust_permille < (float)settings->imu_predict_min_trust_permille)
+    accel_gate_mg = (float)BIKE_DYN_ClampS32((int32_t)settings->imu_attitude_accel_gate_mg,
+                                             50,
+                                             300);
+
+    if (fabsf(s_bike_runtime.last_accel_norm_mg - BIKE_DYN_ONE_G_MG) >
+        BIKE_DYN_ClampF(accel_gate_mg * BIKE_DYN_ZERO_CAPTURE_ACCEL_SCALE,
+                        160.0f,
+                        320.0f))
+    {
+        return false;
+    }
+
+    jerk_gate_mg_per_s = (float)BIKE_DYN_ClampS32((int32_t)settings->imu_jerk_gate_mg_per_s,
+                                                  500,
+                                                  20000);
+    if (fabsf(s_bike_runtime.last_jerk_mg_per_s) > jerk_gate_mg_per_s)
+    {
+        return false;
+    }
+
+    if (s_bike_runtime.gyro_bias_valid != false)
+    {
+        gyro_mag_dps = BIKE_DYN_SafeSqrtF((s_bike_runtime.last_gx_dps * s_bike_runtime.last_gx_dps) +
+                                          (s_bike_runtime.last_gy_dps * s_bike_runtime.last_gy_dps) +
+                                          (s_bike_runtime.last_gz_dps * s_bike_runtime.last_gz_dps));
+        if (gyro_mag_dps > BIKE_DYN_ZERO_CAPTURE_MAX_GYRO_DPS)
+        {
+            return false;
+        }
+    }
+    else
+    {
+        gyro_mag_dps = BIKE_DYN_SafeSqrtF((s_bike_runtime.last_gx_raw_dps * s_bike_runtime.last_gx_raw_dps) +
+                                          (s_bike_runtime.last_gy_raw_dps * s_bike_runtime.last_gy_raw_dps) +
+                                          (s_bike_runtime.last_gz_raw_dps * s_bike_runtime.last_gz_raw_dps));
+        if (gyro_mag_dps > BIKE_DYN_ZERO_CAPTURE_MAX_RAW_DPS)
+        {
+            return false;
+        }
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /*  zero capture는 observer trust를 hard gate로 쓰지 않는다.               */
+    /*                                                                        */
+    /*  이유                                                                   */
+    /*  - 지금 벤치 증상은 trust가 낮아서 zero가 막히고,                        */
+    /*    zero가 막혀서 다시 trust가 올라오지 않는 순환 구조였다.              */
+    /*  - 정지 상태 zero는 "현재 1g 방향"만 확실하면 충분하므로,                */
+    /*    raw accel + gyro/speed/jerk gate로 직접 판정하는 편이 더 안전하다.   */
+    /* ---------------------------------------------------------------------- */
+    if (BIKE_DYN_BuildStaticUpFromAccel(settings, &up_x, &up_y, &up_z) == false)
+    {
+        return false;
+    }
+
+    if (BIKE_DYN_BuildMountLevelAxes(settings,
+                                     up_x,
+                                     up_y,
+                                     up_z,
+                                     &dummy_fwd_x,
+                                     &dummy_fwd_y,
+                                     &dummy_fwd_z,
+                                     &dummy_left_x,
+                                     &dummy_left_y,
+                                     &dummy_left_z) == false)
     {
         return false;
     }
 
     return true;
 }
+
 
 static bool BIKE_DYN_IsGyroCalibrationSampleGood(const app_bike_settings_t *settings,
                                                  int32_t selected_speed_mmps,
@@ -2849,13 +3165,19 @@ static void BIKE_DYN_ProcessZeroCapture(const app_bike_settings_t *settings,
 
     if ((auto_zero_pending == false) && (manual_zero_pending == false))
     {
+        s_bike_runtime.zero_capture_start_ms = 0u;
         s_bike_runtime.zero_capture_good_ms = 0u;
         s_bike_runtime.zero_capture_sample_count = 0u;
         return;
     }
 
+    if (s_bike_runtime.zero_capture_start_ms == 0u)
+    {
+        s_bike_runtime.zero_capture_start_ms = now_ms;
+    }
+
     if ((s_bike_runtime.gyro_bias_cal_active != false) ||
-        (s_bike_runtime.gravity_valid == false) ||
+        (s_bike_runtime.imu_sample_valid == false) ||
         (imu_new_sample == false))
     {
         return;
@@ -2863,17 +3185,57 @@ static void BIKE_DYN_ProcessZeroCapture(const app_bike_settings_t *settings,
 
     if (now_ms < s_bike_runtime.zero_capture_settle_until_ms)
     {
+        if ((now_ms - s_bike_runtime.zero_capture_start_ms) > BIKE_DYN_ZERO_CAPTURE_TIMEOUT_MS)
+        {
+            s_bike_runtime.zero_capture_start_ms = now_ms;
+            s_bike_runtime.zero_capture_settle_until_ms = now_ms + BIKE_DYN_ZERO_CAPTURE_RESTART_MS;
+            s_bike_runtime.zero_capture_good_ms = 0u;
+            s_bike_runtime.zero_capture_sample_count = 0u;
+        }
         return;
     }
+
+    sample_dt_ms = BIKE_DYN_ClampU32((uint32_t)BIKE_DYN_RoundFloatToS32(s_bike_runtime.last_dt_s * 1000.0f),
+                                     1u,
+                                     100u);
 
     if (BIKE_DYN_IsZeroCaptureSampleGood(settings, selected_speed_mmps, speed_source) == false)
     {
-        s_bike_runtime.zero_capture_good_ms = 0u;
-        s_bike_runtime.zero_capture_sample_count = 0u;
+        /* ------------------------------------------------------------------ */
+        /*  single bad sample hard-reset 제거                                   */
+        /*                                                                      */
+        /*  기존 구현은 조건을 한 번만 벗어나도 누적 시간을 전부 0으로 날려서    */
+        /*  미세 진동 환경에서 사실상 완료가 불가능해질 수 있었다.               */
+        /*                                                                      */
+        /*  여기서는 progress를 서서히 감쇠시키고, 너무 오래 진전이 없을 때만    */
+        /*  settle window를 다시 시작한다.                                      */
+        /* ------------------------------------------------------------------ */
+        if (s_bike_runtime.zero_capture_good_ms > sample_dt_ms)
+        {
+            s_bike_runtime.zero_capture_good_ms -= sample_dt_ms;
+        }
+        else
+        {
+            s_bike_runtime.zero_capture_good_ms = 0u;
+        }
+
+        if (s_bike_runtime.zero_capture_sample_count > 0u)
+        {
+            s_bike_runtime.zero_capture_sample_count -= 1u;
+        }
+
+        if ((now_ms - s_bike_runtime.zero_capture_start_ms) > BIKE_DYN_ZERO_CAPTURE_TIMEOUT_MS)
+        {
+            s_bike_runtime.zero_capture_start_ms = now_ms;
+            s_bike_runtime.zero_capture_settle_until_ms = now_ms + BIKE_DYN_ZERO_CAPTURE_RESTART_MS;
+            s_bike_runtime.zero_capture_good_ms = 0u;
+            s_bike_runtime.zero_capture_sample_count = 0u;
+        }
         return;
     }
 
-    sample_dt_ms = BIKE_DYN_ClampU32((uint32_t)BIKE_DYN_RoundFloatToS32(s_bike_runtime.last_dt_s * 1000.0f), 1u, 100u);
+    (void)BIKE_DYN_ForceGravityFromStaticAccel(settings);
+
     s_bike_runtime.zero_capture_good_ms += sample_dt_ms;
     s_bike_runtime.zero_capture_sample_count += 1u;
 
@@ -2884,9 +3246,18 @@ static void BIKE_DYN_ProcessZeroCapture(const app_bike_settings_t *settings,
         {
             s_bike_runtime.auto_zero_done = true;
             s_bike_runtime.zero_requested = false;
+            s_bike_runtime.zero_capture_start_ms = 0u;
+        }
+        else
+        {
+            s_bike_runtime.zero_capture_start_ms = now_ms;
+            s_bike_runtime.zero_capture_settle_until_ms = now_ms + BIKE_DYN_ZERO_CAPTURE_RESTART_MS;
+            s_bike_runtime.zero_capture_good_ms = 0u;
+            s_bike_runtime.zero_capture_sample_count = 0u;
         }
     }
 }
+
 
 /* -------------------------------------------------------------------------- */
 /*  heading output                                                              */
@@ -3148,10 +3519,11 @@ static void BIKE_DYN_ResetRuntime(uint32_t now_ms)
 
     memset(&s_bike_runtime, 0, sizeof(s_bike_runtime));
 
-    s_bike_runtime.initialized                = true;
-    s_bike_runtime.init_ms                    = now_ms;
-    s_bike_runtime.last_task_ms               = now_ms;
+    s_bike_runtime.initialized                  = true;
+    s_bike_runtime.init_ms                      = now_ms;
+    s_bike_runtime.last_task_ms                 = now_ms;
     s_bike_runtime.zero_capture_settle_until_ms = now_ms + BIKE_DYN_ZERO_CAPTURE_SETTLE_MS;
+    s_bike_runtime.zero_capture_start_ms        = now_ms;
 
     s_bike_runtime.gyro_bias_valid            = keep_gyro_bias_valid;
     s_bike_runtime.gyro_bias_x_dps            = keep_gyro_bias_x_dps;
@@ -3182,9 +3554,10 @@ void BIKE_DYNAMICS_Init(uint32_t now_ms)
 
 void BIKE_DYNAMICS_RequestZeroCapture(void)
 {
-    s_bike_runtime.zero_requested            = true;
-    s_bike_runtime.zero_capture_good_ms      = 0u;
-    s_bike_runtime.zero_capture_sample_count = 0u;
+    s_bike_runtime.zero_requested               = true;
+    s_bike_runtime.zero_capture_start_ms        = s_bike_runtime.last_task_ms;
+    s_bike_runtime.zero_capture_good_ms         = 0u;
+    s_bike_runtime.zero_capture_sample_count    = 0u;
     s_bike_runtime.zero_capture_settle_until_ms = s_bike_runtime.last_task_ms + BIKE_DYN_ZERO_CAPTURE_SETTLE_MS;
     g_app_state.bike.zero_request_count++;
 }

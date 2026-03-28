@@ -84,6 +84,14 @@
 #define APP_ALTITUDE_PRESSURE_CM_PER_HPA_AT_SEA_LEVEL 843.0f
 #endif
 
+#ifndef APP_ALTITUDE_PRESSURE_CORRECTION_MIN_HPA_X100
+#define APP_ALTITUDE_PRESSURE_CORRECTION_MIN_HPA_X100 (-2000)
+#endif
+
+#ifndef APP_ALTITUDE_PRESSURE_CORRECTION_MAX_HPA_X100
+#define APP_ALTITUDE_PRESSURE_CORRECTION_MAX_HPA_X100 (2000)
+#endif
+
 #ifndef APP_ALTITUDE_BARO_ADAPTIVE_NOISE_TAU_MS
 #define APP_ALTITUDE_BARO_ADAPTIVE_NOISE_TAU_MS 350u
 #endif
@@ -600,6 +608,28 @@ static float APP_ALTITUDE_ClampF(float value, float min_value, float max_value)
         return max_value;
     }
     return value;
+}
+
+static float APP_ALTITUDE_GetPressureCorrectionHpa(const app_altitude_settings_t *settings)
+{
+    int32_t correction_hpa_x100;
+
+    if (settings == NULL)
+    {
+        return 0.0f;
+    }
+
+    correction_hpa_x100 = settings->pressure_correction_hpa_x100;
+    if (correction_hpa_x100 < APP_ALTITUDE_PRESSURE_CORRECTION_MIN_HPA_X100)
+    {
+        correction_hpa_x100 = APP_ALTITUDE_PRESSURE_CORRECTION_MIN_HPA_X100;
+    }
+    else if (correction_hpa_x100 > APP_ALTITUDE_PRESSURE_CORRECTION_MAX_HPA_X100)
+    {
+        correction_hpa_x100 = APP_ALTITUDE_PRESSURE_CORRECTION_MAX_HPA_X100;
+    }
+
+    return ((float)correction_hpa_x100) * 0.01f;
 }
 
 static uint32_t APP_ALTITUDE_ClampU32(uint32_t value, uint32_t min_value, uint32_t max_value)
@@ -3549,6 +3579,19 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
         s_altitude_runtime.last_baro_timestamp_ms = baro->timestamp_ms;
 
         pressure_raw_hpa = ((float)baro->pressure_hpa_x100) * 0.01f;
+
+        /* ------------------------------------------------------------------ */
+        /*  pressure correction                                                 */
+        /*                                                                    */
+        /*  사용자 correction 값은 QNH를 바꾸는 설정이 아니라,                 */
+        /*  센서 static offset을 low-level pressure path에 더하는 장치 보정값이다.*/
+        /*                                                                    */
+        /*  따라서 correction은                                               */
+        /*  - prefilter 이전 raw pressure에 먼저 적용하고                     */
+        /*  - 이후의 pressure LPF / baro altitude / baro vario / fused path   */
+        /*    전체가 같은 corrected pressure를 공유하도록 한다.              */
+        /* ------------------------------------------------------------------ */
+        pressure_raw_hpa += APP_ALTITUDE_GetPressureCorrectionHpa(settings);
         pressure_prefilt_hpa = APP_ALTITUDE_UpdatePressurePrefilter(pressure_raw_hpa);
 
         if ((s_altitude_runtime.pressure_filt_hpa <= 0.0f) || (alt_prev->baro_valid == false))
