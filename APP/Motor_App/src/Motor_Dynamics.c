@@ -36,6 +36,7 @@ static motor_dynamics_runtime_t s_runtime;
 #define MOTOR_DYN_CAL_POPUP_HOLD_MS        1200u
 #define MOTOR_DYN_CAL_POPUP_REFRESH_MS      400u
 #define MOTOR_DYN_MANUAL_ZERO_POPUP_MAX_MS 12000u
+#define MOTOR_DYN_BOOT_IMU_READY_STALE_MS    500u
 
 static void motor_dyn_reset_history(motor_dynamics_state_t *dyn)
 {
@@ -222,6 +223,38 @@ static void motor_dyn_show_cal_popup(uint32_t now_ms,
     }
 }
 
+static bool motor_dyn_is_imu_ready(uint32_t now_ms, const app_bike_state_t *bike)
+{
+    if (bike == 0)
+    {
+        return false;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /*  boot gyro calibration은 실제로 fresh IMU sample이 돌고 있을 때만         */
+    /*  시작해야 한다.                                                         */
+    /*                                                                        */
+    /*  그렇지 않으면 low-level state machine이 active 상태로만 머문 채        */
+    /*  progress 0% timeout -> 재시도 루프에 들어갈 수 있다.                   */
+    /* ---------------------------------------------------------------------- */
+    if (bike->imu_valid == false)
+    {
+        return false;
+    }
+
+    if (bike->last_imu_update_ms == 0u)
+    {
+        return false;
+    }
+
+    if ((uint32_t)(now_ms - bike->last_imu_update_ms) > MOTOR_DYN_BOOT_IMU_READY_STALE_MS)
+    {
+        return false;
+    }
+
+    return true;
+}
+
 static void motor_dyn_run_calibration_supervisor(uint32_t now_ms,
                                                  const app_bike_state_t *bike)
 {
@@ -284,6 +317,24 @@ static void motor_dyn_run_calibration_supervisor(uint32_t now_ms,
     switch ((motor_dyn_cal_flow_t)s_runtime.cal_flow)
     {
     case MOTOR_DYN_CAL_FLOW_BOOT_GYRO:
+        if (motor_dyn_is_imu_ready(now_ms, bike) == false)
+        {
+            /* ------------------------------------------------------------------ */
+            /*  IMU sample이 아직 준비되지 않은 동안에는 calibration request를      */
+            /*  실제로 발행하지 않는다.                                             */
+            /*                                                                    */
+            /*  이렇게 해야 첫 부팅 직후 또는 IMU stream 공백 구간에서             */
+            /*  low-level gyro cal이 active 0%% timeout 상태로 들어가는 것을        */
+            /*  막을 수 있다.                                                      */
+            /* ------------------------------------------------------------------ */
+            s_runtime.cal_request_sent = 0u;
+            motor_dyn_show_cal_popup(now_ms,
+                                     "CALIB REQUIRED!",
+                                     "WAITING FOR IMU",
+                                     "CHECK IMU DATA");
+            break;
+        }
+
         if ((bike->gyro_bias_valid == false) &&
             (bike->gyro_bias_cal_active == false) &&
             (s_runtime.cal_request_sent == 0u))
@@ -306,8 +357,8 @@ static void motor_dyn_run_calibration_supervisor(uint32_t now_ms,
         {
             /* ------------------------------------------------------------------ */
             /*  이전 시도가 timeout/실패로 종료되었으므로 다시 request를 열어 둔다. */
-            /*  popup은 계속 유지해서 사용자가 "아직 자세를 잡아야 한다" 를         */
-            /*  즉시 이해할 수 있게 한다.                                         */
+            /*  단, fresh IMU가 유지되는 동안에만 다시 시작되므로                  */
+            /*  progress 0%% 고착 루프는 여기서 끊긴다.                             */
             /* ------------------------------------------------------------------ */
             s_runtime.cal_request_sent = 0u;
             s_runtime.cal_expected_gyro_cal_ms = bike->last_gyro_bias_cal_ms;

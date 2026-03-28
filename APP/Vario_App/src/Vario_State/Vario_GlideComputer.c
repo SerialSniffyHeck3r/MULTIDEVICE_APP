@@ -52,6 +52,18 @@
 #define VARIO_GC_POLAR_SEARCH_STEPS 48u
 #endif
 
+#ifndef VARIO_GC_STF_TAIL_EXTEND_FRACTION
+#define VARIO_GC_STF_TAIL_EXTEND_FRACTION 0.50f
+#endif
+
+#ifndef VARIO_GC_STF_TAIL_EXTEND_MIN_MPS
+#define VARIO_GC_STF_TAIL_EXTEND_MIN_MPS (10.0f / 3.6f)
+#endif
+
+#ifndef VARIO_GC_STF_TAIL_EXTEND_MAX_MPS
+#define VARIO_GC_STF_TAIL_EXTEND_MAX_MPS (30.0f / 3.6f)
+#endif
+
 #ifndef VARIO_GC_TE_TAU_S
 #define VARIO_GC_TE_TAU_S 1.20f
 #endif
@@ -758,25 +770,27 @@ static void vario_gc_update_speed_to_fly(vario_runtime_t *rt,
     /* ---------------------------------------------------------------------- */
     /* STF search envelope                                                     */
     /*                                                                        */
-    /* 이전 구현은 search_max 를                                                */
-    /*   max(v3 + 6 m/s, 1.15 * v3)                                            */
-    /* 로 열어 두고, polar tail 도 v3 이후를 선형 외삽했다.                    */
+    /* 현재 사용자는 "130.0 km/h 에 고정되는 듯한" 현상을 보고했다.            */
+    /* 실제 원인은 이전 단계에서 STF 탐색을 [v1, v3] 로만 묶으면서,            */
+    /* polar 의 high-speed sample point(v3)가 의도치 않게                      */
+    /* "명령 속도의 절대 상한" 역할까지 맡아 버린 데 있다.                      */
     /*                                                                        */
-    /* 그 결과 default polar + 보통의 manual McCready 값에서                    */
-    /* 최적해가 실제 정의된 polar 바깥의 인공 upper bound 에 고정되며,         */
-    /* 표시 속도가 151.6 km/h 로 peg 되는 현상이 생겼다.                       */
+    /* 하지만 3-point polar 의 v3 는                                           */
+    /* - pilot 이 입력한 대표 샘플 포인트이지                                  */
+    /* - 반드시 기체의 절대 STF 한계 속도라는 뜻은 아니다.                     */
     /*                                                                        */
-    /* 현재 하드웨어/데이터 조건에서는                                         */
-    /* - 3-point user polar 밖의 tail shape 를 신뢰할 수 없고                  */
-    /* - pitot 가 없는 상태에서 과도한 high-speed STF 를 지시하는 건           */
-    /*   제품 UX 상 더 나쁘다.                                                 */
+    /* 그래서 이번 구현은                                                      */
+    /* - v3 이후의 sink 는 기존과 동일하게 마지막 구간 slope 로 선형 외삽하되  */
+    /* - search envelope 은 "마지막 polar interval 의 절반" 만큼만             */
+    /*   modest 하게 연장한다.                                                 */
     /*                                                                        */
-    /* 따라서 STF search 는                                                     */
-    /* - 사용자가 직접 정의한 polar envelope [v1, v3] 안에서만 수행하고        */
-    /* - 그 안에서 best glide metric 을 찾는다.                                */
+    /* 이렇게 하면                                                             */
+    /* - v3 hard-cap 때문에 130.0 으로만 보이는 현상은 완화되고                */
+    /* - 예전처럼 tail 을 과도하게 넓혀 150+ km/h 인공 상한에                  */
+    /*   계속 peg 되는 문제도 줄어든다.                                        */
     /*                                                                        */
-    /* 더 높은 STF 가 필요하면, 사용자가 polar high-speed point(v3, s3)를      */
-    /* 실제 기체에 맞게 올려서 envelope 자체를 넓히도록 한다.                  */
+    /* 표시 레이어는 별도로 GS bar top 에 marker 를 clamp 하므로,              */
+    /* 계산 speed 가 graph 상단을 넘어도 UI cue 는 계속 유지된다.              */
     /* ---------------------------------------------------------------------- */
     search_min_mps = polar->v1_mps;
     if (search_min_mps < 5.0f)
@@ -785,6 +799,17 @@ static void vario_gc_update_speed_to_fly(vario_runtime_t *rt,
     }
 
     search_max_mps = polar->v3_mps;
+    if (polar->v3_mps > polar->v2_mps)
+    {
+        float tail_extend_mps;
+
+        tail_extend_mps = (polar->v3_mps - polar->v2_mps) * VARIO_GC_STF_TAIL_EXTEND_FRACTION;
+        tail_extend_mps = vario_gc_clampf(tail_extend_mps,
+                                          VARIO_GC_STF_TAIL_EXTEND_MIN_MPS,
+                                          VARIO_GC_STF_TAIL_EXTEND_MAX_MPS);
+        search_max_mps += tail_extend_mps;
+    }
+
     if (search_max_mps < search_min_mps)
     {
         search_max_mps = search_min_mps;

@@ -164,7 +164,7 @@ static const unsigned char vario_icon_vario_led_down_bits[] = {
 #define VARIO_UI_TOP_GLD_VALUE_UNIT_GAP            2
 #define VARIO_UI_TOP_GLD_AVG_TEXT_GAP_X             4
 #define VARIO_UI_TOP_GLD_AVG_BAR_TOP_DY             1
-#define VARIO_UI_TOP_GLD_AVG_BAR_H                  5
+#define VARIO_UI_TOP_GLD_AVG_BAR_H                  4
 #define VARIO_UI_TOP_GLD_AVG_MARK_CENTER_DY         7
 #define VARIO_UI_LOWER_LEFT_GLIDE_BLOCK_SHIFT_UP_PX 8
 
@@ -209,6 +209,8 @@ static const unsigned char vario_icon_vario_led_down_bits[] = {
 #define VARIO_UI_COMPASS_SIDE_MARGIN               8
 #define VARIO_UI_COMPASS_LABEL_INSET               7
 #define VARIO_UI_COMPASS_BOTTOM_GAP                0
+#define VARIO_UI_COMPASS_RADIUS_EXTRA_PX           2
+#define VARIO_UI_COMPASS_CENTER_Y_SHIFT_PX        -4
 
 /* -------------------------------------------------------------------------- */
 /* 하단 MAX/meta + main value block                                            */
@@ -2348,8 +2350,7 @@ static void vario_display_format_estimated_te_value(char *buf,
                                                     size_t buf_len,
                                                     const vario_runtime_t *rt)
 {
-    const vario_settings_t *settings;
-    float                   display_value;
+    float display_value;
 
     if ((buf == NULL) || (buf_len == 0u))
     {
@@ -2358,35 +2359,15 @@ static void vario_display_format_estimated_te_value(char *buf,
 
     if ((rt == NULL) || (rt->estimated_te_valid == false))
     {
-        settings = Vario_Settings_Get();
-        if ((settings != NULL) && (settings->vspeed_unit == VARIO_VSPEED_UNIT_FPM))
-        {
-            snprintf(buf, buf_len, "----");
-        }
-        else
-        {
-            snprintf(buf, buf_len, "--.-");
-        }
+        snprintf(buf, buf_len, "--.-");
         return;
     }
 
-    settings = Vario_Settings_Get();
     display_value = Vario_Settings_VSpeedMpsToDisplayFloat(rt->estimated_te_vario_mps);
-
-    if ((settings != NULL) && (settings->vspeed_unit == VARIO_VSPEED_UNIT_FPM))
-    {
-        snprintf(buf,
-                 buf_len,
-                 "%ld",
-                 (long)lroundf(vario_display_clampf(display_value, -9999.0f, 9999.0f)));
-    }
-    else
-    {
-        snprintf(buf,
-                 buf_len,
-                 "%.1f",
-                 (double)vario_display_clampf(display_value, -99.9f, 99.9f));
-    }
+    snprintf(buf,
+             buf_len,
+             "%.1f",
+             (double)vario_display_clampf(display_value, -99.9f, 99.9f));
 }
 
 static int16_t vario_display_get_bottom_center_flight_time_top_y(u8g2_t *u8g2,
@@ -2836,22 +2817,17 @@ static void vario_display_draw_lower_left_glide_computer(u8g2_t *u8g2,
     }
 
     /* ---------------------------------------------------------------------- */
-    /* 좌하단 debug block 제거                                                 */
+    /* 좌하단 glide-computer 3중 세트                                          */
     /*                                                                        */
-    /* 사용자가 지정한 대로, Estimated TE 바로 아래 2 px 위치부터               */
-    /* ALT2/ALT3 와 동일한 폰트 조합(값: ALT2_VALUE, 단위: ALT2_UNIT)으로       */
-    /* 3개 row 를 다시 배치한다.                                               */
+    /* 이번 수정 요구사항                                                       */
+    /* - Final Glide / Arr H / Distance 세 row 를 "묶어서" Y축 아래로 내린다.  */
+    /* - 단, Distance value row 의 top Y 는 FLT TIME value row 와 정확히 맞춘다.*/
+    /* - Arr H / Final Glide 는 그로부터 기존 row 간격 규칙을 그대로 유지한다. */
     /*                                                                        */
-    /* row 1 : Final Glide required ratio                                     */
-    /* row 2 : Arrival Height                                                  */
-    /* row 3 : Target Distance                                                 */
-    /*                                                                        */
-    /* 세 번째 row 는 기존 compass 상단 "START ---.-Km" 를 제거하면서          */
-    /* 사라진 거리 정보를 대신 유지하기 위해 배치한다.                          */
+    /* 즉, anchor 는 Distance value row 이고,                                  */
+    /* 나머지 두 row 는 상대 위치만 그대로 유지한 채 같이 이동한다.            */
     /* ---------------------------------------------------------------------- */
     left_x = (int16_t)(v->x + VARIO_UI_SIDE_BAR_W + 4);
-    top_y = (int16_t)(vario_display_get_vario_estimated_te_bottom_y(u8g2, v) + 2 -
-                      VARIO_UI_LOWER_LEFT_GLIDE_BLOCK_SHIFT_UP_PX);
 
     value_h = vario_display_get_font_height(u8g2, VARIO_UI_FONT_ALT2_VALUE);
     unit_h = vario_display_get_font_height(u8g2, VARIO_UI_FONT_ALT2_UNIT);
@@ -2923,6 +2899,15 @@ static void vario_display_draw_lower_left_glide_computer(u8g2_t *u8g2,
     }
 
     row_gap = 2;
+
+    /* ---------------------------------------------------------------------- */
+    /* Distance value row 가 FLT TIME value 와 동일 top Y 를 쓰도록            */
+    /* block 전체의 anchor(top_y)를 역산한다.                                  */
+    /* ---------------------------------------------------------------------- */
+    top_y = (int16_t)(vario_display_get_bottom_center_flight_time_top_y(u8g2, v) -
+                      (2 * (row_h + row_gap)) -
+                      ((row_h - value_h) / 2));
+
     row0_y = top_y;
     row1_y = (int16_t)(row0_y + row_h + row_gap);
     row2_y = (int16_t)(row1_y + row_h + row_gap);
@@ -3452,6 +3437,7 @@ static void vario_display_draw_vario_side_bar(u8g2_t *u8g2,
 
 static void vario_display_draw_gs_side_bar(u8g2_t *u8g2,
                                            const vario_viewport_t *v,
+                                           const vario_runtime_t *rt,
                                            float instant_speed_kmh,
                                            float average_speed_kmh)
 {
@@ -3464,8 +3450,11 @@ static void vario_display_draw_gs_side_bar(u8g2_t *u8g2,
     int16_t                 tick_y;
     int16_t                 avg_center_y;
     int16_t                 avg_icon_y;
+    int16_t                 mc_center_y;
+    int16_t                 mc_icon_y;
     float                   clamped_speed;
     float                   clamped_avg_speed;
+    float                   clamped_mc_speed;
     float                   gs_top_kmh;
     float                   minor_step_kmh;
     float                   major_step_kmh;
@@ -3538,11 +3527,7 @@ static void vario_display_draw_gs_side_bar(u8g2_t *u8g2,
     /* ---------------------------------------------------------------------- */
     /* average GS marker                                                       */
     /*                                                                        */
-    /* 사용자가 지정한 대로                                                     */
-    /* - 평균 속도 marker 는 speed bar 의 좌측 lane 에 고정한다.               */
-    /* - icon 중심이 실제 gauge value 를 가리키도록                            */
-    /*   기존 McCready side marker 와 동일한 center-to-top 변환을 쓴다.        */
-    /* - 우측 edge arrow / 좌측 MC marker 는 제거한다.                        */
+    /* 평균 속도 marker 는 기존과 동일하게 speed bar 의 좌측 lane 을 쓴다.     */
     /* ---------------------------------------------------------------------- */
     clamped_avg_speed = vario_display_clampf(average_speed_kmh, 0.0f, gs_top_kmh);
     if (clamped_avg_speed > 0.0f)
@@ -3561,6 +3546,36 @@ static void vario_display_draw_gs_side_bar(u8g2_t *u8g2,
                                VARIO_ICON_GS_AVG_HEIGHT,
                                vario_icon_gs_avg_bits);
     }
+
+    /* ---------------------------------------------------------------------- */
+    /* McCready / STF marker                                                   */
+    /*                                                                        */
+    /* 사용자가 요청한 점검 결과                                              */
+    /* - 전용 XBM 은 정의만 되어 있고 실제 draw path 가 빠져 있었다.           */
+    /* - 이제 speed_to_fly_valid 가 살아 있으면 항상 같은 좌측 lane 에 draw 한다.*/
+    /* - speed_to_fly_kmh 가 GS graph 상단값을 넘으면 marker 위치만            */
+    /*   top tick 에 clamp 하여 "안 보이는" 현상을 막는다.                    */
+    /* ---------------------------------------------------------------------- */
+    if ((rt != NULL) && (rt->speed_to_fly_valid != false))
+    {
+        clamped_mc_speed = vario_display_clampf(rt->speed_to_fly_kmh, 0.0f, gs_top_kmh);
+        if (clamped_mc_speed > 0.0f)
+        {
+            mc_center_y = vario_display_get_gs_value_center_y(v,
+                                                              clamped_mc_speed,
+                                                              gs_top_kmh);
+            mc_icon_y = vario_display_get_marker_top_y(mc_center_y,
+                                                       VARIO_ICON_MC_SPEED_HEIGHT,
+                                                       v->y,
+                                                       (int16_t)(v->y + v->h));
+            vario_display_draw_xbm(u8g2,
+                                   avg_icon_x,
+                                   mc_icon_y,
+                                   VARIO_ICON_MC_SPEED_WIDTH,
+                                   VARIO_ICON_MC_SPEED_HEIGHT,
+                                   vario_icon_mc_speed_bits);
+        }
+    }
 }
 
 static void vario_display_draw_vario_value_block(u8g2_t *u8g2,
@@ -3570,6 +3585,7 @@ static void vario_display_draw_vario_value_block(u8g2_t *u8g2,
     const vario_settings_t *settings;
     char    value_text[20];
     char    max_text[20];
+    char    te_value_text[20];
     int16_t value_box_x;
     int16_t value_box_y;
     int16_t value_box_h;
@@ -3579,6 +3595,9 @@ static void vario_display_draw_vario_value_block(u8g2_t *u8g2,
     int16_t te_meta_x;
     int16_t te_meta_y;
     int16_t te_meta_w;
+    int16_t te_value_x;
+    int16_t te_value_y;
+    int16_t te_value_w;
 
     if ((u8g2 == NULL) || (v == NULL) || (rt == NULL))
     {
@@ -3606,6 +3625,8 @@ static void vario_display_draw_vario_value_block(u8g2_t *u8g2,
     /* ---------------------------------------------------------------------- */
     vario_display_format_peak_vario(max_text, sizeof(max_text), rt->max_top_vario_mps);
 
+    te_meta_x = (int16_t)(v->x + VARIO_UI_SIDE_BAR_W + 2 + VARIO_UI_BOTTOM_META_BOX_W + 3);
+
     if ((settings == NULL) || (settings->show_max_vario != 0u))
     {
         max_box_h = vario_display_get_font_height(u8g2, VARIO_UI_FONT_BOTTOM_MAX_VALUE);
@@ -3624,11 +3645,10 @@ static void vario_display_draw_vario_value_block(u8g2_t *u8g2,
                                         max_text);
 
         /* ------------------------------------------------------------------ */
-        /* max VARIO row 우측의 trend icon 은 제거하고                         */
-        /* 동일 row 에 "Est.TE" label 만 남긴다.                               */
+        /* max VARIO row 우측 Est.TE label                                     */
         /*                                                                      */
-        /* 사용자는 실제 estimated TE 값 row 를 비워 두고,                      */
-        /* 이 meta row 에만 Est.TE 텍스트를 두길 원한다.                        */
+        /* meta row 에 label 을 두고,                                           */
+        /* 바로 아래 reserved row 에 실제 Estimated TE 값을 별도로 그린다.      */
         /* ------------------------------------------------------------------ */
         te_meta_x = (int16_t)(max_box_x + VARIO_UI_BOTTOM_META_BOX_W + 3);
         te_meta_y = max_box_y;
@@ -3653,12 +3673,26 @@ static void vario_display_draw_vario_value_block(u8g2_t *u8g2,
     /* ---------------------------------------------------------------------- */
     /* Estimated TE lower row                                                  */
     /*                                                                        */
-    /* 사용자의 최신 요구사항에 따라,                                          */
-    /* 큰 VARIO 값 바로 아래의 Est.TE value row 는 의도적으로 비워 둔다.      */
-    /* layout 상 reserved area 는 그대로 유지되며,                             */
-    /* 좌하단 glide-computer block 이 이 영역 쪽으로 8 px 올라오도록           */
-    /* 별도 조정된다.                                                          */
+    /* 현행 요구사항                                                           */
+    /* - Est.TE label 은 meta row 에 유지한다.                                 */
+    /* - 그 바로 아래 reserved row 에 실제 Estimated TE 값을 표시한다.         */
+    /* - 값은 "-XX.X" 슬롯 폭을 가진 fixed box 안에서 right align 한다.        */
+    /* - 숫자가 바뀌어도 anchor 가 움직이지 않도록 width 를 고정한다.          */
     /* ---------------------------------------------------------------------- */
+    vario_display_format_estimated_te_value(te_value_text,
+                                                  sizeof(te_value_text),
+                                                  rt);
+    te_value_x = te_meta_x;
+    te_value_y = vario_display_get_vario_estimated_te_top_y(u8g2, v);
+    te_value_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_ALT2_UNIT, "-99.9");
+    vario_display_draw_text_box_top(u8g2,
+                                    te_value_x,
+                                    te_value_y,
+                                    te_value_w,
+                                    VARIO_UI_ALIGN_RIGHT,
+                                    VARIO_UI_FONT_ALT2_UNIT,
+                                    te_value_text);
+
     (void)settings;
 }
 
@@ -4185,6 +4219,8 @@ static void vario_display_draw_compass(u8g2_t *u8g2,
         radius = 18;
     }
 
+    radius = (int16_t)(radius + VARIO_UI_COMPASS_RADIUS_EXTRA_PX);
+
     /* ---------------------------------------------------------------------- */
     /* 원의 가장 밑부분이 자기 영역 최하단에 닿도록 center_y 를 유지한다.        */
     /* 상단의 START ---.-Km 문구는 사용자가 삭제를 요구했으므로 더 이상        */
@@ -4195,6 +4231,16 @@ static void vario_display_draw_compass(u8g2_t *u8g2,
     if ((center_y - radius) < top_limit_y)
     {
         center_y = (int16_t)(top_limit_y + radius);
+    }
+
+    center_y = (int16_t)(center_y + VARIO_UI_COMPASS_CENTER_Y_SHIFT_PX);
+    if ((center_y - radius) < top_limit_y)
+    {
+        center_y = (int16_t)(top_limit_y + radius);
+    }
+    if ((center_y + radius) > bottom_limit_y)
+    {
+        center_y = (int16_t)(bottom_limit_y - radius);
     }
 
     vario_display_format_nav_distance(nav_text,
@@ -4712,7 +4758,7 @@ void Vario_Display_RenderFlightPage(u8g2_t *u8g2, vario_flight_page_mode_t mode)
     }
 
     vario_display_draw_vario_side_bar(u8g2, v, bar_vario_mps, bar_avg_vario_mps);
-    vario_display_draw_gs_side_bar(u8g2, v, bar_speed_kmh, bar_avg_speed_kmh);
+    vario_display_draw_gs_side_bar(u8g2, v, rt, bar_speed_kmh, bar_avg_speed_kmh);
 
     vario_display_draw_top_left_metrics(u8g2, v, rt);
     vario_display_draw_top_center_clock(u8g2, v, rt, settings);
