@@ -198,11 +198,11 @@ static void APP_STATE_ApplyDefaultSettingsUnlocked(void)
                 /*                                                                    */
                 /*  imu_gravity_tau_ms            = 700ms                              */
                 /*  imu_accel_tau_ms              = 180ms                              */
-                /*  imu_accel_lsb_per_g           = 16384 (MPU6050 ±2g)                */
+                /*  imu_accel_lsb_per_g           = 8192  (MPU6050 ±4g)                */
                 /*  imu_vertical_deadband_mg      = 12mg                               */
                 /*  imu_vertical_clip_mg          = 450mg                              */
                 /*  imu_measurement_noise_cms2    = 160cm/s²                           */
-                /*  imu_gyro_lsb_per_dps          = 131 (MPU6050 ±250dps)              */
+                /*  imu_gyro_lsb_per_dps          = 66    (MPU6050 ±500dps 근사)       */
                 /*  imu_attitude_accel_gate_mg    = 80mg                               */
                 /*  imu_predict_min_trust_permille= 600                                */
                 /*                                                                    */
@@ -213,11 +213,11 @@ static void APP_STATE_ApplyDefaultSettingsUnlocked(void)
                 /* ------------------------------------------------------------------ */
                 g_app_state.settings.altitude.imu_gravity_tau_ms             = 700u;
                 g_app_state.settings.altitude.imu_accel_tau_ms               = 180u;
-                g_app_state.settings.altitude.imu_accel_lsb_per_g            = 16384u;
+                g_app_state.settings.altitude.imu_accel_lsb_per_g            = 8192u;
                 g_app_state.settings.altitude.imu_vertical_deadband_mg       = 12u;
                 g_app_state.settings.altitude.imu_vertical_clip_mg           = 450u;
                 g_app_state.settings.altitude.imu_measurement_noise_cms2     = 160u;
-                g_app_state.settings.altitude.imu_gyro_lsb_per_dps           = 131u;
+                g_app_state.settings.altitude.imu_gyro_lsb_per_dps           = 66u;
                 g_app_state.settings.altitude.imu_attitude_accel_gate_mg     = 80u;
                 g_app_state.settings.altitude.imu_predict_min_trust_permille = 600u;
 

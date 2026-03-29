@@ -322,38 +322,54 @@
 #endif
 
 #ifndef APP_ALTITUDE_BARO_VARIO_NOISE_MAX_SCALE
-#define APP_ALTITUDE_BARO_VARIO_NOISE_MAX_SCALE 3.0f
+#define APP_ALTITUDE_BARO_VARIO_NOISE_MAX_SCALE 4.0f
 #endif
 
 /* -------------------------------------------------------------------------- */
 /*  regression-based baro velocity measurement                                */
 /*                                                                            */
 /*  direct diff 대신 짧은 시간창 선형회귀 slope를 velocity measurement로 쓴다. */
-/*  pressure median-3 + pressure LPF 다음 단계에서 altitude를 push 하고,       */
-/*  최근 11개 샘플(대략 0.2초 남짓) 위에서 slope를 구한다.                     */
+/*                                                                            */
+/*  중요                                                                     */
+/*  - altitude 표시는 "정직하지만 차분한" 쪽                                 */
+/*  - vario 반응은 "빠르지만 false tone 는 적게" 쪽                          */
+/*  로 동시에 가져가려면, pressure source 를 한 갈래로만 쓰는 구조보다        */
+/*  altitude용 / vario용 pressure 가지를 분리하는 편이 훨씬 낫다.             */
+/*                                                                            */
+/*  따라서 이 파일은                                                          */
+/*  1) altitude용 slow pressure LPF                                           */
+/*  2) vario용 fast pressure LPF                                              */
+/*  를 따로 유지하고, regression slope는 vario 전용 가지에서 계산한다.        */
+/*                                                                            */
+/*  창 길이도 예전 aggressive patch(7 samples, 0.07s)보다는 조금 길게 잡아    */
+/*  commercial-grade 쪽의 정확도 / repeatability 를 우선한다.                 */
 /* -------------------------------------------------------------------------- */
 #ifndef APP_ALTITUDE_BARO_VARIO_FIT_WINDOW
-#define APP_ALTITUDE_BARO_VARIO_FIT_WINDOW 7u
+#define APP_ALTITUDE_BARO_VARIO_FIT_WINDOW 9u
 #endif
 
 #ifndef APP_ALTITUDE_BARO_VARIO_MIN_SAMPLES
-#define APP_ALTITUDE_BARO_VARIO_MIN_SAMPLES 4u
+#define APP_ALTITUDE_BARO_VARIO_MIN_SAMPLES 5u
 #endif
 
 #ifndef APP_ALTITUDE_BARO_VARIO_MIN_SPAN_S
-#define APP_ALTITUDE_BARO_VARIO_MIN_SPAN_S 0.07f
+#define APP_ALTITUDE_BARO_VARIO_MIN_SPAN_S 0.10f
 #endif
 
 #ifndef APP_ALTITUDE_BARO_VARIO_NOISE_FIT_RMSE_GAIN
-#define APP_ALTITUDE_BARO_VARIO_NOISE_FIT_RMSE_GAIN 1.00f
+#define APP_ALTITUDE_BARO_VARIO_NOISE_FIT_RMSE_GAIN 1.15f
 #endif
 
 #ifndef APP_ALTITUDE_BARO_VELOCITY_REST_NOISE_SCALE
-#define APP_ALTITUDE_BARO_VELOCITY_REST_NOISE_SCALE 1.5f
+#define APP_ALTITUDE_BARO_VELOCITY_REST_NOISE_SCALE 2.2f
 #endif
 
 #ifndef APP_ALTITUDE_BARO_VELOCITY_NEAR_ZERO_NOISE_SCALE
-#define APP_ALTITUDE_BARO_VELOCITY_NEAR_ZERO_NOISE_SCALE 1.1f
+#define APP_ALTITUDE_BARO_VELOCITY_NEAR_ZERO_NOISE_SCALE 1.25f
+#endif
+
+#ifndef APP_ALTITUDE_VARIO_PRESSURE_TAU_MS
+#define APP_ALTITUDE_VARIO_PRESSURE_TAU_MS 35u
 #endif
 
 #ifndef APP_ALTITUDE_AUDIO_OVERRIDE_TIMEOUT_MS
@@ -452,8 +468,9 @@ typedef struct
     /*  Pressure / altitude intermediate states                                */
     /* ---------------------------------------------------------------------- */
     float pressure_prefilt_hpa;        /* median-3 선별 후 pressure               */
-    float pressure_filt_hpa;           /* 1차 LPF pressure                        */
-    float pressure_residual_hpa;       /* prefilt - filt residual                 */
+    float pressure_filt_hpa;           /* altitude / display용 slow LPF pressure  */
+    float pressure_vario_filt_hpa;     /* vario 전용 fast LPF pressure            */
+    float pressure_residual_hpa;       /* prefilt - slow filt residual            */
     float pressure_hist_hpa[3];        /* median-3 원본 history                   */
     uint8_t pressure_hist_count;       /* history 유효 개수                       */
     uint8_t pressure_hist_index;       /* history ring index                      */
@@ -3446,6 +3463,7 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
     float qnh_equiv_hpa;
     float alt_std_cm;
     float alt_qnh_cm;
+    float alt_qnh_vario_cm;
     float alt_gps_cm;
     float gps_noise_cm;
     float baro_noise_cm;
@@ -3521,6 +3539,7 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
     qnh_equiv_hpa = s_altitude_runtime.qnh_equiv_filt_hpa;
     alt_std_cm = 0.0f;
     alt_qnh_cm = 0.0f;
+    alt_qnh_vario_cm = 0.0f;
     alt_gps_cm = 0.0f;
     gps_noise_cm = 0.0f;
     baro_noise_cm = (float)settings->baro_measurement_noise_cm;
@@ -3595,6 +3614,21 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
         pressure_corrected_hpa = pressure_raw_hpa + (((float)settings->pressure_correction_hpa_x100) * 0.01f);
         pressure_prefilt_hpa = APP_ALTITUDE_UpdatePressurePrefilter(pressure_corrected_hpa);
 
+        /* ------------------------------------------------------------------ */
+        /*  pressure source 분리                                               */
+        /*                                                                    */
+        /*  slow branch  : altitude / fused altitude / display 안정화용         */
+        /*  fast branch  : vario regression slope 계산 전용                     */
+        /*                                                                    */
+        /*  왜 분리하나?                                                        */
+        /*  기존 구조에서는 settings->pressure_lpf_tau_ms 하나를 줄이면         */
+        /*  "vario는 빨라지지만 altitude도 같이 흔들리는" trade-off 가 생겼다. */
+        /*                                                                    */
+        /*  commercial-grade 목표는                                            */
+        /*  - 숫자 altitude 는 차분하게                                         */
+        /*  - fast vario / audio 는 즉각적이되 false tone 는 과하지 않게       */
+        /*  이므로, pressure source 를 두 갈래로 나눠야 한다.                  */
+        /* ------------------------------------------------------------------ */
         if ((s_altitude_runtime.pressure_filt_hpa <= 0.0f) || (alt_prev->baro_valid == false))
         {
             s_altitude_runtime.pressure_residual_hpa = 0.0f;
@@ -3609,10 +3643,24 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
                                                                           baro_dt_s);
         }
 
+        if ((s_altitude_runtime.pressure_vario_filt_hpa <= 0.0f) || (alt_prev->baro_valid == false))
+        {
+            s_altitude_runtime.pressure_vario_filt_hpa = pressure_prefilt_hpa;
+        }
+        else
+        {
+            s_altitude_runtime.pressure_vario_filt_hpa = APP_ALTITUDE_LpfUpdate(s_altitude_runtime.pressure_vario_filt_hpa,
+                                                                                pressure_prefilt_hpa,
+                                                                                APP_ALTITUDE_VARIO_PRESSURE_TAU_MS,
+                                                                                baro_dt_s);
+        }
+
         alt_std_cm = APP_ALTITUDE_PressureToAltitudeMeters(s_altitude_runtime.pressure_filt_hpa,
                                                            APP_ALTITUDE_STD_QNH_HPA) * 100.0f;
         alt_qnh_cm = APP_ALTITUDE_PressureToAltitudeMeters(s_altitude_runtime.pressure_filt_hpa,
                                                            qnh_manual_hpa) * 100.0f;
+        alt_qnh_vario_cm = APP_ALTITUDE_PressureToAltitudeMeters(s_altitude_runtime.pressure_vario_filt_hpa,
+                                                                 qnh_manual_hpa) * 100.0f;
 
         baro_noise_cm = APP_ALTITUDE_ComputeAdaptiveBaroNoiseCm(settings,
                                                                 s_altitude_runtime.pressure_filt_hpa,
@@ -3620,7 +3668,7 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
                                                                 baro_dt_s);
 
         baro_velocity_meas_cms = APP_ALTITUDE_UpdateBaroVarioMeasurement(settings,
-                                                                         alt_qnh_cm,
+                                                                         alt_qnh_vario_cm,
                                                                          baro_dt_s,
                                                                          baro->timestamp_ms);
         baro_velocity_noise_cms = APP_ALTITUDE_ComputeAdaptiveBaroVarioNoiseCms(settings);
@@ -3632,6 +3680,7 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
         pressure_prefilt_hpa = ((float)alt_prev->pressure_prefilt_hpa_x100) * 0.01f;
         alt_std_cm = (float)alt_prev->alt_pressure_std_cm;
         alt_qnh_cm = (float)alt_prev->alt_qnh_manual_cm;
+        alt_qnh_vario_cm = alt_qnh_cm;
         baro_noise_cm = (float)alt_prev->baro_noise_used_cm;
         if (baro_noise_cm <= 0.0f)
         {
