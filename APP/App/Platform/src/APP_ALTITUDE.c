@@ -322,7 +322,7 @@
 #endif
 
 #ifndef APP_ALTITUDE_BARO_VARIO_NOISE_MAX_SCALE
-#define APP_ALTITUDE_BARO_VARIO_NOISE_MAX_SCALE 5.0f
+#define APP_ALTITUDE_BARO_VARIO_NOISE_MAX_SCALE 3.0f
 #endif
 
 /* -------------------------------------------------------------------------- */
@@ -333,27 +333,27 @@
 /*  최근 11개 샘플(대략 0.2초 남짓) 위에서 slope를 구한다.                     */
 /* -------------------------------------------------------------------------- */
 #ifndef APP_ALTITUDE_BARO_VARIO_FIT_WINDOW
-#define APP_ALTITUDE_BARO_VARIO_FIT_WINDOW 11u
+#define APP_ALTITUDE_BARO_VARIO_FIT_WINDOW 7u
 #endif
 
 #ifndef APP_ALTITUDE_BARO_VARIO_MIN_SAMPLES
-#define APP_ALTITUDE_BARO_VARIO_MIN_SAMPLES 5u
+#define APP_ALTITUDE_BARO_VARIO_MIN_SAMPLES 4u
 #endif
 
 #ifndef APP_ALTITUDE_BARO_VARIO_MIN_SPAN_S
-#define APP_ALTITUDE_BARO_VARIO_MIN_SPAN_S 0.12f
+#define APP_ALTITUDE_BARO_VARIO_MIN_SPAN_S 0.07f
 #endif
 
 #ifndef APP_ALTITUDE_BARO_VARIO_NOISE_FIT_RMSE_GAIN
-#define APP_ALTITUDE_BARO_VARIO_NOISE_FIT_RMSE_GAIN 1.25f
+#define APP_ALTITUDE_BARO_VARIO_NOISE_FIT_RMSE_GAIN 1.00f
 #endif
 
 #ifndef APP_ALTITUDE_BARO_VELOCITY_REST_NOISE_SCALE
-#define APP_ALTITUDE_BARO_VELOCITY_REST_NOISE_SCALE 2.6f
+#define APP_ALTITUDE_BARO_VELOCITY_REST_NOISE_SCALE 1.5f
 #endif
 
 #ifndef APP_ALTITUDE_BARO_VELOCITY_NEAR_ZERO_NOISE_SCALE
-#define APP_ALTITUDE_BARO_VELOCITY_NEAR_ZERO_NOISE_SCALE 1.35f
+#define APP_ALTITUDE_BARO_VELOCITY_NEAR_ZERO_NOISE_SCALE 1.1f
 #endif
 
 #ifndef APP_ALTITUDE_AUDIO_OVERRIDE_TIMEOUT_MS
@@ -1567,7 +1567,7 @@ static float APP_ALTITUDE_AdjustBaroVelocityMeasurementNearRest(const app_altitu
         return 0.0f;
     }
 
-    return baro_velocity_meas_cms * 0.75f;
+    return baro_velocity_meas_cms * 0.85f;
 }
 
 static float APP_ALTITUDE_AdjustBaroVelocityNoiseNearRest(const app_altitude_settings_t *settings,
