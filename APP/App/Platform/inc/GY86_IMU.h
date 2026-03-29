@@ -93,7 +93,7 @@ extern "C" {
 /*  - fuse 방식은 mode 1과 완전bus만 하나 더 생긴다.   */
 /* -------------------------------------------------------------------------- */
 #ifndef USE_DOUBLE_BAROSENSOR
-#define USE_DOUBLE_BAROSENSOR 0u
+#define USE_DOUBLE_BAROSENSOR 2u
 #endif
 
 #ifndef GY86_MS5611_ADDR_PRIMARY

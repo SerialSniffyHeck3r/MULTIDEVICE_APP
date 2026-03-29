@@ -481,6 +481,18 @@ typedef struct
     bool  display_output_valid;        /* 표시 상태 초기화 완료 여부              */
 
     /* ---------------------------------------------------------------------- */
+    /*  Alt1 baro-only display spike gate                                     */
+    /*                                                                        */
+    /*  Alt1은 법적 primary altitude 이므로 fused/GPS로 바꾸지 않는다.        */
+    /*  대신 baro/QNH path에 순간적인 비현실 step 이 들어오면                 */
+    /*  마지막으로 accept 된 barometric target 에 일시적으로 고정한다.        */
+    /* ---------------------------------------------------------------------- */
+    float display_baro_gate_ref_cm;    /* 마지막 accept 된 Alt1 baro target       */
+    bool  display_baro_gate_valid;     /* gate reference 초기화 여부              */
+    int32_t display_gate_qnh_hpa_x100; /* gate reference가 묶인 QNH basis         */
+    int32_t display_gate_pressure_correction_hpa_x100; /* static corr basis   */
+
+    /* ---------------------------------------------------------------------- */
     /*  baro velocity measurement line                                         */
     /*                                                                        */
     /*  예전에는 샘플간 단순 차분(raw diff / dt)을 썼다.                        */
@@ -3390,6 +3402,11 @@ void APP_ALTITUDE_Init(uint32_t now_ms)
     s_altitude_runtime.initialized = true;
     s_altitude_runtime.last_task_ms = now_ms;
     s_altitude_runtime.qnh_equiv_filt_hpa = ((float)g_app_state.settings.altitude.manual_qnh_hpa_x100) * 0.01f;
+    s_altitude_runtime.display_baro_gate_ref_cm = 0.0f;
+    s_altitude_runtime.display_baro_gate_valid = false;
+    s_altitude_runtime.display_gate_qnh_hpa_x100 = g_app_state.settings.altitude.manual_qnh_hpa_x100;
+    s_altitude_runtime.display_gate_pressure_correction_hpa_x100 =
+        g_app_state.settings.altitude.pressure_correction_hpa_x100;
     s_altitude_runtime.audio_mode = 0;
     s_altitude_runtime.audio_mode_candidate = 0;
     s_altitude_runtime.audio_mode_candidate_since_ms = now_ms;
@@ -3449,6 +3466,9 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
     float display_source_vario_cms;
     uint32_t display_tau_ms;
     bool display_rest_active;
+    bool display_baro_available;
+    bool display_baro_target_accepted;
+    bool display_baro_basis_changed;
     float H_baro3[3];
     float H_gps3[3];
     float H_vel3[3];
@@ -3521,6 +3541,9 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
     display_source_vario_cms = 0.0f;
     display_tau_ms = settings->display_lpf_tau_ms;
     display_rest_active = false;
+    display_baro_available = false;
+    display_baro_target_accepted = true;
+    display_baro_basis_changed = false;
     baro_dt_s = dt_s;
 
     qnh_manual_hpa = ((float)settings->manual_qnh_hpa_x100) * 0.01f;
@@ -4007,13 +4030,56 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
     /*  display/QNH 숫자는 INS가 아니라 manual QNH 기반 barometric altitude 를 */
     /*  사용한다.                                                              */
     /*                                                                          */
-    /*  이유                                                                    */
-    /*  - 상용 vario의 ALT 숫자는 대개 QNH/baro canonical path 다.             */
-    /*  - GPS absolute anchor 와 instant INS vario 는 좋은 보조지만            */
-    /*    메인 숫자 고도를 흔들지 않는 편이 낫다.                              */
+    /*  다만 Alt1이 법적 primary altitude 인 만큼,                              */
+    /*  fused/GPS로 우회하지는 않되 baro/QNH path의 순간적인 비현실 step 은     */
+    /*  마지막으로 accept 된 barometric target 에서 한 번 막아 준다.           */
+    /*                                                                          */
+    /*  중요한 점                                                              */
+    /*  - raw/fused internal state는 그대로 유지한다.                          */
+    /*  - Alt1용 display path만 spike 를 무시한다.                             */
     /* ---------------------------------------------------------------------- */
-    display_target_cm = (alt_prev->baro_valid != false) ? alt_qnh_cm :
-                        (s_altitude_runtime.kf_noimu.valid ? s_altitude_runtime.kf_noimu.x[0] : alt_qnh_cm);
+    display_baro_available = (new_baro_sample != false) || (alt_prev->baro_valid != false);
+    display_baro_basis_changed =
+        (s_altitude_runtime.display_gate_qnh_hpa_x100 != settings->manual_qnh_hpa_x100) ||
+        (s_altitude_runtime.display_gate_pressure_correction_hpa_x100 !=
+         settings->pressure_correction_hpa_x100);
+
+    if (display_baro_basis_changed != false)
+    {
+        s_altitude_runtime.display_baro_gate_valid = false;
+    }
+
+    if (display_baro_available != false)
+    {
+        if (s_altitude_runtime.display_baro_gate_valid == false)
+        {
+            s_altitude_runtime.display_baro_gate_ref_cm = alt_qnh_cm;
+            s_altitude_runtime.display_baro_gate_valid = true;
+            display_baro_target_accepted = true;
+        }
+        else
+        {
+            display_baro_target_accepted = APP_ALTITUDE_IsResidualAccepted(alt_qnh_cm -
+                                                                           s_altitude_runtime.display_baro_gate_ref_cm,
+                                                                           baro_noise_cm,
+                                                                           APP_ALTITUDE_BARO_ALTITUDE_GATE_SIGMA,
+                                                                           APP_ALTITUDE_BARO_ALTITUDE_GATE_FLOOR_CM);
+
+            if (display_baro_target_accepted != false)
+            {
+                s_altitude_runtime.display_baro_gate_ref_cm = alt_qnh_cm;
+            }
+        }
+
+        display_target_cm = (display_baro_target_accepted != false) ?
+                            alt_qnh_cm :
+                            s_altitude_runtime.display_baro_gate_ref_cm;
+    }
+    else
+    {
+        display_target_cm = s_altitude_runtime.kf_noimu.valid ? s_altitude_runtime.kf_noimu.x[0] :
+                                                                alt_qnh_cm;
+    }
 
     display_source_vario_cms = s_altitude_runtime.vario_slow_noimu_cms;
 
@@ -4079,6 +4145,10 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
         g_app_state.altitude.alt_rel_home_noimu_cm = 0;
         g_app_state.altitude.alt_rel_home_imu_cm = 0;
     }
+
+    s_altitude_runtime.display_gate_qnh_hpa_x100 = settings->manual_qnh_hpa_x100;
+    s_altitude_runtime.display_gate_pressure_correction_hpa_x100 =
+        settings->pressure_correction_hpa_x100;
 
     g_app_state.altitude.initialized                = true;
     g_app_state.altitude.baro_valid                 = (new_baro_sample != false) || (alt_prev->baro_valid != false);
