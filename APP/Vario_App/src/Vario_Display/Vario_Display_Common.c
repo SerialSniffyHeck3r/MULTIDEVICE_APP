@@ -399,6 +399,7 @@ typedef struct
 {
     bool        show_compass;
     bool        show_trail_background;
+    bool        show_attitude_indicator;
     bool        show_stub_overlay;
     const char *stub_title;
     const char *stub_subtitle;
@@ -444,7 +445,11 @@ static vario_display_dynamic_t s_vario_ui_dynamic =
     VARIO_NAV_TARGET_START,
     VARIO_UI_DEFAULT_WP_LAT_E7,
     VARIO_UI_DEFAULT_WP_LON_E7,
-    (VARIO_UI_DEFAULT_WP_VALID != 0u) ? true : false
+    (VARIO_UI_DEFAULT_WP_VALID != 0u) ? true : false,
+    false,
+    0u,
+    0.0f,
+    0.0f
 };
 
 /* -------------------------------------------------------------------------- */
@@ -904,6 +909,43 @@ static long vario_display_get_flight_level_from_unit_bank(const vario_runtime_t 
     }
 
     return lroundf(fl_value_ft);
+}
+
+static const app_altitude_linear_units_t *vario_display_select_smart_fuse_units(const vario_runtime_t *rt)
+{
+    if (rt == NULL)
+    {
+        return NULL;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /*  SMART FUSE                                                            */
+    /*                                                                        */
+    /*  Alt2의 SMART FUSE는 내부 파이프 이름을 직접 노출하지 않고,             */
+    /*  현재 low-level이 제공하는 assisted absolute altitude 중                */
+    /*  가장 도움이 되는 경로를 자동 선택해서 보여 주는 user-facing 모드다.   */
+    /*                                                                        */
+    /*  우선순위                                                              */
+    /*  1) IMU aided fused altitude                                            */
+    /*  2) baro + GPS anchor fused altitude                                    */
+    /*  3) baro가 없으면 GPS altitude fallback                                 */
+    /* ---------------------------------------------------------------------- */
+    if ((rt->baro_valid != false) && (rt->altitude.imu_vector_valid != false))
+    {
+        return &rt->altitude.units.alt_fused_imu;
+    }
+
+    if (rt->baro_valid != false)
+    {
+        return &rt->altitude.units.alt_fused_noimu;
+    }
+
+    if (rt->gps_valid != false)
+    {
+        return &rt->altitude.units.alt_gps_hmsl;
+    }
+
+    return NULL;
 }
 
 static void vario_display_format_altitude_with_unit(char *buf,
@@ -2611,7 +2653,6 @@ static void vario_display_draw_top_left_metrics(u8g2_t *u8g2,
                                                 const vario_runtime_t *rt)
 {
     char    glide_text[12];
-    char    avg_glide_text[12];
     int16_t gauge_left_x;
     int16_t gauge_right_x;
     int16_t gauge_w;
@@ -2620,8 +2661,6 @@ static void vario_display_draw_top_left_metrics(u8g2_t *u8g2,
     int16_t value_y;
     int16_t unit_x;
     int16_t unit_w;
-    int16_t avg_x;
-    int16_t avg_w;
 
     if ((u8g2 == NULL) || (v == NULL) || (rt == NULL))
     {
@@ -2639,18 +2678,16 @@ static void vario_display_draw_top_left_metrics(u8g2_t *u8g2,
     /* ---------------------------------------------------------------------- */
     /*  상단 좌측 glide section                                                */
     /*                                                                        */
-    /*  - instant gauge 높이는 10 px 로 확장                                   */
-    /*  - 현재 활공비 숫자도 그만큼 4 px 아래로 자연스럽게 내려간다.           */
-    /*  - ":1" 바로 오른쪽에는 평균 활공비를 한 단계 작은 폰트로 붙인다.      */
+    /*  최신 요구사항                                                          */
+    /*  - 상단 gauge 는 그대로 instant bar + average marker 를 유지한다.       */
+    /*  - 작게 붙여 두던 평균 활공비 수치는 완전히 제거한다.                   */
+    /*  - 크게 보이는 주 수치는 더 이상 instantaneous 가 아니라               */
+    /*    average glide ratio 를 표시한다.                                    */
     /* ---------------------------------------------------------------------- */
     vario_display_draw_top_left_glide_ratio_gauge(u8g2, v, rt);
 
     vario_display_format_glide_ratio_value(glide_text,
                                            sizeof(glide_text),
-                                           rt->glide_ratio_instant_valid,
-                                           rt->glide_ratio_instant);
-    vario_display_format_glide_ratio_value(avg_glide_text,
-                                           sizeof(avg_glide_text),
                                            rt->glide_ratio_average_valid,
                                            rt->glide_ratio_average);
 
@@ -2661,8 +2698,6 @@ static void vario_display_draw_top_left_metrics(u8g2_t *u8g2,
                         VARIO_UI_TOP_GLD_GAUGE_TEXT_GAP_Y);
     unit_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_ALT2_UNIT, ":1");
     unit_x = (int16_t)(value_x + value_box_w + VARIO_UI_TOP_GLD_VALUE_UNIT_GAP);
-    avg_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_ALT2_UNIT, "--.-");
-    avg_x = (int16_t)(unit_x + unit_w + VARIO_UI_TOP_GLD_AVG_TEXT_GAP_X);
 
     vario_display_draw_text_box_top(u8g2,
                                     value_x,
@@ -2678,13 +2713,6 @@ static void vario_display_draw_top_left_metrics(u8g2_t *u8g2,
                                     VARIO_UI_ALIGN_LEFT,
                                     VARIO_UI_FONT_ALT2_UNIT,
                                     ":1");
-    vario_display_draw_text_box_top(u8g2,
-                                    avg_x,
-                                    value_y,
-                                    avg_w,
-                                    VARIO_UI_ALIGN_LEFT,
-                                    VARIO_UI_FONT_ALT2_UNIT,
-                                    avg_glide_text);
 }
 
 
@@ -3071,8 +3099,8 @@ static void vario_display_format_alt2_text(char *value_buf,
             /* ALT2가 absolute mode일 때도 ALT1과 같은 5Hz filtered absolute       */
             /* 숫자를 사용한다.                                                    */
             /*                                                                    */
-            /* source 선택 자체는 여전히 Vario_State 쪽 altitude_source 규칙을      */
-            /* 따른다. 여기서는 오직 "표시 숫자"만 같은 cadence로 맞춘다.        */
+            /* 현재 Alt1은 legal/competition용 barometric path로 고정이므로        */
+            /* 여기서는 그 숫자를 그대로 복제해서 보여 주기만 한다.              */
             /* ------------------------------------------------------------------ */
             vario_display_format_filtered_selected_altitude(value_buf,
                                                             value_len,
@@ -3085,11 +3113,15 @@ static void vario_display_format_alt2_text(char *value_buf,
             break;
 
         case VARIO_ALT2_MODE_SMART_FUSE:
-            if (rt->baro_valid != false)
+        {
+            const app_altitude_linear_units_t *smart_fuse_units;
+
+            smart_fuse_units = vario_display_select_smart_fuse_units(rt);
+            if (smart_fuse_units != NULL)
             {
                 vario_display_format_altitude_from_unit_bank(value_buf,
                                                              value_len,
-                                                             &rt->altitude.units.alt_fused_noimu,
+                                                             smart_fuse_units,
                                                              settings->alt2_unit);
             }
             else
@@ -3101,6 +3133,7 @@ static void vario_display_format_alt2_text(char *value_buf,
                      "%s",
                      Vario_Settings_GetAltitudeUnitTextForUnit(settings->alt2_unit));
             break;
+        }
 
         case VARIO_ALT2_MODE_GPS:
             if (rt->gps_valid != false)
@@ -3156,58 +3189,6 @@ static void vario_display_format_alt2_text(char *value_buf,
     }
 }
 
-static void vario_display_format_alt3_text(char *value_buf,
-                                           size_t value_len,
-                                           char *unit_buf,
-                                           size_t unit_len,
-                                           const vario_runtime_t *rt,
-                                           const vario_settings_t *settings)
-{
-    if ((value_buf == NULL) || (value_len == 0u) || (unit_buf == NULL) || (unit_len == 0u) ||
-        (rt == NULL) || (settings == NULL))
-    {
-        return;
-    }
-
-    switch (settings->alt3_mode)
-    {
-        case VARIO_ALT3_MODE_THERMAL:
-            vario_display_format_altitude_with_unit(value_buf,
-                                                    value_len,
-                                                    rt->alt3_thermal_gain_m,
-                                                    settings->altitude_unit);
-            break;
-
-        case VARIO_ALT3_MODE_ARRIVAL:
-            if (rt->final_glide_valid != false)
-            {
-                vario_display_format_altitude_with_unit(value_buf,
-                                                        value_len,
-                                                        rt->arrival_height_m,
-                                                        settings->altitude_unit);
-            }
-            else
-            {
-                snprintf(value_buf, value_len, "-----");
-            }
-            break;
-
-        case VARIO_ALT3_MODE_GAIN:
-        case VARIO_ALT3_MODE_COUNT:
-        default:
-            vario_display_format_altitude_with_unit(value_buf,
-                                                    value_len,
-                                                    rt->alt3_accum_gain_m,
-                                                    settings->altitude_unit);
-            break;
-    }
-
-    snprintf(unit_buf,
-             unit_len,
-             "%s",
-             Vario_Settings_GetAltitudeUnitTextForUnit(settings->altitude_unit));
-}
-
 static void vario_display_draw_top_right_altitudes(u8g2_t *u8g2,
                                                    const vario_viewport_t *v,
                                                    const vario_runtime_t *rt)
@@ -3217,7 +3198,6 @@ static void vario_display_draw_top_right_altitudes(u8g2_t *u8g2,
     char    alt2_text[24];
     char    alt3_text[24];
     char    alt2_unit_buf[8];
-    char    alt3_unit_buf[8];
     const char *alt1_unit;
     const char *alt2_unit;
     const char *alt3_unit;
@@ -3255,10 +3235,10 @@ static void vario_display_draw_top_right_altitudes(u8g2_t *u8g2,
                                                     rt,
                                                     settings->altitude_unit);
     vario_display_format_alt2_text(alt2_text, sizeof(alt2_text), alt2_unit_buf, sizeof(alt2_unit_buf), rt, settings);
-    vario_display_format_alt3_text(alt3_text, sizeof(alt3_text), alt3_unit_buf, sizeof(alt3_unit_buf), rt, settings);
+    vario_display_format_altitude_with_unit(alt3_text, sizeof(alt3_text), rt->alt3_accum_gain_m, settings->altitude_unit);
     alt1_unit = Vario_Settings_GetAltitudeUnitTextForUnit(settings->altitude_unit);
     alt2_unit = alt2_unit_buf;
-    alt3_unit = alt3_unit_buf;
+    alt3_unit = Vario_Settings_GetAltitudeUnitTextForUnit(settings->altitude_unit);
 
     unit_box_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_ALT1_UNIT, "ft");
     {
@@ -3670,6 +3650,7 @@ static void vario_display_draw_vario_value_block(u8g2_t *u8g2,
     int16_t te_value_w;
     int16_t te_label_y;
     int16_t te_label_h;
+    int16_t te_label_box_w;
     uint8_t te_value_in_meta_row;
 
     if ((u8g2 == NULL) || (v == NULL) || (rt == NULL))
@@ -3701,15 +3682,27 @@ static void vario_display_draw_vario_value_block(u8g2_t *u8g2,
     te_meta_x = (int16_t)(v->x + VARIO_UI_SIDE_BAR_W + 2 + VARIO_UI_BOTTOM_META_BOX_W + 3);
     te_value_in_meta_row = 0u;
 
+    max_box_h = vario_display_get_font_height(u8g2, VARIO_UI_FONT_BOTTOM_MAX_VALUE);
+    if (max_box_h <= 0)
+    {
+        max_box_h = 8;
+    }
+    max_box_x = (int16_t)(v->x + VARIO_UI_SIDE_BAR_W + 2);
+    max_box_y = (int16_t)(value_box_y - max_box_h - VARIO_UI_BOTTOM_META_GAP_Y);
+
+    te_value_w = VARIO_UI_BOTTOM_META_BOX_W;
+    te_label_box_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_ALT2_UNIT, "-99.9");
+    te_meta_x = (int16_t)(max_box_x + VARIO_UI_BOTTOM_META_BOX_W + 3);
+    te_meta_y = max_box_y;
+    te_label_h = vario_display_get_font_height(u8g2, VARIO_UI_FONT_ALT2_UNIT);
+    if (te_label_h <= 0)
+    {
+        te_label_h = 8;
+    }
+    te_label_y = (int16_t)(te_meta_y - te_label_h - 2);
+
     if ((settings == NULL) || (settings->show_max_vario != 0u))
     {
-        max_box_h = vario_display_get_font_height(u8g2, VARIO_UI_FONT_BOTTOM_MAX_VALUE);
-        if (max_box_h <= 0)
-        {
-            max_box_h = 8;
-        }
-        max_box_x = (int16_t)(v->x + VARIO_UI_SIDE_BAR_W + 2);
-        max_box_y = (int16_t)(value_box_y - max_box_h - VARIO_UI_BOTTOM_META_GAP_Y);
         vario_display_draw_text_box_top(u8g2,
                                         max_box_x,
                                         max_box_y,
@@ -3721,26 +3714,15 @@ static void vario_display_draw_vario_value_block(u8g2_t *u8g2,
         /* ------------------------------------------------------------------ */
         /* Est.TE compact block                                                */
         /*                                                                      */
-        /* 사용자의 최신 요구사항                                              */
-        /* - 기존 굵은 "Est.TE" 텍스트가 있던 자리에 실제 값을 놓는다.          */
-        /* - 값은 고정 폭 "-99.9" 슬롯 안에서 right align 한다.                 */
-        /* - 라벨은 그 값 바로 위 2 px 위치에, unit 폰트로 작게 그린다.          */
-        /* - 이 변경 외의 다른 레이아웃은 건드리지 않는다.                      */
+        /* 최신 요구사항                                                        */
+        /* - 라벨 "Est.TE" 는 기존 absolute 위치를 그대로 유지한다.            */
+        /* - 실제 값은 MAX VARIO 와 동일한 top Y / 동일한 폰트로 표시한다.      */
+        /* - 값 블록 폭도 MAX VARIO 와 같은 고정 폭을 사용하고, right align 한다.*/
         /* ------------------------------------------------------------------ */
-        te_meta_x = (int16_t)(max_box_x + VARIO_UI_BOTTOM_META_BOX_W + 3);
-        te_meta_y = max_box_y;
-        te_value_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_ALT2_UNIT, "-99.9");
-        te_label_h = vario_display_get_font_height(u8g2, VARIO_UI_FONT_ALT2_UNIT);
-        if (te_label_h <= 0)
-        {
-            te_label_h = 8;
-        }
-        te_label_y = (int16_t)(te_meta_y - te_label_h - 2);
-
         vario_display_draw_text_box_top(u8g2,
                                         te_meta_x,
                                         te_label_y,
-                                        te_value_w,
+                                        te_label_box_w,
                                         VARIO_UI_ALIGN_RIGHT,
                                         VARIO_UI_FONT_ALT2_UNIT,
                                         "Est.TE");
@@ -3753,7 +3735,7 @@ static void vario_display_draw_vario_value_block(u8g2_t *u8g2,
                                         te_meta_y,
                                         te_value_w,
                                         VARIO_UI_ALIGN_RIGHT,
-                                        VARIO_UI_FONT_ALT2_UNIT,
+                                        VARIO_UI_FONT_BOTTOM_MAX_VALUE,
                                         te_value_text);
         te_value_in_meta_row = 1u;
     }
@@ -3769,22 +3751,27 @@ static void vario_display_draw_vario_value_block(u8g2_t *u8g2,
     if (te_value_in_meta_row == 0u)
     {
         /* ------------------------------------------------------------------ */
-        /* show_max_vario 가 꺼진 기존 배치 fallback                            */
-        /*                                                                      */
-        /* 이 경로는 기존 동작을 보존하기 위해 유지한다.                        */
+        /* show_max_vario 가 꺼져 있어도                                        */
+        /* Est.TE 값의 폰트 / Y / 고정폭 계약은 동일하게 유지한다.              */
         /* ------------------------------------------------------------------ */
+        vario_display_draw_text_box_top(u8g2,
+                                        te_meta_x,
+                                        te_label_y,
+                                        te_label_box_w,
+                                        VARIO_UI_ALIGN_RIGHT,
+                                        VARIO_UI_FONT_ALT2_UNIT,
+                                        "Est.TE");
         vario_display_format_estimated_te_value(te_value_text,
                                                 sizeof(te_value_text),
                                                 rt);
         te_value_x = te_meta_x;
-        te_value_y = vario_display_get_vario_estimated_te_top_y(u8g2, v);
-        te_value_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_ALT2_UNIT, "-99.9");
+        te_value_y = max_box_y;
         vario_display_draw_text_box_top(u8g2,
                                         te_value_x,
                                         te_value_y,
                                         te_value_w,
                                         VARIO_UI_ALIGN_RIGHT,
-                                        VARIO_UI_FONT_ALT2_UNIT,
+                                        VARIO_UI_FONT_BOTTOM_MAX_VALUE,
                                         te_value_text);
     }
 
@@ -4170,89 +4157,12 @@ static void vario_display_draw_stub_overlay(u8g2_t *u8g2,
                                    subtitle);
 }
 
-static void vario_display_draw_trail_background(u8g2_t *u8g2,
-                                                const vario_viewport_t *v,
-                                                const vario_runtime_t *rt,
-                                                const vario_settings_t *settings)
+static bool vario_display_compute_compass_circle_geometry(u8g2_t *u8g2,
+                                                          const vario_viewport_t *v,
+                                                          int16_t *out_center_x,
+                                                          int16_t *out_center_y,
+                                                          int16_t *out_radius)
 {
-    uint8_t start_index;
-    uint8_t i;
-    int16_t center_x;
-    int16_t center_y;
-    float   half_w_px;
-    float   half_h_px;
-    float   meters_per_px;
-
-    if ((u8g2 == NULL) || (v == NULL) || (rt == NULL) || (settings == NULL))
-    {
-        return;
-    }
-
-    if ((rt->gps_valid == false) || (rt->trail_count == 0u))
-    {
-        return;
-    }
-
-    center_x = (int16_t)(v->x + (v->w / 2));
-    center_y = (int16_t)(v->y + (v->h / 2));
-    half_w_px = (float)(v->w / 2);
-    half_h_px = (float)(v->h / 2);
-    meters_per_px = ((float)settings->trail_range_m) / ((half_w_px < half_h_px) ? half_w_px : half_h_px);
-    if (meters_per_px <= 0.0f)
-    {
-        return;
-    }
-
-    start_index = (uint8_t)((rt->trail_head + VARIO_TRAIL_MAX_POINTS - rt->trail_count) % VARIO_TRAIL_MAX_POINTS);
-    for (i = 0u; i < rt->trail_count; ++i)
-    {
-        uint8_t idx;
-        float   ref_lat_deg;
-        float   cur_lat_deg;
-        float   cur_lon_deg;
-        float   pt_lat_deg;
-        float   pt_lon_deg;
-        float   mean_lat_rad;
-        float   dx_m;
-        float   dy_m;
-        int16_t px;
-        int16_t py;
-
-        idx = (uint8_t)((start_index + i) % VARIO_TRAIL_MAX_POINTS);
-
-        ref_lat_deg = ((float)rt->gps.fix.lat) * 1.0e-7f;
-        cur_lat_deg = ref_lat_deg;
-        cur_lon_deg = ((float)rt->gps.fix.lon) * 1.0e-7f;
-        pt_lat_deg  = ((float)rt->trail_lat_e7[idx]) * 1.0e-7f;
-        pt_lon_deg  = ((float)rt->trail_lon_e7[idx]) * 1.0e-7f;
-        mean_lat_rad = vario_display_deg_to_rad((cur_lat_deg + pt_lat_deg) * 0.5f);
-
-        dx_m = (pt_lon_deg - cur_lon_deg) * (111319.5f * cosf(mean_lat_rad));
-        dy_m = (pt_lat_deg - ref_lat_deg) * 111132.0f;
-
-        px = (int16_t)lroundf((float)center_x + (dx_m / meters_per_px));
-        py = (int16_t)lroundf((float)center_y - (dy_m / meters_per_px));
-
-        if ((px < v->x) || (px >= (v->x + v->w)) || (py < v->y) || (py >= (v->y + v->h)))
-        {
-            continue;
-        }
-
-        u8g2_DrawPixel(u8g2, px, py);
-    }
-
-    /* 현재 위치 center marker */
-    u8g2_DrawHLine(u8g2, (int16_t)(center_x - 3), center_y, 7u);
-    u8g2_DrawVLine(u8g2, center_x, (int16_t)(center_y - 3), 7u);
-    u8g2_DrawCircle(u8g2, center_x, center_y, 3u, U8G2_DRAW_ALL);
-}
-
-static void vario_display_draw_compass(u8g2_t *u8g2,
-                                       const vario_viewport_t *v,
-                                       const vario_runtime_t *rt,
-                                       const vario_display_nav_solution_t *nav)
-{
-    char    nav_text[48];
     int16_t content_left_x;
     int16_t content_right_x;
     int16_t center_x;
@@ -4262,12 +4172,11 @@ static void vario_display_draw_compass(u8g2_t *u8g2,
     int16_t usable_half_w;
     int16_t radius;
     int16_t center_y;
-    int16_t i;
-    float   heading_deg;
 
-    if ((u8g2 == NULL) || (v == NULL) || (rt == NULL) || (nav == NULL))
+    if ((u8g2 == NULL) || (v == NULL) || (out_center_x == NULL) ||
+        (out_center_y == NULL) || (out_radius == NULL))
     {
-        return;
+        return false;
     }
 
     content_left_x = (int16_t)(v->x + VARIO_UI_SIDE_BAR_W);
@@ -4315,13 +4224,6 @@ static void vario_display_draw_compass(u8g2_t *u8g2,
     }
 
     radius = (int16_t)(radius + VARIO_UI_COMPASS_RADIUS_EXTRA_PX);
-
-    /* ---------------------------------------------------------------------- */
-    /* 원의 가장 밑부분이 자기 영역 최하단에 닿도록 center_y 를 유지한다.        */
-    /* 상단의 START ---.-Km 문구는 사용자가 삭제를 요구했으므로 더 이상        */
-    /* draw 하지 않는다. 다만 distance formatter 는 다른 빌드에서              */
-    /* static inline 최적화 경고를 피하려고 호출만 유지한다.                    */
-    /* ---------------------------------------------------------------------- */
     center_y = (int16_t)(bottom_limit_y - radius);
     if ((center_y - radius) < top_limit_y)
     {
@@ -4338,6 +4240,311 @@ static void vario_display_draw_compass(u8g2_t *u8g2,
         center_y = (int16_t)(bottom_limit_y - radius);
     }
 
+    *out_center_x = center_x;
+    *out_center_y = center_y;
+    *out_radius = radius;
+    return true;
+}
+
+static void vario_display_draw_center_heading_arrow(u8g2_t *u8g2,
+                                                    const vario_viewport_t *v,
+                                                    const vario_runtime_t *rt,
+                                                    const vario_settings_t *settings)
+{
+    int16_t center_x;
+    int16_t center_y;
+    int16_t arrow_size_px;
+    int16_t wing_half_px;
+    float   heading_deg;
+    float   rad;
+    float   dir_x;
+    float   dir_y;
+    float   side_x;
+    float   side_y;
+    int16_t tip_x;
+    int16_t tip_y;
+    int16_t tail_x;
+    int16_t tail_y;
+    int16_t base_x;
+    int16_t base_y;
+    int16_t left_x;
+    int16_t left_y;
+    int16_t right_x;
+    int16_t right_y;
+
+    if ((u8g2 == NULL) || (v == NULL) || (rt == NULL))
+    {
+        return;
+    }
+
+    center_x = (int16_t)(v->x + (v->w / 2));
+    center_y = (int16_t)(v->y + (v->h / 2));
+
+    arrow_size_px = 9;
+    if (settings != NULL)
+    {
+        arrow_size_px = (int16_t)settings->arrow_size_px;
+    }
+    if (arrow_size_px < 6)
+    {
+        arrow_size_px = 6;
+    }
+    if (arrow_size_px > 18)
+    {
+        arrow_size_px = 18;
+    }
+
+    wing_half_px = (int16_t)(arrow_size_px / 3);
+    if (wing_half_px < 3)
+    {
+        wing_half_px = 3;
+    }
+
+    heading_deg = (rt->heading_valid != false) ? rt->heading_deg : 0.0f;
+    rad = vario_display_deg_to_rad(heading_deg);
+    dir_x = sinf(rad);
+    dir_y = -cosf(rad);
+    side_x = cosf(rad);
+    side_y = sinf(rad);
+
+    tip_x = (int16_t)lroundf((float)center_x + (dir_x * (float)arrow_size_px));
+    tip_y = (int16_t)lroundf((float)center_y + (dir_y * (float)arrow_size_px));
+    tail_x = (int16_t)lroundf((float)center_x - (dir_x * (float)(arrow_size_px - 2)));
+    tail_y = (int16_t)lroundf((float)center_y - (dir_y * (float)(arrow_size_px - 2)));
+    base_x = (int16_t)lroundf((float)center_x - (dir_x * ((float)arrow_size_px * 0.25f)));
+    base_y = (int16_t)lroundf((float)center_y - (dir_y * ((float)arrow_size_px * 0.25f)));
+    left_x = (int16_t)lroundf((float)base_x - (side_x * (float)wing_half_px));
+    left_y = (int16_t)lroundf((float)base_y - (side_y * (float)wing_half_px));
+    right_x = (int16_t)lroundf((float)base_x + (side_x * (float)wing_half_px));
+    right_y = (int16_t)lroundf((float)base_y + (side_y * (float)wing_half_px));
+
+    /* ---------------------------------------------------------------------- */
+    /* PAGE 2 trail 중심 화살표                                               */
+    /*                                                                        */
+    /* 화면 자체는 north-up 이다.                                             */
+    /* 따라서 화살표만 현재 heading 방향으로 회전시켜                          */
+    /* "화살표의 가장 윗부분(arrow tip)이 현재 heading을 본다" 는            */
+    /* 사용자의 요구를 그대로 만족시킨다.                                     */
+    /* ---------------------------------------------------------------------- */
+    u8g2_DrawLine(u8g2, tail_x, tail_y, tip_x, tip_y);
+    u8g2_DrawLine(u8g2, tip_x, tip_y, left_x, left_y);
+    u8g2_DrawLine(u8g2, tip_x, tip_y, right_x, right_y);
+    u8g2_DrawLine(u8g2, left_x, left_y, right_x, right_y);
+}
+
+static bool vario_display_compute_circle_line_endpoints(int16_t center_x,
+                                                        int16_t center_y,
+                                                        int16_t radius,
+                                                        float line_angle_deg,
+                                                        float y_offset_px,
+                                                        int16_t *out_x1,
+                                                        int16_t *out_y1,
+                                                        int16_t *out_x2,
+                                                        int16_t *out_y2)
+{
+    float rad;
+    float dir_x;
+    float dir_y;
+    float p0x;
+    float p0y;
+    float b;
+    float c;
+    float disc;
+    float sqrt_disc;
+    float t1;
+    float t2;
+
+    if ((out_x1 == NULL) || (out_y1 == NULL) || (out_x2 == NULL) || (out_y2 == NULL) || (radius <= 0))
+    {
+        return false;
+    }
+
+    rad = vario_display_deg_to_rad(line_angle_deg);
+    dir_x = cosf(rad);
+    dir_y = sinf(rad);
+    p0x = 0.0f;
+    p0y = y_offset_px;
+    b = 2.0f * ((p0x * dir_x) + (p0y * dir_y));
+    c = (p0x * p0x) + (p0y * p0y) - ((float)radius * (float)radius);
+    disc = (b * b) - (4.0f * c);
+    if (disc < 0.0f)
+    {
+        return false;
+    }
+
+    sqrt_disc = sqrtf(disc);
+    t1 = (-b - sqrt_disc) * 0.5f;
+    t2 = (-b + sqrt_disc) * 0.5f;
+
+    *out_x1 = (int16_t)lroundf((float)center_x + p0x + (dir_x * t1));
+    *out_y1 = (int16_t)lroundf((float)center_y + p0y + (dir_y * t1));
+    *out_x2 = (int16_t)lroundf((float)center_x + p0x + (dir_x * t2));
+    *out_y2 = (int16_t)lroundf((float)center_y + p0y + (dir_y * t2));
+    return true;
+}
+
+static void vario_display_draw_circle_clipped_segment(u8g2_t *u8g2,
+                                                      int16_t center_x,
+                                                      int16_t center_y,
+                                                      int16_t radius,
+                                                      float line_angle_deg,
+                                                      float y_offset_px,
+                                                      float shorten_ratio)
+{
+    int16_t x1;
+    int16_t y1;
+    int16_t x2;
+    int16_t y2;
+
+    if ((u8g2 == NULL) || (radius <= 0))
+    {
+        return;
+    }
+
+    if (vario_display_compute_circle_line_endpoints(center_x,
+                                                    center_y,
+                                                    radius,
+                                                    line_angle_deg,
+                                                    y_offset_px,
+                                                    &x1,
+                                                    &y1,
+                                                    &x2,
+                                                    &y2) == false)
+    {
+        return;
+    }
+
+    if (shorten_ratio < 1.0f)
+    {
+        float mid_x;
+        float mid_y;
+
+        if (shorten_ratio < 0.0f)
+        {
+            shorten_ratio = 0.0f;
+        }
+
+        mid_x = ((float)x1 + (float)x2) * 0.5f;
+        mid_y = ((float)y1 + (float)y2) * 0.5f;
+        x1 = (int16_t)lroundf(mid_x + (((float)x1 - mid_x) * shorten_ratio));
+        y1 = (int16_t)lroundf(mid_y + (((float)y1 - mid_y) * shorten_ratio));
+        x2 = (int16_t)lroundf(mid_x + (((float)x2 - mid_x) * shorten_ratio));
+        y2 = (int16_t)lroundf(mid_y + (((float)y2 - mid_y) * shorten_ratio));
+    }
+
+    u8g2_DrawLine(u8g2, x1, y1, x2, y2);
+}
+
+static void vario_display_draw_trail_background(u8g2_t *u8g2,
+                                                const vario_viewport_t *v,
+                                                const vario_runtime_t *rt,
+                                                const vario_settings_t *settings)
+{
+    uint8_t start_index;
+    uint8_t i;
+    int16_t center_x;
+    int16_t center_y;
+    float   half_w_px;
+    float   half_h_px;
+    float   meters_per_px;
+    bool    can_draw_points;
+
+    if ((u8g2 == NULL) || (v == NULL) || (rt == NULL) || (settings == NULL))
+    {
+        return;
+    }
+
+    center_x = (int16_t)(v->x + (v->w / 2));
+    center_y = (int16_t)(v->y + (v->h / 2));
+    half_w_px = (float)(v->w / 2);
+    half_h_px = (float)(v->h / 2);
+    meters_per_px = 0.0f;
+    if ((half_w_px > 0.0f) && (half_h_px > 0.0f) && (settings->trail_range_m > 0u))
+    {
+        meters_per_px = ((float)settings->trail_range_m) /
+                        ((half_w_px < half_h_px) ? half_w_px : half_h_px);
+    }
+
+    can_draw_points = ((rt->gps_valid != false) &&
+                       (rt->trail_count > 0u) &&
+                       (meters_per_px > 0.0f));
+
+    if (can_draw_points != false)
+    {
+        start_index = (uint8_t)((rt->trail_head + VARIO_TRAIL_MAX_POINTS - rt->trail_count) % VARIO_TRAIL_MAX_POINTS);
+        for (i = 0u; i < rt->trail_count; ++i)
+        {
+            uint8_t idx;
+            float   ref_lat_deg;
+            float   cur_lat_deg;
+            float   cur_lon_deg;
+            float   pt_lat_deg;
+            float   pt_lon_deg;
+            float   mean_lat_rad;
+            float   dx_m;
+            float   dy_m;
+            int16_t px;
+            int16_t py;
+
+            idx = (uint8_t)((start_index + i) % VARIO_TRAIL_MAX_POINTS);
+
+            ref_lat_deg = ((float)rt->gps.fix.lat) * 1.0e-7f;
+            cur_lat_deg = ref_lat_deg;
+            cur_lon_deg = ((float)rt->gps.fix.lon) * 1.0e-7f;
+            pt_lat_deg  = ((float)rt->trail_lat_e7[idx]) * 1.0e-7f;
+            pt_lon_deg  = ((float)rt->trail_lon_e7[idx]) * 1.0e-7f;
+            mean_lat_rad = vario_display_deg_to_rad((cur_lat_deg + pt_lat_deg) * 0.5f);
+
+            dx_m = (pt_lon_deg - cur_lon_deg) * (111319.5f * cosf(mean_lat_rad));
+            dy_m = (pt_lat_deg - ref_lat_deg) * 111132.0f;
+
+            px = (int16_t)lroundf((float)center_x + (dx_m / meters_per_px));
+            py = (int16_t)lroundf((float)center_y - (dy_m / meters_per_px));
+
+            if ((px < v->x) || (px >= (v->x + v->w)) || (py < v->y) || (py >= (v->y + v->h)))
+            {
+                continue;
+            }
+
+            u8g2_DrawPixel(u8g2, px, py);
+        }
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* PAGE 2 trail 은 전체 viewport 를 쓰는 north-up breadcrumb mode 다.      */
+    /* center marker 는 기존 십자/원 대신 현재 heading을 가리키는 화살표로      */
+    /* 바꾼다.                                                                  */
+    /* ---------------------------------------------------------------------- */
+    vario_display_draw_center_heading_arrow(u8g2, v, rt, settings);
+}
+
+static void vario_display_draw_compass(u8g2_t *u8g2,
+                                       const vario_viewport_t *v,
+                                       const vario_runtime_t *rt,
+                                       const vario_display_nav_solution_t *nav)
+{
+    char    nav_text[48];
+    int16_t center_x;
+    int16_t center_y;
+    int16_t radius;
+    int16_t i;
+    float   heading_deg;
+
+    if ((u8g2 == NULL) || (v == NULL) || (rt == NULL) || (nav == NULL))
+    {
+        return;
+    }
+
+    if (vario_display_compute_compass_circle_geometry(u8g2, v, &center_x, &center_y, &radius) == false)
+    {
+        return;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* 상단의 START ---.-Km 문구는 사용자가 삭제를 요구했으므로 더 이상        */
+    /* draw 하지 않는다. 다만 distance formatter 는 다른 빌드에서              */
+    /* static inline 최적화 경고를 피하려고 호출만 유지한다.                    */
+    /* ---------------------------------------------------------------------- */
     vario_display_format_nav_distance(nav_text,
                                       sizeof(nav_text),
                                       nav->label,
@@ -4497,6 +4704,134 @@ static void vario_display_draw_compass(u8g2_t *u8g2,
     }
 }
 
+static void vario_display_draw_attitude_indicator(u8g2_t *u8g2,
+                                                  const vario_viewport_t *v,
+                                                  const vario_runtime_t *rt)
+{
+    int16_t center_x;
+    int16_t center_y;
+    int16_t radius;
+    float   bank_deg;
+    float   grade_deg;
+    float   horizon_angle_deg;
+    float   pitch_px_per_deg;
+    float   pitch_offset_px;
+    int16_t i;
+
+    if ((u8g2 == NULL) || (v == NULL) || (rt == NULL))
+    {
+        return;
+    }
+
+    if (vario_display_compute_compass_circle_geometry(u8g2, v, &center_x, &center_y, &radius) == false)
+    {
+        return;
+    }
+
+    bank_deg = 0.0f;
+    grade_deg = 0.0f;
+    if ((rt->bike.initialized != false) && (rt->bike.imu_valid != false))
+    {
+        bank_deg = ((float)rt->bike.banking_angle_deg_x10) * 0.1f;
+        grade_deg = ((float)rt->bike.grade_deg_x10) * 0.1f;
+    }
+
+    horizon_angle_deg = -bank_deg;
+    pitch_px_per_deg = ((float)(radius - 8)) / 30.0f;
+    if (pitch_px_per_deg < 0.5f)
+    {
+        pitch_px_per_deg = 0.5f;
+    }
+    pitch_offset_px = vario_display_clampf(grade_deg * pitch_px_per_deg,
+                                           -(float)(radius - 6),
+                                           (float)(radius - 6));
+
+    u8g2_DrawCircle(u8g2, center_x, center_y, radius, U8G2_DRAW_ALL);
+
+    /* ---------------------------------------------------------------------- */
+    /* upper bank reference ticks + top pointer                                */
+    /* ---------------------------------------------------------------------- */
+    for (i = -60; i <= 60; i += 30)
+    {
+        float   rad;
+        int16_t outer_x;
+        int16_t outer_y;
+        int16_t inner_r;
+        int16_t inner_x;
+        int16_t inner_y;
+
+        rad = vario_display_deg_to_rad((float)i);
+        inner_r = (i == 0) ? (radius - 7) : (radius - 4);
+        outer_x = (int16_t)lroundf((float)center_x + (sinf(rad) * (float)(radius - 1)));
+        outer_y = (int16_t)lroundf((float)center_y - (cosf(rad) * (float)(radius - 1)));
+        inner_x = (int16_t)lroundf((float)center_x + (sinf(rad) * (float)inner_r));
+        inner_y = (int16_t)lroundf((float)center_y - (cosf(rad) * (float)inner_r));
+        u8g2_DrawLine(u8g2, inner_x, inner_y, outer_x, outer_y);
+    }
+
+    u8g2_DrawLine(u8g2, center_x, (int16_t)(center_y - radius + 2), center_x, (int16_t)(center_y - radius + 8));
+    u8g2_DrawLine(u8g2,
+                  (int16_t)(center_x - 3),
+                  (int16_t)(center_y - radius + 6),
+                  center_x,
+                  (int16_t)(center_y - radius + 2));
+    u8g2_DrawLine(u8g2,
+                  (int16_t)(center_x + 3),
+                  (int16_t)(center_y - radius + 6),
+                  center_x,
+                  (int16_t)(center_y - radius + 2));
+
+    /* ---------------------------------------------------------------------- */
+    /* rigid-body horizon / pitch ladder                                      */
+    /*                                                                        */
+    /* bank 는 world horizon 이 aircraft symbol 반대방향으로 기울도록          */
+    /* -bank 를 사용한다.                                                      */
+    /* pitch 는 nose-up(+)일 때 horizon 이 아래로 내려가도록 screen y + 로     */
+    /* 옮긴다.                                                                 */
+    /* ---------------------------------------------------------------------- */
+    vario_display_draw_circle_clipped_segment(u8g2,
+                                              center_x,
+                                              center_y,
+                                              radius - 2,
+                                              horizon_angle_deg,
+                                              pitch_offset_px,
+                                              0.92f);
+    vario_display_draw_circle_clipped_segment(u8g2,
+                                              center_x,
+                                              center_y,
+                                              radius - 4,
+                                              horizon_angle_deg,
+                                              pitch_offset_px - (10.0f * pitch_px_per_deg),
+                                              0.45f);
+    vario_display_draw_circle_clipped_segment(u8g2,
+                                              center_x,
+                                              center_y,
+                                              radius - 4,
+                                              horizon_angle_deg,
+                                              pitch_offset_px + (10.0f * pitch_px_per_deg),
+                                              0.45f);
+    vario_display_draw_circle_clipped_segment(u8g2,
+                                              center_x,
+                                              center_y,
+                                              radius - 5,
+                                              horizon_angle_deg,
+                                              pitch_offset_px - (20.0f * pitch_px_per_deg),
+                                              0.28f);
+    vario_display_draw_circle_clipped_segment(u8g2,
+                                              center_x,
+                                              center_y,
+                                              radius - 5,
+                                              horizon_angle_deg,
+                                              pitch_offset_px + (20.0f * pitch_px_per_deg),
+                                              0.28f);
+
+    /* aircraft reference symbol */
+    u8g2_DrawLine(u8g2, (int16_t)(center_x - 10), center_y, (int16_t)(center_x - 3), center_y);
+    u8g2_DrawLine(u8g2, (int16_t)(center_x + 3), center_y, (int16_t)(center_x + 10), center_y);
+    u8g2_DrawLine(u8g2, (int16_t)(center_x - 3), center_y, center_x, (int16_t)(center_y + 3));
+    u8g2_DrawLine(u8g2, (int16_t)(center_x + 3), center_y, center_x, (int16_t)(center_y + 3));
+    u8g2_DrawBox(u8g2, center_x - 1, center_y - 1, 3u, 3u);
+}
 
 
 void Vario_Display_SetViewports(const vario_viewport_t *full_viewport,
@@ -4824,9 +5159,7 @@ void Vario_Display_RenderFlightPage(u8g2_t *u8g2, vario_flight_page_mode_t mode)
 
         case VARIO_FLIGHT_PAGE_SCREEN_3_STUB:
         default:
-            cfg.show_stub_overlay = true;
-            cfg.stub_title = "PAGE 3";
-            cfg.stub_subtitle = "UI STUB";
+            cfg.show_attitude_indicator = true;
             break;
     }
 
@@ -4845,10 +5178,12 @@ void Vario_Display_RenderFlightPage(u8g2_t *u8g2, vario_flight_page_mode_t mode)
 
     if (cfg.show_trail_background != false)
     {
-        trail_v.x = (int16_t)(v->x + VARIO_UI_SIDE_BAR_W);
-        trail_v.y = v->y;
-        trail_v.w = (int16_t)(v->w - (2 * VARIO_UI_SIDE_BAR_W));
-        trail_v.h = v->h;
+        /* ------------------------------------------------------------------ */
+        /* PAGE 2 trail 은 좌/우 14px bar 를 제외한 창이 아니라                */
+        /* flight full viewport 전체를 배경 canvas 로 사용한다.                */
+        /* side bar / top / bottom block 은 이후 overlay 로 덧그려진다.        */
+        /* ------------------------------------------------------------------ */
+        trail_v = *v;
         vario_display_draw_trail_background(u8g2, &trail_v, rt, settings);
     }
 
@@ -4862,6 +5197,10 @@ void Vario_Display_RenderFlightPage(u8g2_t *u8g2, vario_flight_page_mode_t mode)
     if (cfg.show_compass != false)
     {
         vario_display_draw_compass(u8g2, v, rt, &nav);
+    }
+    else if (cfg.show_attitude_indicator != false)
+    {
+        vario_display_draw_attitude_indicator(u8g2, v, rt);
     }
 
     vario_display_draw_altitude_sparkline(u8g2, v, rt);

@@ -122,43 +122,22 @@ typedef enum
 /* -------------------------------------------------------------------------- */
 /*  ALT2 mode                                                                 */
 /*                                                                            */
-/*  RELATIVE     : 기준점 캡처 대비 상대고도                                   */
-/*  ABSOLUTE     : ALT1과 동일한 BARO QNH absolute altitude                   */
+/*  RELATIVE     : 사용자가 캡처한 ALT1 기준점 대비 상대고도                   */
+/*  ABSOLUTE     : ALT1 과 같은 법적/대회용 barometric absolute altitude      */
+/*  SMART_FUSE   : 저수준 fused altitude 중 가장 신뢰할 수 있는 assisted 경로  */
+/*                 를 자동 선택해서 표시                                      */
 /*  GPS          : GPS hMSL altitude                                          */
 /*  FLIGHT_LEVEL : 1013.25 hPa 기준 pressure altitude 를 FL 로 표시           */
-/*  SMART_FUSE   : baro + GPS absolute anchor 를 섞은 assisted altitude       */
-/*                                                                            */
-/*  중요                                                                       */
-/*  - ALT1은 이제 법적 / 대회 운용용 BARO QNH 경로로 고정된다.                */
-/*  - 따라서 ALT2만 "보조/문맥 altitude 슬롯" 로 사용자가 고른다.            */
 /* -------------------------------------------------------------------------- */
 typedef enum
 {
     VARIO_ALT2_MODE_RELATIVE = 0u,
     VARIO_ALT2_MODE_ABSOLUTE,
+    VARIO_ALT2_MODE_SMART_FUSE,
     VARIO_ALT2_MODE_GPS,
     VARIO_ALT2_MODE_FLIGHT_LEVEL,
-    VARIO_ALT2_MODE_SMART_FUSE,
     VARIO_ALT2_MODE_COUNT
 } vario_alt2_mode_t;
-
-/* -------------------------------------------------------------------------- */
-/*  ALT3 mode                                                                 */
-/*                                                                            */
-/*  GAIN    : 전체 비행 누적 상승고도                                          */
-/*  THERMAL : 현재 thermal / climb 블록 이득                                  */
-/*  ARRIVAL : final glide arrival height                                      */
-/*                                                                            */
-/*  ALT3는 세 번째 absolute altimeter가 아니라                                 */
-/*  "상황 기반 고도 정보 슬롯"으로 운용한다.                                  */
-/* -------------------------------------------------------------------------- */
-typedef enum
-{
-    VARIO_ALT3_MODE_GAIN = 0u,
-    VARIO_ALT3_MODE_THERMAL,
-    VARIO_ALT3_MODE_ARRIVAL,
-    VARIO_ALT3_MODE_COUNT
-} vario_alt3_mode_t;
 
 /* -------------------------------------------------------------------------- */
 /*  IMU assist mode                                                           */
@@ -176,10 +155,10 @@ typedef enum
 /* -------------------------------------------------------------------------- */
 /*  ALT source                                                                */
 /*                                                                            */
-/*  중요                                                                       */
-/*  - 사용자 UI에서는 더 이상 직접 노출하지 않는 내부 호환용 enum 이다.        */
-/*  - ALT1 primary altitude는 언제나 DISPLAY(baro QNH display path)로 고정.   */
-/*  - raw QNH / fused / GPS 경로는 내부 디버그 / 개발용 매핑으로만 유지한다.   */
+/*  중요                                                                      */
+/*  - 이 enum은 이제 user-facing menu가 아니라 내부 compatibility용이다.      */
+/*  - ALT1은 별도 source 선택 없이 legal barometric path로 고정한다.          */
+/*  - assisted / GPS / FL 등은 ALT2 mode에서 사용자에게 노출한다.            */
 /* -------------------------------------------------------------------------- */
 typedef enum
 {
@@ -215,11 +194,10 @@ typedef enum
 typedef enum
 {
     VARIO_QUICKSET_ITEM_QNH = 0u,
-    VARIO_QUICKSET_ITEM_BARO_CORRECTION,
+    VARIO_QUICKSET_ITEM_PRESSURE_CORRECTION,
     VARIO_QUICKSET_ITEM_ALT_UNIT,
     VARIO_QUICKSET_ITEM_ALT2_MODE,
     VARIO_QUICKSET_ITEM_ALT2_UNIT,
-    VARIO_QUICKSET_ITEM_ALT3_MODE,
     VARIO_QUICKSET_ITEM_VSPEED_UNIT,
     VARIO_QUICKSET_ITEM_SPEED_UNIT,
     VARIO_QUICKSET_ITEM_PRESSURE_UNIT,
@@ -227,8 +205,8 @@ typedef enum
     VARIO_QUICKSET_ITEM_TIME_FORMAT,
     VARIO_QUICKSET_ITEM_COORD_FORMAT,
     VARIO_QUICKSET_ITEM_ALT_SOURCE,
-    VARIO_QUICKSET_ITEM_HEADING_SOURCE,
     VARIO_QUICKSET_ITEM_IMU_ASSIST,
+    VARIO_QUICKSET_ITEM_HEADING_SOURCE,
     VARIO_QUICKSET_ITEM_VARIO_DAMPING,
     VARIO_QUICKSET_ITEM_AUDIO_RESPONSE,
     VARIO_QUICKSET_ITEM_VARIO_AVG_SECONDS,
@@ -252,6 +230,7 @@ typedef enum
     VARIO_QUICKSET_ITEM_TRAINER,
     VARIO_QUICKSET_ITEM_ALT2_CAPTURE,
     VARIO_QUICKSET_ITEM_ALT3_RESET,
+    VARIO_QUICKSET_ITEM_ATTITUDE_RESET,
     VARIO_QUICKSET_ITEM_FLIGHT_RESET,
     VARIO_QUICKSET_ITEM_COUNT
 } vario_quickset_item_t;
@@ -324,16 +303,15 @@ typedef struct
     vario_pressure_unit_t    pressure_unit;
     vario_temperature_unit_t temperature_unit;
     vario_time_format_t      time_format;
-    vario_coord_format_t      coord_format;
-    vario_alt2_mode_t         alt2_mode;
-    vario_alt3_mode_t         alt3_mode;
+    vario_coord_format_t     coord_format;
+    vario_alt2_mode_t        alt2_mode;
 
     /* ---------------------------------------------------------------------- */
     /*  데이터 소스 선택                                                       */
     /* ---------------------------------------------------------------------- */
-    vario_alt_source_t        altitude_source;
-    vario_heading_source_t    heading_source;
-    vario_imu_assist_mode_t   imu_assist_mode;
+    vario_alt_source_t       altitude_source;
+    vario_heading_source_t   heading_source;
+    vario_imu_assist_mode_t  imu_assist_mode;
 
     /* ---------------------------------------------------------------------- */
     /*  오디오 / 사용자 경험                                                   */
@@ -501,7 +479,6 @@ int32_t Vario_Settings_GetQnhDisplayFrac2(void);
 int32_t Vario_Settings_GetQnhDisplayFrac1(void);
 float   Vario_Settings_GetQnhDisplayFloat(void);
 void    Vario_Settings_FormatQnhText(char *buf, size_t buf_len);
-void    Vario_Settings_FormatBaroCorrectionText(char *buf, size_t buf_len);
 float   Vario_Settings_PressureHpaToDisplayFloat(float pressure_hpa);
 float   Vario_Settings_TemperatureCToDisplayFloat(float temperature_c);
 
@@ -529,10 +506,6 @@ const char *Vario_Settings_GetAltitudeSourceText(void);
 const char *Vario_Settings_GetHeadingSourceText(void);
 const char *Vario_Settings_GetAlt2ModeText(void);
 const char *Vario_Settings_GetAlt2ModeTextForMode(vario_alt2_mode_t mode);
-const char *Vario_Settings_GetAlt3ModeText(void);
-const char *Vario_Settings_GetAlt3ModeTextForMode(vario_alt3_mode_t mode);
-const char *Vario_Settings_GetImuAssistModeText(void);
-const char *Vario_Settings_GetImuAssistModeTextForMode(vario_imu_assist_mode_t mode);
 const char *Vario_Settings_GetPressureUnitText(void);
 const char *Vario_Settings_GetTemperatureUnitText(void);
 const char *Vario_Settings_GetTimeFormatText(void);

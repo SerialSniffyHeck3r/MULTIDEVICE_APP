@@ -2,6 +2,7 @@
 
 #include "Vario_Settings.h"
 #include "Vario_GlideComputer.h"
+#include "BIKE_DYNAMICS.h"
 
 #include <math.h>
 #include <stddef.h>
@@ -44,7 +45,7 @@
 /*                                                                            */
 /*  low-level APP_ALTITUDE는 센서 샘플마다 fast/slow vario를 계속 유지한다.     */
 /*  여기서는 그 결과를 다시 한 단계 제품화해서                                */
-/*  - 10Hz fast path : vario bar + sound                                       */
+/*  - 20Hz fast path : vario gauge redraw + fast bar                                       */
 /*  -  5Hz slow path : 숫자 display / publish                                  */
 /*  로 나눠 운용한다.                                                          */
 /* -------------------------------------------------------------------------- */
@@ -229,22 +230,19 @@ static struct
     /* ---------------------------------------------------------------------- */
     /* presentation scheduler                                                  */
     /*                                                                        */
-    /*  last_fast_present_ms : 20Hz vario gauge publish cadence                */
+    /*  last_fast_present_ms : 20Hz vario gauge redraw cadence                 */
     /*  last_slow_present_ms :  5Hz display current-vario cadence              */
     /* ---------------------------------------------------------------------- */
     uint32_t last_fast_present_ms;
     uint32_t last_slow_present_ms;
 
     /* ---------------------------------------------------------------------- */
-    /* altitude source tracking                                                */
+    /* altitude path tracking                                                  */
     /*                                                                        */
-    /* altitude source 전환은 사용자의 quickset/setting 입력으로 즉시 일어날    */
-    /* 수 있다. 이때 display filter가 이전 source의 상태를 그대로 끌고 가면    */
-    /* QNH 모드 진입 직후 한 번 꺼졌다 튀어오르는 딥/팝 현상이 생길 수 있다.    */
-    /*                                                                        */
-    /* 그래서 source가 바뀌는 순간 app-layer altitude / vario presentation    */
-    /* filter를 현재 측정값으로 재기준화(rebase)하기 위한 private tracking만     */
-    /* 여기서 유지한다.                                                        */
+    /* Alt1은 user-facing source 선택이 아니라 legal barometric path로        */
+    /* 고정되었지만, trainer 토글 / cold-start / 강제 rebase 시점에는          */
+    /* presentation staging을 현재 측정값으로 다시 맞춰 줄 private tracking이  */
+    /* 여전히 필요하다.                                                        */
     /* ---------------------------------------------------------------------- */
     bool altitude_source_tracking_valid;
     vario_alt_source_t last_altitude_source;
@@ -265,17 +263,6 @@ static struct
     int32_t landing_anchor_lat_e7;
     int32_t landing_anchor_lon_e7;
     float   landing_anchor_altitude_m;
-
-    /* ---------------------------------------------------------------------- */
-    /*  ALT3 contextual anchors                                                */
-    /*                                                                        */
-    /*  ALT3는 누적 gain / thermal gain / arrival height 를 같은 슬롯에       */
-    /*  번갈아 싣는다. thermal gain은 sink 구간이나 더 낮은 저점이 나오면      */
-    /*  기준점을 자동으로 아래로 재설정해서 "이번 thermal에서 얼마나 올랐는지" */
-    /*  를 보여 준다.                                                          */
-    /* ---------------------------------------------------------------------- */
-    bool    thermal_reference_valid;
-    float   thermal_reference_altitude_m;
 
     /* ---------------------------------------------------------------------- */
     /*  TRAINER mode private state                                             */
@@ -830,18 +817,15 @@ static void vario_state_update_sensor_caches(void)
 static float vario_state_pick_fast_vario_mps(const app_altitude_state_t *alt,
                                              const vario_settings_t *settings)
 {
-    bool imu_assist_auto;
+    (void)settings;
 
     if (alt == NULL)
     {
         return 0.0f;
     }
 
-    imu_assist_auto = (settings != NULL) &&
-                      (settings->imu_assist_mode == VARIO_IMU_ASSIST_AUTO);
-
     /* ---------------------------------------------------------------------- */
-    /* vario source는 altitude source와 완전히 분리한다.                       */
+    /* vario source는 Alt1 altitude path와 완전히 분리한다.                    */
     /*                                                                        */
     /* 저수준 APP_ALTITUDE가                                                   */
     /* - vario_fast_noimu_cms : 전통적인 pressure/GPS anchor 기반 바리오       */
@@ -855,7 +839,7 @@ static float vario_state_pick_fast_vario_mps(const app_altitude_state_t *alt,
     /* 따라서 상위 Vario_State는 altitude source를 보지 않고                   */
     /* "sensor-fusion fast vario 하나"만 읽으면 된다.                         */
     /* ---------------------------------------------------------------------- */
-    if ((alt->initialized == false) || (imu_assist_auto == false))
+    if (alt->initialized == false)
     {
         return ((float)alt->vario_fast_noimu_cms) * 0.01f;
     }
@@ -866,27 +850,24 @@ static float vario_state_pick_fast_vario_mps(const app_altitude_state_t *alt,
 static float vario_state_pick_slow_vario_mps(const app_altitude_state_t *alt,
                                              const vario_settings_t *settings)
 {
-    bool imu_assist_auto;
+    (void)settings;
 
     if (alt == NULL)
     {
         return 0.0f;
     }
 
-    imu_assist_auto = (settings != NULL) &&
-                      (settings->imu_assist_mode == VARIO_IMU_ASSIST_AUTO);
-
     /* ---------------------------------------------------------------------- */
-    /* 숫자 current vario 역시 altitude source와 연결하지 않는다.              */
+    /* 숫자 current vario 역시 Alt1 absolute path와 연결하지 않는다.           */
     /*                                                                        */
     /* 이 경로는 저수준 센서퓨전 엔진이 만든 "장기적으로 안정된 slow vario"를  */
     /* 그대로 받는다.                                                          */
     /*                                                                        */
     /* 결과적으로                                                              */
-    /* - altitude source는 ALT 숫자만 바꾸고                                   */
+    /* - Alt1 absolute altitude는 legal baro path로 고정되고                   */
     /* - vario source는 IMU on/off 및 센서 신뢰도에만 반응한다.                */
     /* ---------------------------------------------------------------------- */
-    if ((alt->initialized == false) || (imu_assist_auto == false))
+    if (alt->initialized == false)
     {
         return ((float)alt->vario_slow_noimu_cms) * 0.01f;
     }
@@ -897,26 +878,18 @@ static float vario_state_pick_slow_vario_mps(const app_altitude_state_t *alt,
 /* -------------------------------------------------------------------------- */
 /* altitude / vario measurement selection                                      */
 /*                                                                            */
-/* 화면용 고도는 반드시 APP_STATE 고수준 결과를 기반으로 한다.                */
-/* manual QNH 경로도 예외가 아니다.                                           */
+/* Alt1은 이제 user-facing source 선택이 아니라                               */
+/* "법적 / 대회 규정용 QNH-only barometric absolute altitude" 로 고정한다.    */
 /*                                                                            */
-/* 이전 구현은 VARIO local settings에 저장된 QNH로 다시 pressure->altitude    */
-/* 재계산을 수행했다.                                                         */
-/* 그 방식은 low-level APP_ALTITUDE가 실제로 쓰는                             */
-/* APP_STATE.settings.altitude.manual_qnh_hpa_x100 과                         */
-/* upper VARIO local mirror가 어긋나면 split-brain을 만들 수 있었다.          */
-/*                                                                            */
-/* 그래서 이제 manual QNH source도                                            */
-/*   APP_STATE.altitude.alt_qnh_manual_cm                                     */
-/* 을 그대로 사용한다.                                                        */
-/* 즉, "manual QNH로 계산된 결과" 의 canonical owner 역시 APP_ALTITUDE다.    */
+/* 구현 정책                                                                  */
+/* - raw manual-QNH altitude(alt_qnh_manual_cm)는 내부/debug용으로만 유지한다. */
+/* - 파일럿에게 보여 줄 Alt1/메인 absolute path는                             */
+/*   APP_ALTITUDE가 manual-QNH baro만으로 만든 alt_display_cm 을 사용한다.    */
+/* - 즉, fused/GPS path는 Alt1에 끼어들지 않는다.                             */
 /* -------------------------------------------------------------------------- */
-static bool vario_state_select_source_altitude_cm(const app_altitude_state_t *alt,
-                                                const vario_settings_t *settings,
+static bool vario_state_select_alt1_altitude_cm(const app_altitude_state_t *alt,
                                                 int32_t *out_altitude_cm)
 {
-    (void)settings;
-
     if ((alt == NULL) || (out_altitude_cm == NULL))
     {
         return false;
@@ -927,19 +900,8 @@ static bool vario_state_select_source_altitude_cm(const app_altitude_state_t *al
         return false;
     }
 
-    /* ---------------------------------------------------------------------- */
-    /* ALT1 primary altitude는 사용자 source 선택으로 바꾸지 않는다.           */
-    /*                                                                        */
-    /* 조종석 primary absolute altitude는                                     */
-    /* - manual QNH를 기준으로 계산된                                           */
-    /* - pure barometric path                                                   */
-    /* - UI presentation용으로 안정화된                                         */
-    /* APP_ALTITUDE.alt_display_cm 하나로 고정한다.                            */
-    /*                                                                        */
-    /* raw QNH / fused / GPS altitude는 debug/secondary slot 용으로만          */
-    /* 남기고, Alt1 selection에는 관여시키지 않는다.                           */
-    /* ---------------------------------------------------------------------- */
-    if (alt->baro_valid == false)
+    if ((alt->baro_valid == false) ||
+        (alt->qnh_manual_hpa_x100 <= 0))
     {
         return false;
     }
@@ -962,7 +924,7 @@ static bool vario_state_select_measurement(float *out_altitude_m, float *out_var
         return false;
     }
 
-    if (vario_state_select_source_altitude_cm(alt, settings, &selected_altitude_cm) == false)
+    if (vario_state_select_alt1_altitude_cm(alt, &selected_altitude_cm) == false)
     {
         return false;
     }
@@ -970,7 +932,7 @@ static bool vario_state_select_measurement(float *out_altitude_m, float *out_var
     /* ---------------------------------------------------------------------- */
     /* 상위 app layer에서는 fast/slow를 다시 섞지 않는다.                      */
     /*                                                                        */
-    /* - absolute altitude source 선택은 그대로 유지한다.                      */
+    /* - absolute altitude는 Alt1 legal baro path로 고정한다.                  */
     /* - 숫자 current vario의 backing source는 저수준 slow path 하나만 쓴다.    */
     /* - 좌측 bar / audio용 fast path는 호출 측에서 별도로 직접 집어온다.       */
     /*                                                                        */
@@ -1130,16 +1092,15 @@ static void vario_state_update_heading(uint32_t now_ms)
 /*                                                                            */
 /* 설계 분리                                                                   */
 /* 1) altitude                                                                 */
-/*    - selected source의 absolute altitude 만 부드럽게 표시                  */
+/*    - Alt1 legal barometric absolute altitude만 staging 한다.               */
 /* 2) current vario                                                            */
-/*    - 저수준 sensor-fusion slow vario -> UI 숫자 필터                       */
+/*    - 저수준 sensor-fusion slow vario를 숫자 publish backing으로 쓴다.      */
 /* 3) fast vario side bar                                                      */
-/*    - 저수준 sensor-fusion fast vario -> fast bar 전용 robust filter        */
+/*    - 저수준 sensor-fusion fast vario를 20Hz gauge redraw로 반영한다.       */
 /*                                                                            */
 /* 중요한 변경점                                                              */
-/* - altitude source 전환 시 필터를 즉시 rebase 한다.                         */
-/* - 따라서 QNH 진입/복귀 시 이전 source 상태를 끌고 가며 생기던               */
-/*   dip / pop 현상을 상위 presentation 계층에서 차단한다.                    */
+/* - user-facing altitude source 전환 개념을 없애고 Alt1을 baro fixed로 둔다. */
+/* - 대신 trainer 토글 / cold-start / 큰 jump 때만 rebase를 수행한다.         */
 /* -------------------------------------------------------------------------- */
 static void vario_state_rebase_display_paths(float altitude_m,
                                              float slow_vario_input_mps,
@@ -1171,7 +1132,6 @@ static void vario_state_rebase_display_paths(float altitude_m,
     s_vario_state.runtime.fast_vario_bar_mps = fast_vario_input_mps;
     s_vario_state.runtime.observer_velocity_mps = slow_vario_input_mps;
     s_vario_state.runtime.last_measured_altitude_m = altitude_m;
-    s_vario_state.runtime.last_accum_altitude_m = altitude_m;
     s_vario_state.runtime.last_altitude_update_ms = effective_altitude_update_ms;
     s_vario_state.runtime.derived_valid = true;
 
@@ -1179,6 +1139,7 @@ static void vario_state_rebase_display_paths(float altitude_m,
     s_vario_state.last_slow_present_ms = filter_timestamp_ms;
     s_vario_state.altitude_source_tracking_valid = true;
     s_vario_state.last_altitude_source = altitude_source;
+    s_vario_state.redraw_request = 1u;
 }
 
 static void vario_state_update_display_filter(uint32_t now_ms)
@@ -1210,7 +1171,7 @@ static void vario_state_update_display_filter(uint32_t now_ms)
     s_vario_state.runtime.raw_selected_vario_mps = slow_vario_input_mps;
 
     source_changed = (s_vario_state.altitude_source_tracking_valid == false) ||
-                     (VARIO_ALT_SOURCE_DISPLAY != s_vario_state.last_altitude_source);
+                     (s_vario_state.last_altitude_source != VARIO_ALT_SOURCE_DISPLAY);
     altitude_jump = false;
 
     if ((s_vario_state.runtime.derived_valid != false) &&
@@ -1257,41 +1218,26 @@ static void vario_state_update_display_filter(uint32_t now_ms)
     /* ---------------------------------------------------------------------- */
     s_vario_state.runtime.filtered_altitude_m = measured_altitude_m;
     s_vario_state.runtime.filtered_vario_mps = slow_vario_input_mps;
-
-    if ((s_vario_state.last_fast_present_ms == 0u) ||
-        ((filter_timestamp_ms - s_vario_state.last_fast_present_ms) >=
-         VARIO_STATE_FAST_PRESENT_PERIOD_MS))
-    {
-        s_vario_state.runtime.fast_vario_bar_mps = fast_vario_input_mps;
-        s_vario_state.last_fast_present_ms = filter_timestamp_ms;
-
-        /* ------------------------------------------------------------------ */
-        /*  중요                                                               */
-        /*                                                                    */
-        /*  fast_vario_bar_mps staging 값만 20Hz로 바꿔서는 LCD가 20Hz로       */
-        /*  보장되지 않는다. 현재 VARIO app은 상태머신이 매 루프 redraw를      */
-        /*  강제하지 않고, UI engine은 redraw_request를 본다.                 */
-        /*                                                                    */
-        /*  따라서 fast gauge cadence를 20Hz로 올릴 때는 fast path snapshot   */
-        /*  갱신 시점에도 redraw_request를 함께 세워야 실제 게이지가 20Hz로   */
-        /*  따라온다.                                                          */
-        /*                                                                    */
-        /*  설정/메뉴 페이지까지 20Hz로 계속 repaint할 필요는 없으므로         */
-        /*  메인 flight screen 계열에서만 redraw를 올린다.                    */
-        /* ------------------------------------------------------------------ */
-        if ((s_vario_state.current_mode == VARIO_MODE_SCREEN_1) ||
-            (s_vario_state.current_mode == VARIO_MODE_SCREEN_2) ||
-            (s_vario_state.current_mode == VARIO_MODE_SCREEN_3))
-        {
-            s_vario_state.redraw_request = 1u;
-        }
-    }
-
+    s_vario_state.runtime.fast_vario_bar_mps = fast_vario_input_mps;
     s_vario_state.runtime.observer_velocity_mps = slow_vario_input_mps;
     s_vario_state.runtime.last_measured_altitude_m = measured_altitude_m;
     s_vario_state.runtime.last_altitude_update_ms = alt->last_update_ms;
     s_vario_state.altitude_source_tracking_valid = true;
     s_vario_state.last_altitude_source = VARIO_ALT_SOURCE_DISPLAY;
+
+    /* ---------------------------------------------------------------------- */
+    /*  vario gauge fast redraw cadence                                        */
+    /*                                                                        */
+    /*  큰 숫자 publish는 5Hz를 유지하되, 좌측 vario gauge는 20Hz cadence로    */
+    /*  redraw request를 세워 fast path 반응성을 더 자주 화면에 반영한다.      */
+    /* ---------------------------------------------------------------------- */
+    if ((s_vario_state.last_fast_present_ms == 0u) ||
+        ((uint32_t)(filter_timestamp_ms - s_vario_state.last_fast_present_ms) >=
+         VARIO_STATE_FAST_PRESENT_PERIOD_MS))
+    {
+        s_vario_state.last_fast_present_ms = filter_timestamp_ms;
+        s_vario_state.redraw_request = 1u;
+    }
 }
 
 static void vario_state_update_flight_logic(uint32_t now_ms)
@@ -1301,7 +1247,7 @@ static void vario_state_update_flight_logic(uint32_t now_ms)
     const app_gps_state_t  *gps;
     float                   start_speed_kmh;
     float                   soft_start_speed_kmh;
-    float                   positive_gain_step_m;
+    float                   alt3_delta_m;
     bool                    gps_motion_valid;
     bool                    takeoff_candidate_active;
     bool                    landing_candidate_active;
@@ -1373,12 +1319,9 @@ static void vario_state_update_flight_logic(uint32_t now_ms)
                         s_vario_state.runtime.flight_landing_candidate_ms = 0u;
                         s_vario_state.runtime.flight_time_s = 0u;
                         s_vario_state.runtime.alt3_accum_gain_m = 0.0f;
-                        s_vario_state.runtime.alt3_thermal_gain_m = 0.0f;
                         s_vario_state.runtime.max_top_vario_mps = 0.0f;
                         s_vario_state.runtime.max_speed_kmh = 0.0f;
                         s_vario_state.runtime.last_accum_altitude_m = s_vario_state.runtime.filtered_altitude_m;
-                        s_vario_state.thermal_reference_valid = true;
-                        s_vario_state.thermal_reference_altitude_m = s_vario_state.runtime.filtered_altitude_m;
                         s_vario_state.takeoff_anchor_valid = false;
                         s_vario_state.landing_anchor_valid = false;
                         s_vario_state.redraw_request = 1u;
@@ -1409,12 +1352,9 @@ static void vario_state_update_flight_logic(uint32_t now_ms)
                 s_vario_state.runtime.flight_landing_candidate_ms = 0u;
                 s_vario_state.runtime.flight_time_s = 0u;
                 s_vario_state.runtime.alt3_accum_gain_m = 0.0f;
-                s_vario_state.runtime.alt3_thermal_gain_m = 0.0f;
                 s_vario_state.runtime.max_top_vario_mps = 0.0f;
                 s_vario_state.runtime.max_speed_kmh = 0.0f;
                 s_vario_state.runtime.last_accum_altitude_m = s_vario_state.runtime.filtered_altitude_m;
-                s_vario_state.thermal_reference_valid = true;
-                s_vario_state.thermal_reference_altitude_m = s_vario_state.runtime.filtered_altitude_m;
                 s_vario_state.takeoff_anchor_valid = false;
                 s_vario_state.landing_anchor_valid = false;
                 s_vario_state.redraw_request = 1u;
@@ -1444,31 +1384,20 @@ static void vario_state_update_flight_logic(uint32_t now_ms)
             s_vario_state.runtime.max_speed_kmh = s_vario_state.runtime.filtered_ground_speed_kmh;
         }
 
-        positive_gain_step_m = s_vario_state.runtime.filtered_altitude_m - s_vario_state.runtime.last_accum_altitude_m;
-        if (positive_gain_step_m > 0.0f)
-        {
-            s_vario_state.runtime.alt3_accum_gain_m += positive_gain_step_m;
-        }
-        s_vario_state.runtime.last_accum_altitude_m = s_vario_state.runtime.filtered_altitude_m;
-
-        if (s_vario_state.thermal_reference_valid == false)
-        {
-            s_vario_state.thermal_reference_valid = true;
-            s_vario_state.thermal_reference_altitude_m = s_vario_state.runtime.filtered_altitude_m;
-        }
-
-        if ((s_vario_state.runtime.filtered_vario_mps <= 0.0f) ||
-            (s_vario_state.runtime.filtered_altitude_m < s_vario_state.thermal_reference_altitude_m))
-        {
-            s_vario_state.thermal_reference_altitude_m = s_vario_state.runtime.filtered_altitude_m;
-        }
-
-        s_vario_state.runtime.alt3_thermal_gain_m =
-            s_vario_state.runtime.filtered_altitude_m - s_vario_state.thermal_reference_altitude_m;
-        if (s_vario_state.runtime.alt3_thermal_gain_m < 0.0f)
-        {
-            s_vario_state.runtime.alt3_thermal_gain_m = 0.0f;
-        }
+        /* ------------------------------------------------------------------ */
+        /*  ALT3                                                               */
+        /*                                                                    */
+        /*  기존 구현의 "누적 양의 상승고도" 대신,                             */
+        /*  Flytec / Digifly / Naviter 계열의 사용 감각에 맞춰                */
+        /*  takeoff 또는 수동 reset 기준의 resettable relative altitude로 운용한다.*/
+        /*                                                                    */
+        /*  즉 ALT3는                                                         */
+        /*  - 이륙 시 자동 0                                                   */
+        /*  - 비행 중 수동 reset 가능                                          */
+        /*  - 이후 현재 Alt1 legal baro altitude와의 차이를 signed 값으로 표시 */
+        /* ------------------------------------------------------------------ */
+        alt3_delta_m = s_vario_state.runtime.filtered_altitude_m - s_vario_state.runtime.last_accum_altitude_m;
+        s_vario_state.runtime.alt3_accum_gain_m = alt3_delta_m;
 
         landing_candidate_active =
             (s_vario_state.runtime.filtered_ground_speed_kmh <= VARIO_STATE_FLIGHT_END_SPEED_KMH) &&
@@ -1530,21 +1459,6 @@ static void vario_state_update_flight_logic(uint32_t now_ms)
         {
             s_vario_state.runtime.flight_landing_candidate_ms = 0u;
             s_vario_state.landing_anchor_valid = false;
-        }
-    }
-    else
-    {
-        s_vario_state.runtime.alt3_thermal_gain_m = 0.0f;
-
-        if (s_vario_state.runtime.derived_valid != false)
-        {
-            s_vario_state.thermal_reference_valid = true;
-            s_vario_state.thermal_reference_altitude_m = s_vario_state.runtime.filtered_altitude_m;
-        }
-        else
-        {
-            s_vario_state.thermal_reference_valid = false;
-            s_vario_state.thermal_reference_altitude_m = 0.0f;
         }
     }
 }
@@ -1887,9 +1801,8 @@ static void vario_state_publish_5hz(uint32_t now_ms)
     quant_gs_kmh = roundf(s_vario_state.runtime.filtered_ground_speed_kmh * 10.0f) * 0.1f;
 
     if ((settings != NULL) &&
-        (vario_state_select_source_altitude_cm(alt,
-                                               settings,
-                                               &selected_altitude_cm) != false))
+        (vario_state_select_alt1_altitude_cm(alt,
+                                             &selected_altitude_cm) != false))
     {
         alt2_relative_cm = selected_altitude_cm - settings->alt2_reference_cm;
     }
@@ -2219,27 +2132,26 @@ const vario_runtime_t *Vario_State_GetRuntime(void)
 
 bool Vario_State_GetSelectedAltitudeCm(int32_t *out_altitude_cm)
 {
-    const vario_settings_t *settings;
-
-    settings = Vario_Settings_Get();
     if (out_altitude_cm == NULL)
     {
         return false;
     }
 
-    return vario_state_select_source_altitude_cm(&s_vario_state.runtime.altitude,
-                                                 settings,
-                                                 out_altitude_cm);
+    return vario_state_select_alt1_altitude_cm(&s_vario_state.runtime.altitude,
+                                               out_altitude_cm);
 }
 
 void Vario_State_ResetAccumulatedGain(void)
 {
+    /* ---------------------------------------------------------------------- */
+    /*  ALT3 수동 reset                                                        */
+    /*                                                                        */
+    /*  ALT3는 누적 gain이 아니라 resettable delta altitude 이므로             */
+    /*  reset 시 현재 Alt1 기준 barometric altitude를 새 reference로 잡는다.   */
+    /* ---------------------------------------------------------------------- */
     s_vario_state.runtime.alt3_accum_gain_m = 0.0f;
-    s_vario_state.runtime.alt3_thermal_gain_m = 0.0f;
     s_vario_state.runtime.max_top_vario_mps = 0.0f;
     s_vario_state.runtime.last_accum_altitude_m = s_vario_state.runtime.filtered_altitude_m;
-    s_vario_state.thermal_reference_valid = (s_vario_state.runtime.derived_valid != false) ? true : false;
-    s_vario_state.thermal_reference_altitude_m = s_vario_state.runtime.filtered_altitude_m;
     s_vario_state.redraw_request = 1u;
 }
 
@@ -2263,7 +2175,6 @@ void Vario_State_ResetFlightMetrics(void)
     s_vario_state.runtime.history_head = 0u;
     s_vario_state.runtime.history_count = 0u;
     s_vario_state.runtime.alt3_accum_gain_m = 0.0f;
-    s_vario_state.runtime.alt3_thermal_gain_m = 0.0f;
     s_vario_state.runtime.max_top_vario_mps = 0.0f;
     s_vario_state.runtime.max_speed_kmh = 0.0f;
     s_vario_state.runtime.average_vario_mps = 0.0f;
@@ -2296,10 +2207,28 @@ void Vario_State_ResetFlightMetrics(void)
     s_vario_state.runtime.last_accum_altitude_m = s_vario_state.runtime.filtered_altitude_m;
     s_vario_state.takeoff_anchor_valid = false;
     s_vario_state.landing_anchor_valid = false;
-    s_vario_state.thermal_reference_valid = (s_vario_state.runtime.derived_valid != false) ? true : false;
-    s_vario_state.thermal_reference_altitude_m = s_vario_state.runtime.filtered_altitude_m;
 
     Vario_GlideComputer_ResetReference();
+    s_vario_state.redraw_request = 1u;
+}
+
+void Vario_State_ResetAttitudeIndicator(void)
+{
+    /* ---------------------------------------------------------------------- */
+    /*  PAGE 3 attitude indicator reset                                       */
+    /*                                                                        */
+    /*  high-level VARIO 계층은 sensor driver를 직접 건드리지 않는다.         */
+    /*  대신 Platform이 공개한 BIKE_DYNAMICS service API를 통해               */
+    /*  attitude observer 재정렬과 zero capture 요청만 올린다.                */
+    /*                                                                        */
+    /*  - HardRezero      : quaternion / gravity observer runtime 재초기화     */
+    /*  - ZeroCapture     : 현재 자세를 bank=0 / grade=0 기준으로 새로 캡처    */
+    /*                                                                        */
+    /*  실제 zero 적용 시점은 BIKE_DYNAMICS 내부의 유효 샘플/안전 조건에      */
+    /*  의해 결정된다.                                                         */
+    /* ---------------------------------------------------------------------- */
+    BIKE_DYNAMICS_RequestHardRezero();
+    BIKE_DYNAMICS_RequestZeroCapture();
     s_vario_state.redraw_request = 1u;
 }
 
