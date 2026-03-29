@@ -1384,8 +1384,6 @@ static bool vario_display_compute_glide_ratio(float speed_kmh,
 static void vario_display_update_slow_number_caches(const vario_runtime_t *rt)
 {
     uint32_t now_ms;
-    float    dt_s;
-    float    alpha;
     float    target_speed_kmh;
 
     if (rt == NULL)
@@ -1395,27 +1393,19 @@ static void vario_display_update_slow_number_caches(const vario_runtime_t *rt)
 
     now_ms = (rt->last_task_ms != 0u) ? rt->last_task_ms : rt->last_publish_ms;
     target_speed_kmh = (rt->gs_bar_speed_kmh > 0.0f) ? rt->gs_bar_speed_kmh : rt->ground_speed_kmh;
+    if (target_speed_kmh < 0.0f)
+    {
+        target_speed_kmh = 0.0f;
+    }
 
-    if ((s_vario_ui_dynamic.displayed_speed_valid == false) || (now_ms == 0u))
-    {
-        s_vario_ui_dynamic.displayed_speed_valid = true;
-        s_vario_ui_dynamic.displayed_speed_kmh = target_speed_kmh;
-        s_vario_ui_dynamic.last_display_smoothing_ms = now_ms;
-    }
-    else if ((s_vario_ui_dynamic.last_display_smoothing_ms != 0u) &&
-             (now_ms > s_vario_ui_dynamic.last_display_smoothing_ms))
-    {
-        dt_s = ((float)(now_ms - s_vario_ui_dynamic.last_display_smoothing_ms)) * 0.001f;
-        dt_s = vario_display_clampf(dt_s, 0.010f, 0.250f);
-        alpha = dt_s / (VARIO_UI_SLOW_SPEED_TAU_S + dt_s);
-        s_vario_ui_dynamic.displayed_speed_kmh +=
-            alpha * (target_speed_kmh - s_vario_ui_dynamic.displayed_speed_kmh);
-        if (s_vario_ui_dynamic.displayed_speed_kmh < 0.0f)
-        {
-            s_vario_ui_dynamic.displayed_speed_kmh = 0.0f;
-        }
-        s_vario_ui_dynamic.last_display_smoothing_ms = now_ms;
-    }
+    /* ------------------------------------------------------------------ */
+    /* 큰 GS 숫자는 smoothing 없이 raw GPS ground speed를 그대로 쓴다.     */
+    /* trainer mode 역시 runtime.gps/gs_bar 경로에 synthetic speed를      */
+    /* 주입하므로, 여기서는 source만 raw path로 맞추면 된다.              */
+    /* ------------------------------------------------------------------ */
+    s_vario_ui_dynamic.displayed_speed_valid = true;
+    s_vario_ui_dynamic.displayed_speed_kmh = target_speed_kmh;
+    s_vario_ui_dynamic.last_display_smoothing_ms = now_ms;
 
     if (s_vario_ui_dynamic.fast_average_glide_valid == false)
     {
@@ -2621,7 +2611,6 @@ static void vario_display_draw_top_left_glide_ratio_gauge(u8g2_t *u8g2,
     float   inst_ratio;
     float   avg_ratio;
     int16_t inst_mark_x;
-    int16_t inst_mark_w;
     int16_t inst_bar_top_y;
     int16_t avg_mark_x;
     int16_t avg_mark_top_y;
@@ -2686,9 +2675,10 @@ static void vario_display_draw_top_left_glide_ratio_gauge(u8g2_t *u8g2,
 
     if (rt->glide_ratio_instant_valid != false)
     {
+        int16_t inst_fill_w;
+
         inst_mark_x = (int16_t)(gauge_left_x +
                                 lroundf((inst_ratio / VARIO_UI_TOP_GLD_GAUGE_MAX_RATIO) * (float)(gauge_w - 1)));
-        inst_mark_w = 4;
         inst_bar_top_y = (int16_t)(gauge_top_y + VARIO_UI_TOP_GLD_AVG_BAR_TOP_DY);
         if (inst_mark_x < gauge_left_x)
         {
@@ -2698,21 +2688,24 @@ static void vario_display_draw_top_left_glide_ratio_gauge(u8g2_t *u8g2,
         {
             inst_mark_x = (int16_t)(gauge_left_x + gauge_w - 1);
         }
-        inst_mark_x = (int16_t)(inst_mark_x - (inst_mark_w / 2));
-        if (inst_mark_x < gauge_left_x)
-        {
-            inst_mark_x = gauge_left_x;
-        }
-        if ((inst_mark_x + inst_mark_w) > (int16_t)(gauge_left_x + gauge_w))
-        {
-            inst_mark_x = (int16_t)(gauge_left_x + gauge_w - inst_mark_w);
-        }
 
-        u8g2_DrawBox(u8g2,
-                     inst_mark_x,
-                     inst_bar_top_y,
-                     inst_mark_w,
-                     VARIO_UI_TOP_GLD_AVG_BAR_H);
+        /* ------------------------------------------------------------------ */
+        /* instant glide bar 는 왼쪽에서 오른쪽으로 차오르는 fill bar다.      */
+        /* 이동 포인터처럼 보이지 않도록, gauge left 기준 누적 width 로 그린다.*/
+        /* ------------------------------------------------------------------ */
+        inst_fill_w = (int16_t)(inst_mark_x - gauge_left_x + 1);
+        if (inst_fill_w > gauge_w)
+        {
+            inst_fill_w = gauge_w;
+        }
+        if (inst_fill_w > 0)
+        {
+            u8g2_DrawBox(u8g2,
+                         gauge_left_x,
+                         inst_bar_top_y,
+                         inst_fill_w,
+                         VARIO_UI_TOP_GLD_AVG_BAR_H);
+        }
     }
 
     if (s_vario_ui_dynamic.fast_average_glide_valid != false)
@@ -4623,44 +4616,17 @@ static void vario_display_draw_trail_background(u8g2_t *u8g2,
     can_draw_points = ((rt->gps_valid != false) &&
                        (rt->trail_count > 0u) &&
                        (meters_per_px > 0.0f));
-    origin_valid = false;
+    /* ------------------------------------------------------------------ */
+    /* trail page 는 heading-up / north-up 모두 "현재 기체 중심 고정" 이다. */
+    /* 즉, 배경 trail 이 움직이고 화살표는 중심에 남는다.                  */
+    /* - heading-up : 배경을 -heading 만큼 회전, 화살표는 위를 본다.        */
+    /* - north-up   : 배경은 회전하지 않고, 화살표만 현재 heading 을 본다.  */
+    /* ------------------------------------------------------------------ */
+    origin_valid = (rt->gps_valid != false);
     origin_lat_e7 = rt->gps.fix.lat;
     origin_lon_e7 = rt->gps.fix.lon;
     aircraft_px = draw_center_x;
     aircraft_py = draw_center_y;
-
-    if (heading_up_mode != false)
-    {
-        origin_valid = (rt->gps_valid != false);
-        origin_lat_e7 = rt->gps.fix.lat;
-        origin_lon_e7 = rt->gps.fix.lon;
-        aircraft_px = draw_center_x;
-        aircraft_py = draw_center_y;
-    }
-    else
-    {
-        origin_valid = vario_display_get_oldest_trail_point(rt, &origin_lat_e7, &origin_lon_e7);
-        if (origin_valid != false)
-        {
-            float   cur_lat_deg;
-            float   cur_lon_deg;
-            float   org_lat_deg;
-            float   org_lon_deg;
-            float   mean_lat_rad;
-            float   dx_m;
-            float   dy_m;
-
-            cur_lat_deg = ((float)rt->gps.fix.lat) * 1.0e-7f;
-            cur_lon_deg = ((float)rt->gps.fix.lon) * 1.0e-7f;
-            org_lat_deg = ((float)origin_lat_e7) * 1.0e-7f;
-            org_lon_deg = ((float)origin_lon_e7) * 1.0e-7f;
-            mean_lat_rad = vario_display_deg_to_rad((cur_lat_deg + org_lat_deg) * 0.5f);
-            dx_m = (cur_lon_deg - org_lon_deg) * (111319.5f * cosf(mean_lat_rad));
-            dy_m = (cur_lat_deg - org_lat_deg) * 111132.0f;
-            aircraft_px = (int16_t)lroundf((float)draw_center_x + (dx_m / meters_per_px));
-            aircraft_py = (int16_t)lroundf((float)draw_center_y - (dy_m / meters_per_px));
-        }
-    }
 
     if ((can_draw_points != false) && (origin_valid != false))
     {

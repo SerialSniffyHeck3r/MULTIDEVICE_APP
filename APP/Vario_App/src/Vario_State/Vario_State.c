@@ -167,9 +167,10 @@ static float vario_state_rad_to_deg(float rad);
 /*  실제 센서값을 직접 건드리는 대신, Vario_State 내부에 별도 scenario table 을  */
 /*  두고 그 결과를 runtime snapshot staging 구조체에 덮어쓴다.                */
 /*                                                                            */
-/*  버튼 F1/F2/F5/F6은 아래 table의 입력축(speed / heading)만 조작한다.        */
-/*  QNH는 기존 canonical setting 경로를 그대로 사용하고, trainer는 그 값을      */
-/*  읽어 synthetic baro altitude를 다시 계산한다.                             */
+/*  버튼은 TRAINER 내부 synthetic 축(speed / altitude / heading)만 조작한다. */
+/*  실제 센서/APP_STATE canonical 저장소는 건드리지 않는다.                    */
+/*  trainer altitude는 synthetic pressure altitude로 반영되고,                 */
+/*  altitude 버튼은 짧은 vario impulse도 함께 걸어 사용자가 즉시 체감하게 한다. */
 /* -------------------------------------------------------------------------- */
 typedef struct
 {
@@ -186,6 +187,8 @@ typedef struct
     float    airspeed_kmh;
     float    heading_deg;
     float    vario_mps;
+    float    command_vario_mps;
+    uint32_t command_vario_until_ms;
     int32_t  lat_e7;
     int32_t  lon_e7;
 } vario_trainer_state_t;
@@ -484,6 +487,23 @@ static float vario_state_trainer_compute_vario_mps(uint32_t now_ms)
     heading_idx = (uint8_t)(((int32_t)lroundf(vario_state_wrap_360(s_vario_state.trainer.heading_deg) / 30.0f)) % 12);
     base_vario_mps = ((float)s_vario_trainer_heading_lift_cms[heading_idx]) * 0.01f;
     base_vario_mps += ((float)s_vario_trainer_speed_rows[speed_idx].vario_bias_cms) * 0.01f;
+
+    /* ------------------------------------------------------------------ */
+    /* altitude 버튼 입력은 trainer 전용 synthetic impulse 로 처리한다.    */
+    /* 실제 센서 로직을 쓰지 않는 모드이므로, 순간적인 climb/sink command */
+    /* 를 일정 시간 더해 사용자가 altitude/vario 변화를 즉시 보게 한다.   */
+    /* ------------------------------------------------------------------ */
+    if ((s_vario_state.trainer.command_vario_until_ms != 0u) &&
+        (now_ms <= s_vario_state.trainer.command_vario_until_ms))
+    {
+        base_vario_mps += s_vario_state.trainer.command_vario_mps;
+    }
+    else if ((s_vario_state.trainer.command_vario_until_ms != 0u) &&
+             (now_ms > s_vario_state.trainer.command_vario_until_ms))
+    {
+        s_vario_state.trainer.command_vario_until_ms = 0u;
+        s_vario_state.trainer.command_vario_mps = 0.0f;
+    }
 
     elapsed_s = ((float)(now_ms - s_vario_state.trainer.start_ms)) * 0.001f;
     wave_fast = 0.18f * sinf((elapsed_s * 1.7f) + (vario_state_wrap_360(s_vario_state.trainer.heading_deg) * 0.05f));
@@ -1968,6 +1988,42 @@ void Vario_State_TrainerAdjustSpeed(int8_t direction)
                            (((float)direction) * VARIO_STATE_TRAINER_SPEED_STEP_KMH),
                            VARIO_STATE_TRAINER_MIN_SPEED_KMH,
                            VARIO_STATE_TRAINER_MAX_SPEED_KMH);
+}
+
+void Vario_State_TrainerAdjustAltitude(int8_t direction)
+{
+    uint32_t now_ms;
+    float    altitude_step_m;
+    float    command_vario_mps;
+
+    if (direction == 0)
+    {
+        return;
+    }
+
+    if (s_vario_state.trainer.initialized == false)
+    {
+        vario_state_trainer_init(s_vario_state.runtime.last_task_ms);
+    }
+
+    now_ms = s_vario_state.runtime.last_task_ms;
+    if (now_ms == 0u)
+    {
+        now_ms = s_vario_state.trainer.last_update_ms;
+    }
+
+    altitude_step_m = 10.0f;
+    command_vario_mps = (direction > 0) ? 1.8f : -1.8f;
+
+    s_vario_state.trainer.pressure_altitude_m =
+        vario_state_clampf(s_vario_state.trainer.pressure_altitude_m +
+                           (((float)direction) * altitude_step_m),
+                           -100.0f,
+                           4500.0f);
+    s_vario_state.trainer.command_vario_mps = command_vario_mps;
+    s_vario_state.trainer.command_vario_until_ms = now_ms + 1200u;
+    s_vario_state.trainer.vario_mps = command_vario_mps;
+    s_vario_state.redraw_request = 1u;
 }
 
 void Vario_State_TrainerAdjustHeading(int8_t direction)

@@ -283,9 +283,9 @@ static void vario_task_apply_platform_settings(void)
     /* ------------------------------------------------------------------ */
     damping_norm = vario_task_damping_norm_from_settings(settings);
     audio_response_norm = vario_task_audio_response_norm_from_settings(settings);
-    fast_tau_ms = vario_task_lerp_u16(170u, 70u, damping_norm);
-    baro_vario_tau_ms = vario_task_lerp_u16(95u, 38u, damping_norm);
-    baro_vario_noise_cms = vario_task_lerp_u16(72u, 50u, damping_norm);
+    fast_tau_ms = vario_task_lerp_u16(110u, 30u, damping_norm);
+    baro_vario_tau_ms = vario_task_lerp_u16(50u, 15u, damping_norm);
+    baro_vario_noise_cms = vario_task_lerp_u16(28u, 12u, damping_norm);
 
     audio_deadband_cms = (uint16_t)((settings->climb_tone_threshold_cms > 0) ?
                                     settings->climb_tone_threshold_cms :
