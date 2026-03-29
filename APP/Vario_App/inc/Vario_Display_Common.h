@@ -114,6 +114,8 @@ void Vario_Display_SetNavTargetMode(vario_nav_target_mode_t mode);
 vario_nav_target_mode_t Vario_Display_GetNavTargetMode(void);
 void Vario_Display_SetWaypointManual(int32_t lat_e7, int32_t lon_e7, bool valid);
 void Vario_Display_ResetDynamicMetrics(void);
+void Vario_Display_ToggleTrailHeadingUpMode(void);
+bool Vario_Display_IsTrailHeadingUpMode(void);
 
 /* -------------------------------------------------------------------------- */
 /* 개발용 raw overlay                                                          */

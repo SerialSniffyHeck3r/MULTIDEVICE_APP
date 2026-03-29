@@ -291,6 +291,8 @@ static const unsigned char vario_icon_vario_led_down_bits[] = {
 /* display 계층이 publish 값(5 Hz)을 다시 누적해서 평균/Top Speed 를 만든다.    */
 /* -------------------------------------------------------------------------- */
 #define VARIO_UI_AVG_BUFFER_SIZE                  640u
+#define VARIO_UI_SLOW_SPEED_TAU_S                    1.10f
+#define VARIO_UI_SLOW_GLIDE_UPDATE_MS                2000u
 
 /* -------------------------------------------------------------------------- */
 /* 수동 WP 기본값                                                              */
@@ -364,6 +366,15 @@ typedef struct
     /* ---------------------------------------------------------------------- */
     float    top_speed_kmh;
     float    filtered_gs_bar_kmh;
+    bool     displayed_speed_valid;
+    float    displayed_speed_kmh;
+    uint32_t last_display_smoothing_ms;
+    bool     displayed_glide_valid;
+    float    displayed_glide_ratio;
+    uint32_t last_displayed_glide_update_ms;
+    bool     fast_average_glide_valid;
+    float    fast_average_glide_ratio;
+    bool     trail_heading_up_mode;
     vario_nav_target_mode_t nav_mode;
     int32_t  wp_lat_e7;
     int32_t  wp_lon_e7;
@@ -413,6 +424,8 @@ typedef struct
 /* -------------------------------------------------------------------------- */
 static float vario_display_get_vario_scale_mps(const vario_settings_t *settings);
 static float vario_display_get_gs_scale_kmh(const vario_settings_t *settings);
+static bool  vario_display_compute_glide_ratio(float speed_kmh, float vario_mps, float *out_ratio);
+static void  vario_display_update_slow_number_caches(const vario_runtime_t *rt);
 
 static vario_viewport_t s_vario_full_viewport =
 {
@@ -1075,21 +1088,29 @@ static void vario_display_format_peak_speed(char *buf, size_t buf_len, float spe
 
 static void vario_display_format_peak_vario(char *buf, size_t buf_len, float vario_mps)
 {
+    float display_value;
+
     if ((buf == NULL) || (buf_len == 0u))
     {
         return;
     }
 
-    if (vario_display_absf(vario_mps) <= 0.05f)
+    display_value = Vario_Settings_VSpeedMpsToDisplayFloat(vario_display_absf(vario_mps));
+    if (display_value < 0.0f)
     {
-        snprintf(buf, buf_len, "--.-");
-        return;
+        display_value = 0.0f;
     }
 
-    vario_display_format_vario_small_abs(buf, buf_len, vario_mps);
-    if (Vario_Settings_Get()->vspeed_unit != VARIO_VSPEED_UNIT_FPM)
+    if (Vario_Settings_Get()->vspeed_unit == VARIO_VSPEED_UNIT_FPM)
     {
-        vario_display_trim_leading_zero(buf);
+        snprintf(buf, buf_len, "%4ld", (long)lroundf(display_value));
+    }
+    else
+    {
+        snprintf(buf,
+                 buf_len,
+                 "%4.1f",
+                 (double)vario_display_clampf(display_value, 0.0f, 99.9f));
     }
 }
 
@@ -1232,6 +1253,14 @@ static void vario_display_reset_sample_buffer_only(void)
     s_vario_ui_dynamic.count = 0u;
     s_vario_ui_dynamic.last_publish_ms = 0u;
     s_vario_ui_dynamic.top_speed_kmh = 0.0f;
+    s_vario_ui_dynamic.displayed_speed_valid = false;
+    s_vario_ui_dynamic.displayed_speed_kmh = 0.0f;
+    s_vario_ui_dynamic.last_display_smoothing_ms = 0u;
+    s_vario_ui_dynamic.displayed_glide_valid = false;
+    s_vario_ui_dynamic.displayed_glide_ratio = 0.0f;
+    s_vario_ui_dynamic.last_displayed_glide_update_ms = 0u;
+    s_vario_ui_dynamic.fast_average_glide_valid = false;
+    s_vario_ui_dynamic.fast_average_glide_ratio = 0.0f;
 }
 
 static void vario_display_update_dynamic_metrics(const vario_runtime_t *rt,
@@ -1325,6 +1354,89 @@ static void vario_display_get_average_values(const vario_runtime_t *rt,
                                  window_ms,
                                  rt->gs_bar_speed_kmh,
                                  out_avg_speed_kmh);
+}
+
+
+static bool vario_display_compute_glide_ratio(float speed_kmh,
+                                              float vario_mps,
+                                              float *out_ratio)
+{
+    float sink_mps;
+    float glide_ratio;
+
+    if (out_ratio == NULL)
+    {
+        return false;
+    }
+
+    sink_mps = -vario_mps;
+    if ((sink_mps <= 0.15f) || (speed_kmh <= 1.0f))
+    {
+        *out_ratio = 0.0f;
+        return false;
+    }
+
+    glide_ratio = (speed_kmh / 3.6f) / sink_mps;
+    *out_ratio = vario_display_clampf(glide_ratio, 0.0f, 99.9f);
+    return true;
+}
+
+static void vario_display_update_slow_number_caches(const vario_runtime_t *rt)
+{
+    uint32_t now_ms;
+    float    dt_s;
+    float    alpha;
+    float    target_speed_kmh;
+
+    if (rt == NULL)
+    {
+        return;
+    }
+
+    now_ms = (rt->last_task_ms != 0u) ? rt->last_task_ms : rt->last_publish_ms;
+    target_speed_kmh = (rt->gs_bar_speed_kmh > 0.0f) ? rt->gs_bar_speed_kmh : rt->ground_speed_kmh;
+
+    if ((s_vario_ui_dynamic.displayed_speed_valid == false) || (now_ms == 0u))
+    {
+        s_vario_ui_dynamic.displayed_speed_valid = true;
+        s_vario_ui_dynamic.displayed_speed_kmh = target_speed_kmh;
+        s_vario_ui_dynamic.last_display_smoothing_ms = now_ms;
+    }
+    else if ((s_vario_ui_dynamic.last_display_smoothing_ms != 0u) &&
+             (now_ms > s_vario_ui_dynamic.last_display_smoothing_ms))
+    {
+        dt_s = ((float)(now_ms - s_vario_ui_dynamic.last_display_smoothing_ms)) * 0.001f;
+        dt_s = vario_display_clampf(dt_s, 0.010f, 0.250f);
+        alpha = dt_s / (VARIO_UI_SLOW_SPEED_TAU_S + dt_s);
+        s_vario_ui_dynamic.displayed_speed_kmh +=
+            alpha * (target_speed_kmh - s_vario_ui_dynamic.displayed_speed_kmh);
+        if (s_vario_ui_dynamic.displayed_speed_kmh < 0.0f)
+        {
+            s_vario_ui_dynamic.displayed_speed_kmh = 0.0f;
+        }
+        s_vario_ui_dynamic.last_display_smoothing_ms = now_ms;
+    }
+
+    if (s_vario_ui_dynamic.fast_average_glide_valid == false)
+    {
+        s_vario_ui_dynamic.displayed_glide_valid = false;
+        return;
+    }
+
+    if ((s_vario_ui_dynamic.displayed_glide_valid == false) ||
+        (s_vario_ui_dynamic.last_displayed_glide_update_ms == 0u))
+    {
+        s_vario_ui_dynamic.displayed_glide_valid = true;
+        s_vario_ui_dynamic.displayed_glide_ratio = s_vario_ui_dynamic.fast_average_glide_ratio;
+        s_vario_ui_dynamic.last_displayed_glide_update_ms = now_ms;
+        return;
+    }
+
+    if ((now_ms - s_vario_ui_dynamic.last_displayed_glide_update_ms) >= VARIO_UI_SLOW_GLIDE_UPDATE_MS)
+    {
+        s_vario_ui_dynamic.displayed_glide_ratio = s_vario_ui_dynamic.fast_average_glide_ratio;
+        s_vario_ui_dynamic.last_displayed_glide_update_ms = now_ms;
+    }
 }
 
 
@@ -2508,7 +2620,8 @@ static void vario_display_draw_top_left_glide_ratio_gauge(u8g2_t *u8g2,
     int16_t gauge_top_y;
     float   inst_ratio;
     float   avg_ratio;
-    int16_t inst_fill_w;
+    int16_t inst_mark_x;
+    int16_t inst_mark_w;
     int16_t inst_bar_top_y;
     int16_t avg_mark_x;
     int16_t avg_mark_top_y;
@@ -2537,32 +2650,13 @@ static void vario_display_draw_top_left_glide_ratio_gauge(u8g2_t *u8g2,
     }
 
     avg_ratio = 0.0f;
-    if (rt->glide_ratio_average_valid != false)
+    if (s_vario_ui_dynamic.fast_average_glide_valid != false)
     {
-        avg_ratio = vario_display_clampf(rt->glide_ratio_average,
+        avg_ratio = vario_display_clampf(s_vario_ui_dynamic.fast_average_glide_ratio,
                                          0.0f,
                                          VARIO_UI_TOP_GLD_GAUGE_MAX_RATIO);
     }
 
-    inst_fill_w = (int16_t)lroundf((inst_ratio / VARIO_UI_TOP_GLD_GAUGE_MAX_RATIO) * (float)gauge_w);
-    if ((rt->glide_ratio_instant_valid != false) && (inst_fill_w <= 0) && (inst_ratio > 0.0f))
-    {
-        inst_fill_w = 1;
-    }
-    if (inst_fill_w > gauge_w)
-    {
-        inst_fill_w = gauge_w;
-    }
-
-    /* ---------------------------------------------------------------------- */
-    /* tick axis                                                               */
-    /*                                                                        */
-    /* 이번 수정에서는                                                         */
-    /* - 눈금 축은 항상 bare axis 로 유지                                      */
-    /* - 전체를 검게 칠하는 thick bar 는 제거                                  */
-    /* - 상단 5 px strip 의 작은 INST rounded bar 와                          */
-    /*   AVG XBM marker 만 남긴다.                                             */
-    /* ---------------------------------------------------------------------- */
     for (tick_ratio = 0.0f;
          tick_ratio <= VARIO_UI_TOP_GLD_GAUGE_MAX_RATIO;
          tick_ratio += VARIO_UI_TOP_GLD_GAUGE_MINOR_STEP)
@@ -2590,17 +2684,38 @@ static void vario_display_draw_top_left_glide_ratio_gauge(u8g2_t *u8g2,
         u8g2_DrawVLine(u8g2, tick_x, gauge_top_y, tick_h);
     }
 
-    if ((rt->glide_ratio_instant_valid != false) && (inst_fill_w > 0))
+    if (rt->glide_ratio_instant_valid != false)
     {
+        inst_mark_x = (int16_t)(gauge_left_x +
+                                lroundf((inst_ratio / VARIO_UI_TOP_GLD_GAUGE_MAX_RATIO) * (float)(gauge_w - 1)));
+        inst_mark_w = 4;
         inst_bar_top_y = (int16_t)(gauge_top_y + VARIO_UI_TOP_GLD_AVG_BAR_TOP_DY);
+        if (inst_mark_x < gauge_left_x)
+        {
+            inst_mark_x = gauge_left_x;
+        }
+        if (inst_mark_x > (int16_t)(gauge_left_x + gauge_w - 1))
+        {
+            inst_mark_x = (int16_t)(gauge_left_x + gauge_w - 1);
+        }
+        inst_mark_x = (int16_t)(inst_mark_x - (inst_mark_w / 2));
+        if (inst_mark_x < gauge_left_x)
+        {
+            inst_mark_x = gauge_left_x;
+        }
+        if ((inst_mark_x + inst_mark_w) > (int16_t)(gauge_left_x + gauge_w))
+        {
+            inst_mark_x = (int16_t)(gauge_left_x + gauge_w - inst_mark_w);
+        }
+
         u8g2_DrawBox(u8g2,
-                     gauge_left_x,
+                     inst_mark_x,
                      inst_bar_top_y,
-                     inst_fill_w,
+                     inst_mark_w,
                      VARIO_UI_TOP_GLD_AVG_BAR_H);
     }
 
-    if (rt->glide_ratio_average_valid != false)
+    if (s_vario_ui_dynamic.fast_average_glide_valid != false)
     {
         avg_mark_x = (int16_t)(gauge_left_x +
                                lroundf((avg_ratio / VARIO_UI_TOP_GLD_GAUGE_MAX_RATIO) * (float)(gauge_w - 1)));
@@ -2655,8 +2770,8 @@ static void vario_display_draw_top_left_metrics(u8g2_t *u8g2,
 
     vario_display_format_glide_ratio_value(glide_text,
                                            sizeof(glide_text),
-                                           rt->glide_ratio_average_valid,
-                                           rt->glide_ratio_average);
+                                           s_vario_ui_dynamic.displayed_glide_valid,
+                                           s_vario_ui_dynamic.displayed_glide_ratio);
 
     value_box_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_ALT2_VALUE, "99.9");
     value_x = gauge_left_x;
@@ -3698,7 +3813,7 @@ static void vario_display_draw_vario_value_block(u8g2_t *u8g2,
                                                 sizeof(te_value_text),
                                                 rt);
         vario_display_draw_text_box_top(u8g2,
-                                        te_meta_x,
+                                        (int16_t)(te_meta_x - 10),
                                         te_meta_y,
                                         te_value_w,
                                         VARIO_UI_ALIGN_RIGHT,
@@ -3731,7 +3846,7 @@ static void vario_display_draw_vario_value_block(u8g2_t *u8g2,
         vario_display_format_estimated_te_value(te_value_text,
                                                 sizeof(te_value_text),
                                                 rt);
-        te_value_x = te_meta_x;
+        te_value_x = (int16_t)(te_meta_x - 10);
         te_value_y = max_box_y;
         vario_display_draw_text_box_top(u8g2,
                                         te_value_x,
@@ -3781,7 +3896,11 @@ static void vario_display_draw_speed_value_block(u8g2_t *u8g2,
     value_box_x = (int16_t)(v->x + v->w - VARIO_UI_SIDE_BAR_W - VARIO_UI_BOTTOM_GS_X_PAD - VARIO_UI_BOTTOM_BOX_W);
     value_box_y = (int16_t)(v->y + v->h - VARIO_UI_BOTTOM_BOX_BOTTOM_PAD - value_box_h);
 
-    vario_display_format_speed_value(value_text, sizeof(value_text), rt->ground_speed_kmh);
+    vario_display_format_speed_value(value_text,
+                                     sizeof(value_text),
+                                     (s_vario_ui_dynamic.displayed_speed_valid != false) ?
+                                         s_vario_ui_dynamic.displayed_speed_kmh :
+                                         rt->ground_speed_kmh);
     vario_display_format_peak_speed(max_text, sizeof(max_text), s_vario_ui_dynamic.top_speed_kmh);
     vario_display_format_optional_speed(mc_text,
                                         sizeof(mc_text),
@@ -4213,16 +4332,14 @@ static bool vario_display_compute_compass_circle_geometry(u8g2_t *u8g2,
     return true;
 }
 
-static void vario_display_draw_center_heading_arrow(u8g2_t *u8g2,
-                                                    const vario_viewport_t *v,
-                                                    const vario_runtime_t *rt,
-                                                    const vario_settings_t *settings)
+static void vario_display_draw_heading_arrow_at(u8g2_t *u8g2,
+                                               int16_t center_x,
+                                               int16_t center_y,
+                                               float heading_deg,
+                                               const vario_settings_t *settings)
 {
-    int16_t center_x;
-    int16_t center_y;
     int16_t arrow_size_px;
     int16_t wing_half_px;
-    float   heading_deg;
     float   rad;
     float   dir_x;
     float   dir_y;
@@ -4239,13 +4356,10 @@ static void vario_display_draw_center_heading_arrow(u8g2_t *u8g2,
     int16_t right_x;
     int16_t right_y;
 
-    if ((u8g2 == NULL) || (v == NULL) || (rt == NULL))
+    if (u8g2 == NULL)
     {
         return;
     }
-
-    center_x = (int16_t)(v->x + (v->w / 2));
-    center_y = (int16_t)(v->y + (v->h / 2));
 
     arrow_size_px = 9;
     if (settings != NULL)
@@ -4267,7 +4381,6 @@ static void vario_display_draw_center_heading_arrow(u8g2_t *u8g2,
         wing_half_px = 3;
     }
 
-    heading_deg = (rt->heading_valid != false) ? rt->heading_deg : 0.0f;
     rad = vario_display_deg_to_rad(heading_deg);
     dir_x = sinf(rad);
     dir_y = -cosf(rad);
@@ -4285,18 +4398,30 @@ static void vario_display_draw_center_heading_arrow(u8g2_t *u8g2,
     right_x = (int16_t)lroundf((float)base_x + (side_x * (float)wing_half_px));
     right_y = (int16_t)lroundf((float)base_y + (side_y * (float)wing_half_px));
 
-    /* ---------------------------------------------------------------------- */
-    /* PAGE 2 trail 중심 화살표                                               */
-    /*                                                                        */
-    /* 화면 자체는 north-up 이다.                                             */
-    /* 따라서 화살표만 현재 heading 방향으로 회전시켜                          */
-    /* "화살표의 가장 윗부분(arrow tip)이 현재 heading을 본다" 는            */
-    /* 사용자의 요구를 그대로 만족시킨다.                                     */
-    /* ---------------------------------------------------------------------- */
     u8g2_DrawLine(u8g2, tail_x, tail_y, tip_x, tip_y);
     u8g2_DrawLine(u8g2, tip_x, tip_y, left_x, left_y);
     u8g2_DrawLine(u8g2, tip_x, tip_y, right_x, right_y);
     u8g2_DrawLine(u8g2, left_x, left_y, right_x, right_y);
+}
+
+static void vario_display_draw_center_heading_arrow(u8g2_t *u8g2,
+                                                    const vario_viewport_t *v,
+                                                    const vario_runtime_t *rt,
+                                                    const vario_settings_t *settings)
+{
+    int16_t center_x;
+    int16_t center_y;
+    float   heading_deg;
+
+    if ((u8g2 == NULL) || (v == NULL) || (rt == NULL))
+    {
+        return;
+    }
+
+    center_x = (int16_t)(v->x + (v->w / 2));
+    center_y = (int16_t)(v->y + (v->h / 2));
+    heading_deg = (rt->heading_valid != false) ? rt->heading_deg : 0.0f;
+    vario_display_draw_heading_arrow_at(u8g2, center_x, center_y, heading_deg, settings);
 }
 
 static bool vario_display_compute_circle_line_endpoints(int16_t center_x,
@@ -4463,20 +4588,27 @@ static void vario_display_draw_trail_background(u8g2_t *u8g2,
 {
     uint8_t start_index;
     uint8_t i;
-    int16_t center_x;
-    int16_t center_y;
+    int16_t draw_center_x;
+    int16_t draw_center_y;
     float   half_w_px;
     float   half_h_px;
     float   meters_per_px;
     bool    can_draw_points;
+    bool    heading_up_mode;
+    int32_t origin_lat_e7;
+    int32_t origin_lon_e7;
+    float   current_heading_deg;
+    bool    origin_valid;
+    int16_t aircraft_px;
+    int16_t aircraft_py;
 
     if ((u8g2 == NULL) || (v == NULL) || (rt == NULL) || (settings == NULL))
     {
         return;
     }
 
-    center_x = (int16_t)(v->x + (v->w / 2));
-    center_y = (int16_t)(v->y + (v->h / 2));
+    draw_center_x = (int16_t)(v->x + (v->w / 2));
+    draw_center_y = (int16_t)(v->y + (v->h / 2));
     half_w_px = (float)(v->w / 2);
     half_h_px = (float)(v->h / 2);
     meters_per_px = 0.0f;
@@ -4486,41 +4618,95 @@ static void vario_display_draw_trail_background(u8g2_t *u8g2,
                         ((half_w_px < half_h_px) ? half_w_px : half_h_px);
     }
 
+    heading_up_mode = (s_vario_ui_dynamic.trail_heading_up_mode != false);
+    current_heading_deg = (rt->heading_valid != false) ? rt->heading_deg : 0.0f;
     can_draw_points = ((rt->gps_valid != false) &&
                        (rt->trail_count > 0u) &&
                        (meters_per_px > 0.0f));
+    origin_valid = false;
+    origin_lat_e7 = rt->gps.fix.lat;
+    origin_lon_e7 = rt->gps.fix.lon;
+    aircraft_px = draw_center_x;
+    aircraft_py = draw_center_y;
 
-    if (can_draw_points != false)
+    if (heading_up_mode != false)
+    {
+        origin_valid = (rt->gps_valid != false);
+        origin_lat_e7 = rt->gps.fix.lat;
+        origin_lon_e7 = rt->gps.fix.lon;
+        aircraft_px = draw_center_x;
+        aircraft_py = draw_center_y;
+    }
+    else
+    {
+        origin_valid = vario_display_get_oldest_trail_point(rt, &origin_lat_e7, &origin_lon_e7);
+        if (origin_valid != false)
+        {
+            float   cur_lat_deg;
+            float   cur_lon_deg;
+            float   org_lat_deg;
+            float   org_lon_deg;
+            float   mean_lat_rad;
+            float   dx_m;
+            float   dy_m;
+
+            cur_lat_deg = ((float)rt->gps.fix.lat) * 1.0e-7f;
+            cur_lon_deg = ((float)rt->gps.fix.lon) * 1.0e-7f;
+            org_lat_deg = ((float)origin_lat_e7) * 1.0e-7f;
+            org_lon_deg = ((float)origin_lon_e7) * 1.0e-7f;
+            mean_lat_rad = vario_display_deg_to_rad((cur_lat_deg + org_lat_deg) * 0.5f);
+            dx_m = (cur_lon_deg - org_lon_deg) * (111319.5f * cosf(mean_lat_rad));
+            dy_m = (cur_lat_deg - org_lat_deg) * 111132.0f;
+            aircraft_px = (int16_t)lroundf((float)draw_center_x + (dx_m / meters_per_px));
+            aircraft_py = (int16_t)lroundf((float)draw_center_y - (dy_m / meters_per_px));
+        }
+    }
+
+    if ((can_draw_points != false) && (origin_valid != false))
     {
         start_index = (uint8_t)((rt->trail_head + VARIO_TRAIL_MAX_POINTS - rt->trail_count) % VARIO_TRAIL_MAX_POINTS);
         for (i = 0u; i < rt->trail_count; ++i)
         {
             uint8_t idx;
-            float   ref_lat_deg;
-            float   cur_lat_deg;
-            float   cur_lon_deg;
+            float   org_lat_deg;
+            float   org_lon_deg;
             float   pt_lat_deg;
             float   pt_lon_deg;
             float   mean_lat_rad;
             float   dx_m;
             float   dy_m;
+            float   plot_dx_m;
+            float   plot_dy_m;
             int16_t px;
             int16_t py;
 
             idx = (uint8_t)((start_index + i) % VARIO_TRAIL_MAX_POINTS);
-
-            ref_lat_deg = ((float)rt->gps.fix.lat) * 1.0e-7f;
-            cur_lat_deg = ref_lat_deg;
-            cur_lon_deg = ((float)rt->gps.fix.lon) * 1.0e-7f;
+            org_lat_deg = ((float)origin_lat_e7) * 1.0e-7f;
+            org_lon_deg = ((float)origin_lon_e7) * 1.0e-7f;
             pt_lat_deg  = ((float)rt->trail_lat_e7[idx]) * 1.0e-7f;
             pt_lon_deg  = ((float)rt->trail_lon_e7[idx]) * 1.0e-7f;
-            mean_lat_rad = vario_display_deg_to_rad((cur_lat_deg + pt_lat_deg) * 0.5f);
+            mean_lat_rad = vario_display_deg_to_rad((org_lat_deg + pt_lat_deg) * 0.5f);
 
-            dx_m = (pt_lon_deg - cur_lon_deg) * (111319.5f * cosf(mean_lat_rad));
-            dy_m = (pt_lat_deg - ref_lat_deg) * 111132.0f;
+            dx_m = (pt_lon_deg - org_lon_deg) * (111319.5f * cosf(mean_lat_rad));
+            dy_m = (pt_lat_deg - org_lat_deg) * 111132.0f;
+            plot_dx_m = dx_m;
+            plot_dy_m = dy_m;
 
-            px = (int16_t)lroundf((float)center_x + (dx_m / meters_per_px));
-            py = (int16_t)lroundf((float)center_y - (dy_m / meters_per_px));
+            if (heading_up_mode != false)
+            {
+                float heading_rad;
+                float rot_x;
+                float rot_y;
+
+                heading_rad = vario_display_deg_to_rad(current_heading_deg);
+                rot_x = (dx_m * cosf(heading_rad)) - (dy_m * sinf(heading_rad));
+                rot_y = (dx_m * sinf(heading_rad)) + (dy_m * cosf(heading_rad));
+                plot_dx_m = rot_x;
+                plot_dy_m = rot_y;
+            }
+
+            px = (int16_t)lroundf((float)draw_center_x + (plot_dx_m / meters_per_px));
+            py = (int16_t)lroundf((float)draw_center_y - (plot_dy_m / meters_per_px));
 
             if ((px < v->x) || (px >= (v->x + v->w)) || (py < v->y) || (py >= (v->y + v->h)))
             {
@@ -4535,12 +4721,26 @@ static void vario_display_draw_trail_background(u8g2_t *u8g2,
         }
     }
 
-    /* ---------------------------------------------------------------------- */
-    /* PAGE 2 trail 은 전체 viewport 를 쓰는 north-up breadcrumb mode 다.      */
-    /* center marker 는 기존 십자/원 대신 현재 heading을 가리키는 화살표로      */
-    /* 바꾼다.                                                                  */
-    /* ---------------------------------------------------------------------- */
-    vario_display_draw_center_heading_arrow(u8g2, v, rt, settings);
+    if ((aircraft_px >= v->x) && (aircraft_px < (v->x + v->w)) &&
+        (aircraft_py >= v->y) && (aircraft_py < (v->y + v->h)))
+    {
+        if (heading_up_mode != false)
+        {
+            vario_display_draw_heading_arrow_at(u8g2,
+                                                aircraft_px,
+                                                aircraft_py,
+                                                0.0f,
+                                                settings);
+        }
+        else
+        {
+            vario_display_draw_heading_arrow_at(u8g2,
+                                                aircraft_px,
+                                                aircraft_py,
+                                                current_heading_deg,
+                                                settings);
+        }
+    }
 }
 
 static void vario_display_draw_compass(u8g2_t *u8g2,
@@ -4755,7 +4955,7 @@ static void vario_display_draw_attitude_indicator(u8g2_t *u8g2,
 
     bank_deg = 0.0f;
     grade_deg = 0.0f;
-    if ((rt->bike.initialized != false) && (rt->bike.imu_valid != false))
+    if ((rt->bike.initialized != false) || (rt->bike.last_update_ms != 0u))
     {
         bank_deg = ((float)rt->bike.banking_angle_deg_x10) * 0.1f;
         grade_deg = ((float)rt->bike.grade_deg_x10) * 0.1f;
@@ -5192,6 +5392,11 @@ void Vario_Display_RenderFlightPage(u8g2_t *u8g2, vario_flight_page_mode_t mode)
 
     vario_display_update_dynamic_metrics(rt, settings);
     vario_display_get_average_values(rt, settings, &avg_vario_mps, &avg_speed_kmh);
+    s_vario_ui_dynamic.fast_average_glide_valid =
+        vario_display_compute_glide_ratio(avg_speed_kmh,
+                                          avg_vario_mps,
+                                          &s_vario_ui_dynamic.fast_average_glide_ratio);
+    vario_display_update_slow_number_caches(rt);
     vario_display_get_bar_display_values(rt,
                                          avg_vario_mps,
                                          avg_speed_kmh,
@@ -5274,17 +5479,31 @@ void Vario_Display_ResetDynamicMetrics(void)
     int32_t wp_lat_e7;
     int32_t wp_lon_e7;
     bool wp_valid;
+    bool trail_heading_up_mode;
 
     nav_mode = s_vario_ui_dynamic.nav_mode;
     wp_lat_e7 = s_vario_ui_dynamic.wp_lat_e7;
     wp_lon_e7 = s_vario_ui_dynamic.wp_lon_e7;
     wp_valid = s_vario_ui_dynamic.wp_valid;
+    trail_heading_up_mode = s_vario_ui_dynamic.trail_heading_up_mode;
 
     memset(&s_vario_ui_dynamic, 0, sizeof(s_vario_ui_dynamic));
     s_vario_ui_dynamic.nav_mode = nav_mode;
     s_vario_ui_dynamic.wp_lat_e7 = wp_lat_e7;
     s_vario_ui_dynamic.wp_lon_e7 = wp_lon_e7;
     s_vario_ui_dynamic.wp_valid = wp_valid;
+    s_vario_ui_dynamic.trail_heading_up_mode = trail_heading_up_mode;
+}
+
+void Vario_Display_ToggleTrailHeadingUpMode(void)
+{
+    s_vario_ui_dynamic.trail_heading_up_mode =
+        (s_vario_ui_dynamic.trail_heading_up_mode == false) ? true : false;
+}
+
+bool Vario_Display_IsTrailHeadingUpMode(void)
+{
+    return (s_vario_ui_dynamic.trail_heading_up_mode != false) ? true : false;
 }
 
 void Vario_Display_DrawRawOverlay(u8g2_t *u8g2, const vario_viewport_t *v)

@@ -2,6 +2,7 @@
 
 #include "button.h"
 #include "Vario_Settings.h"
+#include "Vario_Display_Common.h"
 #include "ui_toast.h"
 
 #include <stdio.h>
@@ -17,34 +18,123 @@ static void vario_button_show_qnh_toast(uint32_t now_ms)
     UI_Toast_Show(toast_text, NULL, 0u, 0u, now_ms, 1200u);
 }
 
+static void vario_button_show_attitude_hint_toast(uint32_t now_ms)
+{
+    UI_Toast_Show("길게 누르면 자세 초기화", NULL, 0u, 0u, now_ms, 1200u);
+}
+
+static void vario_button_show_trail_mode_toast(uint32_t now_ms)
+{
+    if (Vario_Display_IsTrailHeadingUpMode() != false)
+    {
+        UI_Toast_Show("크럼브: 기수고정", NULL, 0u, 0u, now_ms, 1200u);
+    }
+    else
+    {
+        UI_Toast_Show("크럼브: 정북고정", NULL, 0u, 0u, now_ms, 1200u);
+    }
+}
+
+static void vario_button_cycle_trail_scale(void)
+{
+    const vario_settings_t *settings;
+
+    settings = Vario_Settings_Get();
+    if (settings == NULL)
+    {
+        return;
+    }
+
+    if (settings->trail_range_m >= 1000u)
+    {
+        Vario_Settings_AdjustValue(VARIO_VALUE_ITEM_TRAIL_RANGE, -18);
+    }
+    else
+    {
+        Vario_Settings_AdjustValue(VARIO_VALUE_ITEM_TRAIL_RANGE, +1);
+    }
+}
+
 static void vario_button_handle_main_screen(const button_event_t *event, uint32_t now_ms)
 {
+    bool         trainer_enabled;
+    vario_mode_t mode;
+
+    if (event == NULL)
+    {
+        return;
+    }
+
+    trainer_enabled = (Vario_Settings_Get()->trainer_enabled != 0u) ? true : false;
+    mode = Vario_State_GetMode();
+
+    /* ---------------------------------------------------------------------- */
+    /* F1 / F2 는 trainer 여부와 무관하게 main screen 공통 동작을 가진다.      */
+    /* - F1 short : 나침 -> 자세 -> 크럼브 -> 나침 순환                        */
+    /* - F2 short/long : 현재 main page 문맥에 따라 동작                      */
+    /* ---------------------------------------------------------------------- */
+    if ((event->id == BUTTON_ID_1) && (event->type == BUTTON_EVENT_SHORT_PRESS))
+    {
+        Vario_State_SelectNextMainScreen();
+        return;
+    }
+
+    if (event->id == BUTTON_ID_2)
+    {
+        if (event->type == BUTTON_EVENT_SHORT_PRESS)
+        {
+            if (mode == VARIO_MODE_SCREEN_3)
+            {
+                vario_button_show_attitude_hint_toast(now_ms);
+                return;
+            }
+
+            if (mode == VARIO_MODE_SCREEN_2)
+            {
+                vario_button_cycle_trail_scale();
+                Vario_State_RequestRedraw();
+                return;
+            }
+
+            return;
+        }
+
+        if (event->type == BUTTON_EVENT_LONG_PRESS)
+        {
+            if (mode == VARIO_MODE_SCREEN_3)
+            {
+                Vario_State_ResetAttitudeIndicator();
+                return;
+            }
+
+            if (mode == VARIO_MODE_SCREEN_2)
+            {
+                Vario_Display_ToggleTrailHeadingUpMode();
+                vario_button_show_trail_mode_toast(now_ms);
+                Vario_State_RequestRedraw();
+                return;
+            }
+        }
+
+        return;
+    }
+
     if (event->type != BUTTON_EVENT_SHORT_PRESS)
     {
         return;
     }
 
-    if (Vario_Settings_Get()->trainer_enabled != 0u)
+    if (trainer_enabled != false)
     {
         switch (event->id)
         {
-            case BUTTON_ID_1:
+            case BUTTON_ID_3:
                 Vario_State_TrainerAdjustSpeed(+1);
                 Vario_State_RequestRedraw();
                 break;
 
-            case BUTTON_ID_2:
-                Vario_State_TrainerAdjustSpeed(-1);
-                Vario_State_RequestRedraw();
-                break;
-
-            case BUTTON_ID_3:
-                Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_QNH, +1);
-                Vario_State_RequestRedraw();
-                break;
-
             case BUTTON_ID_4:
-                Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_QNH, -1);
+                Vario_State_TrainerAdjustSpeed(-1);
                 Vario_State_RequestRedraw();
                 break;
 
@@ -67,14 +157,6 @@ static void vario_button_handle_main_screen(const button_event_t *event, uint32_
 
     switch (event->id)
     {
-        case BUTTON_ID_1:
-            Vario_State_SetMode(VARIO_MODE_SCREEN_1);
-            break;
-
-        case BUTTON_ID_2:
-            Vario_State_SelectPreviousMainScreen();
-            break;
-
         case BUTTON_ID_3:
             Vario_State_SelectNextMainScreen();
             break;

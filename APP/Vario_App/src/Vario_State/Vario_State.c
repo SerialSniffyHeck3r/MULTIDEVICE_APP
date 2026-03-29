@@ -130,11 +130,11 @@
 #endif
 
 #ifndef VARIO_STATE_TRAINER_DEFAULT_LAT_E7
-#define VARIO_STATE_TRAINER_DEFAULT_LAT_E7 373566000
+#define VARIO_STATE_TRAINER_DEFAULT_LAT_E7 375665000
 #endif
 
 #ifndef VARIO_STATE_TRAINER_DEFAULT_LON_E7
-#define VARIO_STATE_TRAINER_DEFAULT_LON_E7 1269784000
+#define VARIO_STATE_TRAINER_DEFAULT_LON_E7 1269780000
 #endif
 
 #ifndef VARIO_STATE_TRAINER_TRUE_WIND_FROM_DEG
@@ -147,6 +147,10 @@
 
 #ifndef VARIO_STATE_TRAIL_PERIOD_MS
 #define VARIO_STATE_TRAIL_PERIOD_MS 1000u
+#endif
+
+#ifndef VARIO_STATE_BIKE_PRESENT_PERIOD_MS
+#define VARIO_STATE_BIKE_PRESENT_PERIOD_MS 50u
 #endif
 
 static float vario_state_distance_between_ll_deg_e7(int32_t lat1_e7,
@@ -214,6 +218,7 @@ static void    vario_state_trainer_handle_toggle(bool enabled, uint32_t now_ms);
 static float   vario_state_trainer_compute_vario_mps(uint32_t now_ms);
 static void    vario_state_trainer_step(uint32_t now_ms);
 static void    vario_state_trainer_apply_snapshots(uint32_t now_ms);
+static void    vario_state_update_bike_present(uint32_t now_ms);
 
 static struct
 {
@@ -239,6 +244,8 @@ static struct
     /* ---------------------------------------------------------------------- */
     uint32_t last_fast_present_ms;
     uint32_t last_slow_present_ms;
+    uint32_t last_bike_snapshot_ms;
+    uint32_t last_bike_present_ms;
 
     /* ---------------------------------------------------------------------- */
     /* altitude path tracking                                                  */
@@ -562,7 +569,7 @@ static void vario_state_trainer_step(uint32_t now_ms)
     alt_std_cm = (int32_t)lroundf(vario_state_trainer_altitude_from_pressure_m(pressure_hpa_x100, 101325) * 100.0f);
     alt_qnh_cm = (int32_t)lroundf(vario_state_trainer_altitude_from_pressure_m(pressure_hpa_x100, qnh_hpa_x100) * 100.0f);
     alt_gps_cm = (int32_t)lroundf(s_vario_state.trainer.pressure_altitude_m * 100.0f);
-    alt_display_cm = alt_gps_cm;
+    alt_display_cm = alt_qnh_cm;
     vario_cms = (int32_t)lroundf(s_vario_state.trainer.vario_mps * 100.0f);
 
     memset(&s_vario_state.runtime.altitude, 0, sizeof(s_vario_state.runtime.altitude));
@@ -774,6 +781,30 @@ static void vario_state_capture_snapshots(void)
     APP_STATE_CopyAltitudeSnapshot(&s_vario_state.runtime.altitude);
     APP_STATE_CopyBikeSnapshot(&s_vario_state.runtime.bike);
     APP_STATE_CopyClockSnapshot(&s_vario_state.runtime.clock);
+}
+
+static void vario_state_update_bike_present(uint32_t now_ms)
+{
+    uint32_t bike_update_ms;
+
+    bike_update_ms = s_vario_state.runtime.bike.last_update_ms;
+    if (bike_update_ms == 0u)
+    {
+        return;
+    }
+
+    if (bike_update_ms == s_vario_state.last_bike_snapshot_ms)
+    {
+        return;
+    }
+
+    s_vario_state.last_bike_snapshot_ms = bike_update_ms;
+    if ((s_vario_state.last_bike_present_ms == 0u) ||
+        ((now_ms - s_vario_state.last_bike_present_ms) >= VARIO_STATE_BIKE_PRESENT_PERIOD_MS))
+    {
+        s_vario_state.last_bike_present_ms = now_ms;
+        s_vario_state.redraw_request = 1u;
+    }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1910,6 +1941,7 @@ void Vario_State_Task(uint32_t now_ms)
     vario_state_update_display_filter(now_ms);
     vario_state_update_glide_ratio_fast_path();
     vario_state_update_heading(now_ms);
+    vario_state_update_bike_present(now_ms);
     vario_state_update_clock();
     vario_state_update_flight_logic(now_ms);
     vario_state_update_trail();
@@ -2024,16 +2056,16 @@ void Vario_State_SelectPreviousMainScreen(void)
     switch (s_vario_state.previous_main_mode)
     {
         case VARIO_MODE_SCREEN_1:
-            Vario_State_SetMode(VARIO_MODE_SCREEN_3);
+            Vario_State_SetMode(VARIO_MODE_SCREEN_2);
             break;
 
         case VARIO_MODE_SCREEN_2:
-            Vario_State_SetMode(VARIO_MODE_SCREEN_1);
+            Vario_State_SetMode(VARIO_MODE_SCREEN_3);
             break;
 
         case VARIO_MODE_SCREEN_3:
         default:
-            Vario_State_SetMode(VARIO_MODE_SCREEN_2);
+            Vario_State_SetMode(VARIO_MODE_SCREEN_1);
             break;
     }
 }
@@ -2043,14 +2075,14 @@ void Vario_State_SelectNextMainScreen(void)
     switch (s_vario_state.previous_main_mode)
     {
         case VARIO_MODE_SCREEN_1:
-            Vario_State_SetMode(VARIO_MODE_SCREEN_2);
-            break;
-
-        case VARIO_MODE_SCREEN_2:
             Vario_State_SetMode(VARIO_MODE_SCREEN_3);
             break;
 
         case VARIO_MODE_SCREEN_3:
+            Vario_State_SetMode(VARIO_MODE_SCREEN_2);
+            break;
+
+        case VARIO_MODE_SCREEN_2:
         default:
             Vario_State_SetMode(VARIO_MODE_SCREEN_1);
             break;
