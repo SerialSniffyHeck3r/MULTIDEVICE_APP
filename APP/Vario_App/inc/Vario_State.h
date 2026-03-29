@@ -293,6 +293,7 @@ typedef struct
     int32_t  trail_lat_e7[VARIO_TRAIL_MAX_POINTS];
     int32_t  trail_lon_e7[VARIO_TRAIL_MAX_POINTS];
     uint32_t trail_stamp_ms[VARIO_TRAIL_MAX_POINTS];
+    int16_t  trail_vario_cms[VARIO_TRAIL_MAX_POINTS];
 } vario_runtime_t;
 
 void Vario_State_Init(void);

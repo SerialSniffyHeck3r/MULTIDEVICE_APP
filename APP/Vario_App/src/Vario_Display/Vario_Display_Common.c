@@ -290,7 +290,7 @@ static const unsigned char vario_icon_vario_led_down_bits[] = {
 /* APP_STATE snapshot 구조는 그대로 유지하고,                                  */
 /* display 계층이 publish 값(5 Hz)을 다시 누적해서 평균/Top Speed 를 만든다.    */
 /* -------------------------------------------------------------------------- */
-#define VARIO_UI_AVG_BUFFER_SIZE                  96u
+#define VARIO_UI_AVG_BUFFER_SIZE                  640u
 
 /* -------------------------------------------------------------------------- */
 /* 수동 WP 기본값                                                              */
@@ -343,8 +343,8 @@ typedef struct
     uint32_t sample_stamp_ms[VARIO_UI_AVG_BUFFER_SIZE];
     float    vario_mps[VARIO_UI_AVG_BUFFER_SIZE];
     float    speed_kmh[VARIO_UI_AVG_BUFFER_SIZE];
-    uint8_t  head;
-    uint8_t  count;
+    uint16_t head;
+    uint16_t count;
     uint32_t last_publish_ms;
     uint32_t last_flight_start_ms;
     uint32_t last_bar_update_ms;
@@ -1171,15 +1171,15 @@ static void vario_display_format_nav_distance(char *buf,
 
 static bool vario_display_recent_average(const float *samples,
                                          const uint32_t *stamps,
-                                         uint8_t count,
-                                         uint8_t head,
+                                         uint16_t count,
+                                         uint16_t head,
                                          uint32_t latest_stamp_ms,
                                          uint32_t window_ms,
                                          float fallback_value,
                                          float *out_average)
 {
-    uint8_t used;
-    uint8_t i;
+    uint16_t used;
+    uint16_t i;
     float   sum;
 
     if (out_average == NULL)
@@ -1198,11 +1198,11 @@ static bool vario_display_recent_average(const float *samples,
 
     for (i = 0u; i < count; ++i)
     {
-        uint8_t idx;
-        uint8_t reverse_index;
+        uint16_t idx;
+        uint16_t reverse_index;
 
-        reverse_index = (uint8_t)(count - 1u - i);
-        idx = (uint8_t)((head + VARIO_UI_AVG_BUFFER_SIZE - 1u - reverse_index) % VARIO_UI_AVG_BUFFER_SIZE);
+        reverse_index = (uint16_t)(count - 1u - i);
+        idx = (uint16_t)((head + VARIO_UI_AVG_BUFFER_SIZE - 1u - reverse_index) % VARIO_UI_AVG_BUFFER_SIZE);
 
         if ((latest_stamp_ms - stamps[idx]) > window_ms)
         {
@@ -1238,7 +1238,7 @@ static void vario_display_update_dynamic_metrics(const vario_runtime_t *rt,
                                                  const vario_settings_t *settings)
 {
     uint32_t sample_ms;
-    uint8_t  idx;
+    uint16_t idx;
 
     (void)settings;
 
@@ -1254,7 +1254,7 @@ static void vario_display_update_dynamic_metrics(const vario_runtime_t *rt,
         vario_display_reset_sample_buffer_only();
     }
 
-    sample_ms = rt->last_publish_ms;
+    sample_ms = (rt->last_task_ms != 0u) ? rt->last_task_ms : rt->last_publish_ms;
     if ((sample_ms == 0u) || (sample_ms == s_vario_ui_dynamic.last_publish_ms))
     {
         goto update_peak_only;
@@ -1262,10 +1262,10 @@ static void vario_display_update_dynamic_metrics(const vario_runtime_t *rt,
 
     idx = s_vario_ui_dynamic.head;
     s_vario_ui_dynamic.sample_stamp_ms[idx] = sample_ms;
-    s_vario_ui_dynamic.vario_mps[idx] = rt->baro_vario_mps;
-    s_vario_ui_dynamic.speed_kmh[idx] = rt->ground_speed_kmh;
+    s_vario_ui_dynamic.vario_mps[idx] = rt->fast_vario_bar_mps;
+    s_vario_ui_dynamic.speed_kmh[idx] = rt->gs_bar_speed_kmh;
 
-    s_vario_ui_dynamic.head = (uint8_t)((idx + 1u) % VARIO_UI_AVG_BUFFER_SIZE);
+    s_vario_ui_dynamic.head = (uint16_t)((idx + 1u) % VARIO_UI_AVG_BUFFER_SIZE);
     if (s_vario_ui_dynamic.count < VARIO_UI_AVG_BUFFER_SIZE)
     {
         ++s_vario_ui_dynamic.count;
@@ -1276,9 +1276,9 @@ static void vario_display_update_dynamic_metrics(const vario_runtime_t *rt,
 update_peak_only:
     if ((rt->flight_active != false) || (rt->flight_time_s > 0u) || (rt->trail_count > 0u))
     {
-        if (rt->ground_speed_kmh > s_vario_ui_dynamic.top_speed_kmh)
+        if (rt->gs_bar_speed_kmh > s_vario_ui_dynamic.top_speed_kmh)
         {
-            s_vario_ui_dynamic.top_speed_kmh = rt->ground_speed_kmh;
+            s_vario_ui_dynamic.top_speed_kmh = rt->gs_bar_speed_kmh;
         }
     }
 }
@@ -1314,7 +1314,7 @@ static void vario_display_get_average_values(const vario_runtime_t *rt,
                                  s_vario_ui_dynamic.head,
                                  s_vario_ui_dynamic.last_publish_ms,
                                  window_ms,
-                                 rt->baro_vario_mps,
+                                 rt->fast_vario_bar_mps,
                                  out_avg_vario_mps);
 
     vario_display_recent_average(s_vario_ui_dynamic.speed_kmh,
@@ -1323,7 +1323,7 @@ static void vario_display_get_average_values(const vario_runtime_t *rt,
                                  s_vario_ui_dynamic.head,
                                  s_vario_ui_dynamic.last_publish_ms,
                                  window_ms,
-                                 rt->ground_speed_kmh,
+                                 rt->gs_bar_speed_kmh,
                                  out_avg_speed_kmh);
 }
 
@@ -2593,44 +2593,11 @@ static void vario_display_draw_top_left_glide_ratio_gauge(u8g2_t *u8g2,
     if ((rt->glide_ratio_instant_valid != false) && (inst_fill_w > 0))
     {
         inst_bar_top_y = (int16_t)(gauge_top_y + VARIO_UI_TOP_GLD_AVG_BAR_TOP_DY);
-
-        if (inst_fill_w <= 2)
-        {
-            u8g2_DrawBox(u8g2,
-                         gauge_left_x,
-                         inst_bar_top_y,
-                         inst_fill_w,
-                         VARIO_UI_TOP_GLD_AVG_BAR_H);
-        }
-        else
-        {
-            int16_t body_w;
-            int16_t disc_x;
-            int16_t disc_r;
-
-            disc_r = (int16_t)(VARIO_UI_TOP_GLD_AVG_BAR_H / 2);
-            body_w = (int16_t)(inst_fill_w - disc_r);
-            if (body_w < 1)
-            {
-                body_w = 1;
-            }
-
-            u8g2_DrawBox(u8g2,
-                         gauge_left_x,
-                         inst_bar_top_y,
-                         body_w,
-                         VARIO_UI_TOP_GLD_AVG_BAR_H);
-            disc_x = (int16_t)(gauge_left_x + inst_fill_w - disc_r - 1);
-            if (disc_x < gauge_left_x)
-            {
-                disc_x = gauge_left_x;
-            }
-            u8g2_DrawDisc(u8g2,
-                          disc_x,
-                          (int16_t)(inst_bar_top_y + (VARIO_UI_TOP_GLD_AVG_BAR_H / 2)),
-                          (uint8_t)disc_r,
-                          U8G2_DRAW_ALL);
-        }
+        u8g2_DrawBox(u8g2,
+                     gauge_left_x,
+                     inst_bar_top_y,
+                     inst_fill_w,
+                     VARIO_UI_TOP_GLD_AVG_BAR_H);
     }
 
     if (rt->glide_ratio_average_valid != false)
@@ -4435,6 +4402,60 @@ static void vario_display_draw_circle_clipped_segment(u8g2_t *u8g2,
     u8g2_DrawLine(u8g2, x1, y1, x2, y2);
 }
 
+static uint8_t vario_display_get_trail_dot_size_px(const vario_settings_t *settings,
+                                                  int16_t vario_cms)
+{
+    uint8_t base_size_px;
+
+    base_size_px = 1u;
+    if ((settings != NULL) && (settings->trail_dot_size_px != 0u))
+    {
+        base_size_px = settings->trail_dot_size_px;
+    }
+    if (base_size_px > 3u)
+    {
+        base_size_px = 3u;
+    }
+
+    if (vario_cms >= 320)
+    {
+        return (uint8_t)(base_size_px + 2u);
+    }
+    if (vario_cms >= 120)
+    {
+        return (uint8_t)(base_size_px + 1u);
+    }
+    if (vario_cms <= -150)
+    {
+        return 1u;
+    }
+    if (vario_cms <= -40)
+    {
+        return (base_size_px > 1u) ? (uint8_t)(base_size_px - 1u) : 1u;
+    }
+
+    return base_size_px;
+}
+
+static void vario_display_draw_trail_dot(u8g2_t *u8g2,
+                                         int16_t px,
+                                         int16_t py,
+                                         uint8_t size_px)
+{
+    int16_t top_left_x;
+    int16_t top_left_y;
+
+    if (size_px <= 1u)
+    {
+        u8g2_DrawPixel(u8g2, px, py);
+        return;
+    }
+
+    top_left_x = (int16_t)(px - ((int16_t)size_px / 2));
+    top_left_y = (int16_t)(py - ((int16_t)size_px / 2));
+    u8g2_DrawBox(u8g2, top_left_x, top_left_y, size_px, size_px);
+}
+
 static void vario_display_draw_trail_background(u8g2_t *u8g2,
                                                 const vario_viewport_t *v,
                                                 const vario_runtime_t *rt,
@@ -4506,7 +4527,11 @@ static void vario_display_draw_trail_background(u8g2_t *u8g2,
                 continue;
             }
 
-            u8g2_DrawPixel(u8g2, px, py);
+            vario_display_draw_trail_dot(u8g2,
+                                         px,
+                                         py,
+                                         vario_display_get_trail_dot_size_px(settings,
+                                                                             rt->trail_vario_cms[idx]));
         }
     }
 

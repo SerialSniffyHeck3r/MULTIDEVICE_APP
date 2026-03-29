@@ -145,6 +145,10 @@
 #define VARIO_STATE_TRAINER_TRUE_WIND_SPEED_KMH 18.0f
 #endif
 
+#ifndef VARIO_STATE_TRAIL_PERIOD_MS
+#define VARIO_STATE_TRAIL_PERIOD_MS 1000u
+#endif
+
 static float vario_state_distance_between_ll_deg_e7(int32_t lat1_e7,
                                                     int32_t lon1_e7,
                                                     int32_t lat2_e7,
@@ -646,8 +650,26 @@ static void vario_state_trainer_step(uint32_t now_ms)
     s_vario_state.runtime.gps.fix.last_update_ms = now_ms;
     s_vario_state.runtime.gps.fix.last_fix_ms = now_ms;
 
+    s_vario_state.runtime.bike.initialized = true;
+    s_vario_state.runtime.bike.zero_valid = true;
+    s_vario_state.runtime.bike.imu_valid = true;
     s_vario_state.runtime.bike.heading_valid = true;
-    s_vario_state.runtime.bike.heading_deg_x10 = (int16_t)lroundf(vario_state_wrap_360(s_vario_state.trainer.heading_deg) * 10.0f);
+    s_vario_state.runtime.bike.confidence_permille = 950u;
+    s_vario_state.runtime.bike.last_update_ms = now_ms;
+    s_vario_state.runtime.bike.heading_deg_x10 =
+        (int16_t)lroundf(vario_state_wrap_360(s_vario_state.trainer.heading_deg) * 10.0f);
+    s_vario_state.runtime.bike.banking_angle_deg_x10 =
+        (int16_t)lroundf((18.0f * sinf((((float)(now_ms - s_vario_state.trainer.start_ms)) * 0.001f * 0.55f) +
+                                      vario_state_deg_to_rad(s_vario_state.trainer.heading_deg * 0.5f))) * 10.0f);
+    s_vario_state.runtime.bike.grade_deg_x10 =
+        (int16_t)lroundf(vario_state_clampf((s_vario_state.trainer.vario_mps * 5.0f) +
+                                            (2.5f * sinf(((float)(now_ms - s_vario_state.trainer.start_ms)) * 0.001f * 0.35f)),
+                                            -15.0f,
+                                            15.0f) * 10.0f);
+    s_vario_state.runtime.bike.banking_angle_display_deg =
+        (int8_t)lroundf(((float)s_vario_state.runtime.bike.banking_angle_deg_x10) * 0.1f);
+    s_vario_state.runtime.bike.grade_display_deg =
+        (int8_t)lroundf(((float)s_vario_state.runtime.bike.grade_deg_x10) * 0.1f);
 
     (void)settings;
     s_vario_state.trainer.last_update_ms = now_ms;
@@ -1488,7 +1510,7 @@ static float vario_state_distance_between_ll_deg_e7(int32_t lat1_e7,
     return sqrtf((dx_m * dx_m) + (dy_m * dy_m));
 }
 
-static void vario_state_push_trail_point(int32_t lat_e7, int32_t lon_e7, uint32_t stamp_ms)
+static void vario_state_push_trail_point(int32_t lat_e7, int32_t lon_e7, uint32_t stamp_ms, int16_t vario_cms)
 {
     uint8_t write_index;
 
@@ -1496,6 +1518,7 @@ static void vario_state_push_trail_point(int32_t lat_e7, int32_t lon_e7, uint32_
     s_vario_state.runtime.trail_lat_e7[write_index] = lat_e7;
     s_vario_state.runtime.trail_lon_e7[write_index] = lon_e7;
     s_vario_state.runtime.trail_stamp_ms[write_index] = stamp_ms;
+    s_vario_state.runtime.trail_vario_cms[write_index] = vario_cms;
 
     s_vario_state.runtime.trail_head = (uint8_t)((write_index + 1u) % VARIO_TRAIL_MAX_POINTS);
     if (s_vario_state.runtime.trail_count < VARIO_TRAIL_MAX_POINTS)
@@ -1509,14 +1532,11 @@ static void vario_state_push_trail_point(int32_t lat_e7, int32_t lon_e7, uint32_
 
 static void vario_state_update_trail(void)
 {
-    const vario_settings_t *settings;
-    const app_gps_state_t  *gps;
-    uint8_t                 newest_index;
-    float                   dist_m;
-    uint32_t                age_ms;
-    uint32_t                interval_ms;
+    const app_gps_state_t *gps;
+    uint8_t                newest_index;
+    uint32_t               age_ms;
+    int16_t                trail_vario_cms;
 
-    settings = Vario_Settings_Get();
     gps = &s_vario_state.runtime.gps;
 
     if ((gps->fix.valid == false) ||
@@ -1526,34 +1546,30 @@ static void vario_state_update_trail(void)
         return;
     }
 
+    trail_vario_cms = (int16_t)lroundf(vario_state_clampf(s_vario_state.runtime.fast_vario_bar_mps,
+                                                          -9.99f,
+                                                          9.99f) * 100.0f);
+
     if (s_vario_state.runtime.trail_count == 0u)
     {
-        vario_state_push_trail_point(gps->fix.lat, gps->fix.lon, gps->fix.last_update_ms);
+        vario_state_push_trail_point(gps->fix.lat,
+                                     gps->fix.lon,
+                                     gps->fix.last_update_ms,
+                                     trail_vario_cms);
         return;
     }
 
     newest_index = (s_vario_state.runtime.trail_head == 0u) ?
                        (VARIO_TRAIL_MAX_POINTS - 1u) :
                        (uint8_t)(s_vario_state.runtime.trail_head - 1u);
-
-    dist_m = vario_state_distance_between_ll_deg_e7(s_vario_state.runtime.trail_lat_e7[newest_index],
-                                                    s_vario_state.runtime.trail_lon_e7[newest_index],
-                                                    gps->fix.lat,
-                                                    gps->fix.lon);
     age_ms = gps->fix.last_update_ms - s_vario_state.runtime.trail_stamp_ms[newest_index];
-    interval_ms = 5000u;
-    if ((settings != NULL) && (settings->log_interval_seconds != 0u))
-    {
-        interval_ms = (uint32_t)settings->log_interval_seconds * 1000u;
-    }
-    if ((settings != NULL) && (settings->log_enabled == 0u))
-    {
-        interval_ms = 0xFFFFFFFFu;
-    }
 
-    if ((dist_m >= (float)settings->trail_spacing_m) || (age_ms >= interval_ms))
+    if (age_ms >= VARIO_STATE_TRAIL_PERIOD_MS)
     {
-        vario_state_push_trail_point(gps->fix.lat, gps->fix.lon, gps->fix.last_update_ms);
+        vario_state_push_trail_point(gps->fix.lat,
+                                     gps->fix.lon,
+                                     gps->fix.last_update_ms,
+                                     trail_vario_cms);
     }
 }
 
@@ -2160,6 +2176,7 @@ void Vario_State_ResetFlightMetrics(void)
     memset(s_vario_state.runtime.trail_lat_e7, 0, sizeof(s_vario_state.runtime.trail_lat_e7));
     memset(s_vario_state.runtime.trail_lon_e7, 0, sizeof(s_vario_state.runtime.trail_lon_e7));
     memset(s_vario_state.runtime.trail_stamp_ms, 0, sizeof(s_vario_state.runtime.trail_stamp_ms));
+    memset(s_vario_state.runtime.trail_vario_cms, 0, sizeof(s_vario_state.runtime.trail_vario_cms));
     memset(s_vario_state.runtime.history_altitude_m, 0, sizeof(s_vario_state.runtime.history_altitude_m));
     memset(s_vario_state.runtime.history_vario_mps, 0, sizeof(s_vario_state.runtime.history_vario_mps));
     memset(s_vario_state.runtime.history_speed_kmh, 0, sizeof(s_vario_state.runtime.history_speed_kmh));
