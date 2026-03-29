@@ -283,9 +283,27 @@ static void vario_task_apply_platform_settings(void)
     /* ------------------------------------------------------------------ */
     damping_norm = vario_task_damping_norm_from_settings(settings);
     audio_response_norm = vario_task_audio_response_norm_from_settings(settings);
-    fast_tau_ms = vario_task_lerp_u16(110u, 30u, damping_norm);
-    baro_vario_tau_ms = vario_task_lerp_u16(50u, 15u, damping_norm);
-    baro_vario_noise_cms = vario_task_lerp_u16(28u, 12u, damping_norm);
+
+    /* ------------------------------------------------------------------ */
+    /*  commercial-grade accuracy 우선 low-level mirror                    */
+    /*                                                                    */
+    /*  이전 aggressive patch는 "조금만 움직여도 바로 반응" 쪽에는 좋았지만, */
+    /*  실제 pressure / IMU 입력 품질이 아직 완벽히 정돈되지 않은 하드웨어에 */
+    /*  그대로 얹으면 near-zero 구간 false climb / false sink 를 키웠다.    */
+    /*                                                                    */
+    /*  여기서는 상용기 감각을 목표로                                      */
+    /*  - fast tau       : 충분히 빠르되 완전 hair-trigger 는 아니게        */
+    /*  - baro vario tau : regression slope 후단을 조금 더 정직하게          */
+    /*  - baro vario R   : KF가 baro velocity를 믿되, 과신하지는 않게        */
+    /*  로 되돌린다.                                                        */
+    /*                                                                    */
+    /*  중요                                                                 */
+    /*  이 값들은 Vario_App 전용 runtime mirror 다.                         */
+    /*  Motor_App / bike dynamics 쪽 shared driver 설정은 건드리지 않는다.   */
+    /* ------------------------------------------------------------------ */
+    fast_tau_ms = vario_task_lerp_u16(140u, 55u, damping_norm);
+    baro_vario_tau_ms = vario_task_lerp_u16(70u, 25u, damping_norm);
+    baro_vario_noise_cms = vario_task_lerp_u16(45u, 20u, damping_norm);
 
     audio_deadband_cms = (uint16_t)((settings->climb_tone_threshold_cms > 0) ?
                                     settings->climb_tone_threshold_cms :
@@ -325,6 +343,42 @@ static void vario_task_apply_platform_settings(void)
     if (platform_settings.altitude.pressure_correction_hpa_x100 != settings->pressure_correction_hpa_x100)
     {
         platform_settings.altitude.pressure_correction_hpa_x100 = settings->pressure_correction_hpa_x100;
+        platform_settings_dirty = 1u;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  MPU full-scale mirror 보정                                          */
+    /*                                                                    */
+    /*  GY86_IMU driver는 현재 MPU6050를                                   */
+    /*  - gyro  : +/-500 dps                                               */
+    /*  - accel : +/-4 g                                                   */
+    /*  로 init 한다.                                                      */
+    /*                                                                    */
+    /*  그런데 altitude default snapshot 쪽에                              */
+    /*  - 16384 LSB/g   (+/-2g 기준)                                       */
+    /*  - 131   LSB/dps (+/-250dps 기준)                                   */
+    /*  가 남아 있으면, APP_ALTITUDE의 trust / bias learn / rest detect 가  */
+    /*  실제 센서 스케일과 다르게 계산된다.                                */
+    /*                                                                    */
+    /*  특히 accel norm 이 실제 1g여도 소프트웨어는 0.5g 근처로 해석할 수   */
+    /*  있어서 attitude trust 가 무너지고, 그 결과 sensor-fusion fast       */
+    /*  vario와 ZUPT 판단이 함께 흔들린다.                                 */
+    /*                                                                    */
+    /*  그래서 Vario_App runtime mirror 에서는 shared driver와 일치하도록   */
+    /*  스케일을 강제로 맞춘다.                                            */
+    /*                                                                    */
+    /*  참고: gyro는 실제 65.5 LSB/dps 이지만 설정 구조체가 정수형이므로     */
+    /*  가장 가까운 66으로 둔다.                                           */
+    /* ------------------------------------------------------------------ */
+    if (platform_settings.altitude.imu_accel_lsb_per_g != 8192u)
+    {
+        platform_settings.altitude.imu_accel_lsb_per_g = 8192u;
+        platform_settings_dirty = 1u;
+    }
+
+    if (platform_settings.altitude.imu_gyro_lsb_per_dps != 66u)
+    {
+        platform_settings.altitude.imu_gyro_lsb_per_dps = 66u;
         platform_settings_dirty = 1u;
     }
 
