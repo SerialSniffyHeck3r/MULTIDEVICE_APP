@@ -5,6 +5,8 @@
 #include "ui_bottombar.h"
 #include "ui_popup.h"
 #include "ui_toast.h"
+#include "ui_menu.h"
+#include "ui_confirm.h"
 #include "ui_boot.h"
 #include "ui_screen_test.h"
 #include "ui_screen_engine_oil.h"
@@ -92,6 +94,8 @@ typedef struct
     bool draw_bottombar;
     bool draw_popup;
     bool draw_toast;
+    bool draw_menu;
+    bool draw_confirm;
 } ui_engine_compose_plan_t;
 
 /* -------------------------------------------------------------------------- */
@@ -179,6 +183,8 @@ static void ui_engine_activate_vario_screen(void)
     UI_ScreenVario_OnEnter();
     UI_Toast_Hide();
     UI_Popup_Hide();
+    UI_Menu_Hide();
+    UI_Confirm_Hide();
     s_pressed_mask = Button_GetPressedMask();
     ui_engine_reset_debug_f1_hold();
     s_force_redraw = 1u;
@@ -200,6 +206,10 @@ static void ui_engine_activate_test_screen(void)
 
     s_current_screen = UI_SCREEN_TEST;
     UI_ScreenTest_OnEnter();
+    UI_Toast_Hide();
+    UI_Popup_Hide();
+    UI_Menu_Hide();
+    UI_Confirm_Hide();
     s_pressed_mask = Button_GetPressedMask();
     ui_engine_reset_debug_f1_hold();
     s_force_redraw = 1u;
@@ -223,6 +233,8 @@ static void ui_engine_activate_debug_legacy_screen(void)
     ui_engine_reset_debug_f1_hold();
     UI_Toast_Hide();
     UI_Popup_Hide();
+    UI_Menu_Hide();
+    UI_Confirm_Hide();
     s_force_redraw = 1u;
 }
 
@@ -242,6 +254,8 @@ static void ui_engine_activate_engine_oil_screen(void)
     UI_ScreenEngineOil_OnEnter();
     UI_Toast_Hide();
     UI_Popup_Hide();
+    UI_Menu_Hide();
+    UI_Confirm_Hide();
     s_pressed_mask = Button_GetPressedMask();
     s_force_redraw = 1u;
 }
@@ -268,6 +282,8 @@ static void ui_engine_activate_gps_screen(ui_screen_id_t return_screen)
     UI_ScreenGps_OnEnter();
     UI_Toast_Hide();
     UI_Popup_Hide();
+    UI_Menu_Hide();
+    UI_Confirm_Hide();
     s_pressed_mask = Button_GetPressedMask();
     s_force_redraw = 1u;
 }
@@ -339,6 +355,8 @@ void UI_Engine_Init(void)
     UI_BottomBar_Init();
     UI_Popup_Init();
     UI_Toast_Init();
+    UI_Menu_Init();
+    UI_Confirm_Init();
     UI_DebugLegacy_Init();
 
     s_record_state = UI_RECORD_STATE_STOP;
@@ -624,11 +642,15 @@ static void ui_engine_handle_engine_oil_screen_action(ui_screen_engine_oil_actio
     case UI_SCREEN_ENGINE_OIL_ACTION_BACK_TO_TEST:
         UI_Toast_Hide();
         UI_Popup_Hide();
+        UI_Menu_Hide();
+        UI_Confirm_Hide();
         ui_engine_activate_test_screen();
         break;
 
     case UI_SCREEN_ENGINE_OIL_ACTION_SAVE_AND_BACK_TO_TEST:
         UI_Popup_Hide();
+        UI_Menu_Hide();
+        UI_Confirm_Hide();
         ui_engine_activate_test_screen();
         break;
 
@@ -648,6 +670,8 @@ static void ui_engine_handle_gps_screen_action(ui_screen_gps_action_t action)
     case UI_SCREEN_GPS_ACTION_BACK_TO_PREVIOUS:
         UI_Toast_Hide();
         UI_Popup_Hide();
+        UI_Menu_Hide();
+        UI_Confirm_Hide();
         ui_engine_return_from_gps();
         break;
 
@@ -685,6 +709,8 @@ static void ui_engine_update_debug_f1_hold_return(uint32_t now_ms)
         s_debug_f1_hold_latched = 1u;
         UI_Toast_Hide();
         UI_Popup_Hide();
+        UI_Menu_Hide();
+        UI_Confirm_Hide();
         ui_engine_activate_test_screen();
     }
 }
@@ -801,6 +827,8 @@ void UI_Engine_Task(uint32_t now_ms)
     ui_statusbar_model_t status_model;
     bool popup_visible_before;
     bool toast_visible_before;
+    bool menu_visible_before;
+    bool confirm_visible_before;
 
     switch (s_current_screen)
     {
@@ -832,6 +860,8 @@ void UI_Engine_Task(uint32_t now_ms)
 
     popup_visible_before = UI_Popup_IsVisible();
     toast_visible_before = UI_Toast_IsVisible();
+    menu_visible_before = UI_Menu_IsVisible();
+    confirm_visible_before = UI_Confirm_IsVisible();
 
     UI_Popup_Task(now_ms);
     UI_Toast_Task(now_ms);
@@ -841,6 +871,14 @@ void UI_Engine_Task(uint32_t now_ms)
         s_force_redraw = 1u;
     }
     if (toast_visible_before != UI_Toast_IsVisible())
+    {
+        s_force_redraw = 1u;
+    }
+    if (menu_visible_before != UI_Menu_IsVisible())
+    {
+        s_force_redraw = 1u;
+    }
+    if (confirm_visible_before != UI_Confirm_IsVisible())
     {
         s_force_redraw = 1u;
     }
@@ -970,6 +1008,13 @@ static void ui_engine_build_compose_plan(uint32_t now_ms, ui_engine_compose_plan
 
     out_plan->draw_popup = UI_Popup_IsVisible();
     out_plan->draw_toast = UI_Toast_IsVisible();
+    out_plan->draw_menu = UI_Menu_IsVisible();
+    out_plan->draw_confirm = UI_Confirm_IsVisible();
+
+    if ((out_plan->draw_menu != false) || (out_plan->draw_confirm != false))
+    {
+        out_plan->draw_bottombar = true;
+    }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1141,9 +1186,8 @@ static void ui_engine_draw_main_viewport(u8g2_t *u8g2, const ui_rect_t *viewport
 /*   3) bottom bar                                                             */
 /*   4) toast                                                                  */
 /*   5) popup                                                                  */
-/*                                                                            */
-/* 이 순서를 유지해야 overlay bottom bar / toast / popup 겹침 규칙이 깨지지      */
-/* 않는다.                                                                      */
+/*   6) menu                                                                   */
+/*   7) confirm                                                                */
 /* -------------------------------------------------------------------------- */
 static void ui_engine_draw_root(u8g2_t *u8g2, uint32_t now_ms)
 {
@@ -1180,5 +1224,15 @@ static void ui_engine_draw_root(u8g2_t *u8g2, uint32_t now_ms)
     if (plan.draw_popup != false)
     {
         UI_Popup_Draw(u8g2);
+    }
+
+    if (plan.draw_menu != false)
+    {
+        UI_Menu_Draw(u8g2);
+    }
+
+    if (plan.draw_confirm != false)
+    {
+        UI_Confirm_Draw(u8g2);
     }
 }

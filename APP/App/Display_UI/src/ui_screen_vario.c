@@ -7,6 +7,8 @@
 #include "Vario_Display.h"
 #include "Vario_Display_Common.h"
 #include "Vario_State.h"
+#include "ui_menu.h"
+#include "ui_confirm.h"
 
 #include <string.h>
 
@@ -181,7 +183,9 @@ void UI_ScreenVario_Task(uint32_t now_ms)
     /* draw 시점에도 다시 동일한 내용을 넣으므로,                                */
     /* 화면 갱신 타이밍이 약간 바뀌더라도 stale label 이 남지 않는다.            */
     /* ---------------------------------------------------------------------- */
-    if (ui_screen_vario_mode_uses_fixed_bars(mode))
+    if (ui_screen_vario_mode_uses_fixed_bars(mode) ||
+        (UI_Menu_IsVisible() != false) ||
+        (UI_Confirm_IsVisible() != false))
     {
         ui_screen_vario_configure_bottom_bar(mode);
     }
@@ -225,7 +229,9 @@ void UI_ScreenVario_Draw(u8g2_t *u8g2, const ui_rect_t *viewport)
     /*   UI_BottomBar_Draw(u8g2, pressed_mask)                                  */
     /* 가 이 함수 뒤에서 수행한다.                                              */
     /* ---------------------------------------------------------------------- */
-    if (ui_screen_vario_mode_uses_fixed_bars(mode))
+    if (ui_screen_vario_mode_uses_fixed_bars(mode) ||
+        (UI_Menu_IsVisible() != false) ||
+        (UI_Confirm_IsVisible() != false))
     {
         ui_screen_vario_configure_bottom_bar(mode);
     }
