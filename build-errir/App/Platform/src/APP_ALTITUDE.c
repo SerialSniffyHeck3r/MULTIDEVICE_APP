@@ -144,6 +144,55 @@
 #define APP_ALTITUDE_BARO_VARIO_CLIP_CMS 4000.0f
 #endif
 
+/* -------------------------------------------------------------------------- */
+/*  fast trigger / ZUPT / IMU attack assist tuning                            */
+/* -------------------------------------------------------------------------- */
+#ifndef APP_ALTITUDE_FAST_VARIO_ATTACK_TAU_MS
+#define APP_ALTITUDE_FAST_VARIO_ATTACK_TAU_MS 18u
+#endif
+#ifndef APP_ALTITUDE_FAST_TRIGGER_BLEND_PERMILLE
+#define APP_ALTITUDE_FAST_TRIGGER_BLEND_PERMILLE 780u
+#endif
+#ifndef APP_ALTITUDE_FAST_TRIGGER_RAW_WEIGHT_QUIET_PERMILLE
+#define APP_ALTITUDE_FAST_TRIGGER_RAW_WEIGHT_QUIET_PERMILLE 360u
+#endif
+#ifndef APP_ALTITUDE_FAST_TRIGGER_RAW_WEIGHT_NOISY_PERMILLE
+#define APP_ALTITUDE_FAST_TRIGGER_RAW_WEIGHT_NOISY_PERMILLE 120u
+#endif
+#ifndef APP_ALTITUDE_FAST_TRIGGER_RESIDUAL_FULL_CM
+#define APP_ALTITUDE_FAST_TRIGGER_RESIDUAL_FULL_CM 45.0f
+#endif
+#ifndef APP_ALTITUDE_FAST_TRIGGER_SIGN_HOLD_CMS
+#define APP_ALTITUDE_FAST_TRIGGER_SIGN_HOLD_CMS 18.0f
+#endif
+#ifndef APP_ALTITUDE_FAST_TRIGGER_CLIP_CMS
+#define APP_ALTITUDE_FAST_TRIGGER_CLIP_CMS 1200.0f
+#endif
+#ifndef APP_ALTITUDE_ZUPT_ENTER_VARIO_CMS
+#define APP_ALTITUDE_ZUPT_ENTER_VARIO_CMS 5.0f
+#endif
+#ifndef APP_ALTITUDE_ZUPT_EXIT_VARIO_CMS
+#define APP_ALTITUDE_ZUPT_EXIT_VARIO_CMS 18.0f
+#endif
+#ifndef APP_ALTITUDE_ZUPT_HOLD_MS
+#define APP_ALTITUDE_ZUPT_HOLD_MS 450u
+#endif
+#ifndef APP_ALTITUDE_IMU_ATTACK_LEAK_TAU_MS
+#define APP_ALTITUDE_IMU_ATTACK_LEAK_TAU_MS 180u
+#endif
+#ifndef APP_ALTITUDE_IMU_ATTACK_GAIN
+#define APP_ALTITUDE_IMU_ATTACK_GAIN 0.90f
+#endif
+#ifndef APP_ALTITUDE_IMU_ATTACK_DEADBAND_CMS
+#define APP_ALTITUDE_IMU_ATTACK_DEADBAND_CMS 6.0f
+#endif
+#ifndef APP_ALTITUDE_IMU_ATTACK_MIN_BARO_TRUST_CMS
+#define APP_ALTITUDE_IMU_ATTACK_MIN_BARO_TRUST_CMS 8.0f
+#endif
+#ifndef APP_ALTITUDE_IMU_ATTACK_CLIP_CMS
+#define APP_ALTITUDE_IMU_ATTACK_CLIP_CMS 120.0f
+#endif
+
 #ifndef APP_ALTITUDE_IMU_ACCEL_NORM_REF_MG
 #define APP_ALTITUDE_IMU_ACCEL_NORM_REF_MG 1000.0f
 #endif
@@ -314,26 +363,38 @@
 #endif
 
 #ifndef APP_ALTITUDE_BARO_VARIO_NOISE_SPREAD_GAIN
-#define APP_ALTITUDE_BARO_VARIO_NOISE_SPREAD_GAIN 0.45f
+#define APP_ALTITUDE_BARO_VARIO_NOISE_SPREAD_GAIN 0.18f
 #endif
 
 #ifndef APP_ALTITUDE_BARO_VARIO_NOISE_RESIDUAL_GAIN
-#define APP_ALTITUDE_BARO_VARIO_NOISE_RESIDUAL_GAIN 0.12f
+#define APP_ALTITUDE_BARO_VARIO_NOISE_RESIDUAL_GAIN 0.08f
 #endif
 
 #ifndef APP_ALTITUDE_BARO_VARIO_NOISE_MAX_SCALE
-#define APP_ALTITUDE_BARO_VARIO_NOISE_MAX_SCALE 5.0f
+#define APP_ALTITUDE_BARO_VARIO_NOISE_MAX_SCALE 4.0f
 #endif
 
 /* -------------------------------------------------------------------------- */
 /*  regression-based baro velocity measurement                                */
 /*                                                                            */
 /*  direct diff 대신 짧은 시간창 선형회귀 slope를 velocity measurement로 쓴다. */
-/*  pressure median-3 + pressure LPF 다음 단계에서 altitude를 push 하고,       */
-/*  최근 11개 샘플(대략 0.2초 남짓) 위에서 slope를 구한다.                     */
+/*                                                                            */
+/*  중요                                                                     */
+/*  - altitude 표시는 "정직하지만 차분한" 쪽                                 */
+/*  - vario 반응은 "빠르지만 false tone 는 적게" 쪽                          */
+/*  로 동시에 가져가려면, pressure source 를 한 갈래로만 쓰는 구조보다        */
+/*  altitude용 / vario용 pressure 가지를 분리하는 편이 훨씬 낫다.             */
+/*                                                                            */
+/*  따라서 이 파일은                                                          */
+/*  1) altitude용 slow pressure LPF                                           */
+/*  2) vario용 fast pressure LPF                                              */
+/*  를 따로 유지하고, regression slope는 vario 전용 가지에서 계산한다.        */
+/*                                                                            */
+/*  창 길이도 예전 aggressive patch(7 samples, 0.07s)보다는 조금 길게 잡아    */
+/*  commercial-grade 쪽의 정확도 / repeatability 를 우선한다.                 */
 /* -------------------------------------------------------------------------- */
 #ifndef APP_ALTITUDE_BARO_VARIO_FIT_WINDOW
-#define APP_ALTITUDE_BARO_VARIO_FIT_WINDOW 11u
+#define APP_ALTITUDE_BARO_VARIO_FIT_WINDOW 8u
 #endif
 
 #ifndef APP_ALTITUDE_BARO_VARIO_MIN_SAMPLES
@@ -341,19 +402,23 @@
 #endif
 
 #ifndef APP_ALTITUDE_BARO_VARIO_MIN_SPAN_S
-#define APP_ALTITUDE_BARO_VARIO_MIN_SPAN_S 0.12f
+#define APP_ALTITUDE_BARO_VARIO_MIN_SPAN_S 0.08f
 #endif
 
 #ifndef APP_ALTITUDE_BARO_VARIO_NOISE_FIT_RMSE_GAIN
-#define APP_ALTITUDE_BARO_VARIO_NOISE_FIT_RMSE_GAIN 1.25f
+#define APP_ALTITUDE_BARO_VARIO_NOISE_FIT_RMSE_GAIN 0.95f
 #endif
 
 #ifndef APP_ALTITUDE_BARO_VELOCITY_REST_NOISE_SCALE
-#define APP_ALTITUDE_BARO_VELOCITY_REST_NOISE_SCALE 2.6f
+#define APP_ALTITUDE_BARO_VELOCITY_REST_NOISE_SCALE 1.45f
 #endif
 
 #ifndef APP_ALTITUDE_BARO_VELOCITY_NEAR_ZERO_NOISE_SCALE
-#define APP_ALTITUDE_BARO_VELOCITY_NEAR_ZERO_NOISE_SCALE 1.35f
+#define APP_ALTITUDE_BARO_VELOCITY_NEAR_ZERO_NOISE_SCALE 1.10f
+#endif
+
+#ifndef APP_ALTITUDE_VARIO_PRESSURE_TAU_MS
+#define APP_ALTITUDE_VARIO_PRESSURE_TAU_MS 20u
 #endif
 
 #ifndef APP_ALTITUDE_AUDIO_OVERRIDE_TIMEOUT_MS
@@ -452,8 +517,9 @@ typedef struct
     /*  Pressure / altitude intermediate states                                */
     /* ---------------------------------------------------------------------- */
     float pressure_prefilt_hpa;        /* median-3 선별 후 pressure               */
-    float pressure_filt_hpa;           /* 1차 LPF pressure                        */
-    float pressure_residual_hpa;       /* prefilt - filt residual                 */
+    float pressure_filt_hpa;           /* altitude / display용 slow LPF pressure  */
+    float pressure_vario_filt_hpa;     /* vario 전용 fast LPF pressure            */
+    float pressure_residual_hpa;       /* prefilt - slow filt residual            */
     float pressure_hist_hpa[3];        /* median-3 원본 history                   */
     uint8_t pressure_hist_count;       /* history 유효 개수                       */
     uint8_t pressure_hist_index;       /* history ring index                      */
@@ -479,6 +545,18 @@ typedef struct
     float display_alt_follow_cm;       /* stage-2 presentation LPF                */
     float display_alt_present_cm;      /* 최종 UI altitude                        */
     bool  display_output_valid;        /* 표시 상태 초기화 완료 여부              */
+
+    /* ---------------------------------------------------------------------- */
+    /*  Alt1 baro-only display spike gate                                     */
+    /*                                                                        */
+    /*  Alt1은 법적 primary altitude 이므로 fused/GPS로 바꾸지 않는다.        */
+    /*  대신 baro/QNH path에 순간적인 비현실 step 이 들어오면                 */
+    /*  마지막으로 accept 된 barometric target 에 일시적으로 고정한다.        */
+    /* ---------------------------------------------------------------------- */
+    float display_baro_gate_ref_cm;    /* 마지막 accept 된 Alt1 baro target       */
+    bool  display_baro_gate_valid;     /* gate reference 초기화 여부              */
+    int32_t display_gate_qnh_hpa_x100; /* gate reference가 묶인 QNH basis         */
+    int32_t display_gate_pressure_correction_hpa_x100; /* static corr basis   */
 
     /* ---------------------------------------------------------------------- */
     /*  baro velocity measurement line                                         */
@@ -519,6 +597,7 @@ typedef struct
     float imu_vibration_rms_mg;        /* 고주파 진동 RMS, mg                     */
     float imu_gyro_rms_dps;            /* 고주파 각속도 envelope, dps             */
     float imu_vario_disagree_lp_cms;   /* IMU vs baro/no-IMU vario mismatch LPF   */
+    float imu_attack_velocity_cms;    /* onset 전용 단기 IMU velocity memory     */
     float imu_temp_c;                  /* 최근 MPU 온도, degC                     */
     float imu_temp_ref_c;              /* temp compensation 기준 온도, degC       */
     bool  imu_temp_ref_valid;          /* temp reference 유효 여부                */
@@ -568,6 +647,8 @@ typedef struct
     float vario_slow_imu_cms;          /* IMU slow display vario                  */
 
     bool  zupt_active;                 /* 이번 task에서 ZUPT pseudo-update 적용   */
+    bool  core_rest_latched;           /* hysteresis+dwell 통과 후 ZUPT latch     */
+    uint32_t core_rest_candidate_since_ms; /* ZUPT entry dwell timer               */
 
     struct
     {
@@ -808,6 +889,159 @@ static float APP_ALTITUDE_LpfUpdate(float current, float target, uint32_t tau_ms
 static float APP_ALTITUDE_Clamp01F(float value)
 {
     return APP_ALTITUDE_ClampF(value, 0.0f, 1.0f);
+}
+
+static float APP_ALTITUDE_LerpF(float start_value, float end_value, float t);
+
+static bool APP_ALTITUDE_HasOppositeSignF(float a, float b)
+{
+    return (((a > 0.0f) && (b < 0.0f)) ||
+            ((a < 0.0f) && (b > 0.0f)));
+}
+
+static float APP_ALTITUDE_UpdateAsymmetricVario(float current_cms,
+                                                float target_cms,
+                                                uint32_t attack_tau_ms,
+                                                uint32_t release_tau_ms,
+                                                float dt_s)
+{
+    float current_abs_cms;
+    float target_abs_cms;
+    bool sign_flip;
+    bool magnitude_growing;
+    uint32_t tau_ms;
+
+    current_abs_cms = fabsf(current_cms);
+    target_abs_cms = fabsf(target_cms);
+    sign_flip = APP_ALTITUDE_HasOppositeSignF(current_cms, target_cms);
+    magnitude_growing = (target_abs_cms > (current_abs_cms + 1.0f));
+
+    /* ------------------------------------------------------------------ */
+    /*  같은 부호에서 |target|이 커지는 구간은 attack tau 를 쓴다.          */
+    /*  즉, 상승 시작 / 하강 시작의 첫 반응을 빠르게 만든다.                */
+    /*                                                                      */
+    /*  반대로 near-zero 부호 뒤집힘이 아주 작게 일어나는 구간은            */
+    /*  release tau 로 눌러 sign chatter를 줄인다.                          */
+    /* ------------------------------------------------------------------ */
+    if ((sign_flip != false) && (target_abs_cms <= APP_ALTITUDE_FAST_TRIGGER_SIGN_HOLD_CMS))
+    {
+        tau_ms = release_tau_ms;
+    }
+    else if ((magnitude_growing != false) ||
+             ((sign_flip != false) && (target_abs_cms >= current_abs_cms)))
+    {
+        tau_ms = attack_tau_ms;
+    }
+    else
+    {
+        tau_ms = release_tau_ms;
+    }
+
+    return APP_ALTITUDE_LpfUpdate(current_cms,
+                                  target_cms,
+                                  tau_ms,
+                                  dt_s);
+}
+
+static float APP_ALTITUDE_ComputeFastTriggerTargetCms(float truth_velocity_cms)
+{
+    float residual_lp_cm;
+    float quiet_factor;
+    float raw_weight;
+    float fast_baro_cms;
+    float blend;
+
+    residual_lp_cm = fabsf(s_altitude_runtime.baro_residual_lp_cm);
+    quiet_factor = 1.0f - APP_ALTITUDE_Clamp01F(residual_lp_cm /
+                                                APP_ALTITUDE_FAST_TRIGGER_RESIDUAL_FULL_CM);
+
+    /* ------------------------------------------------------------------ */
+    /*  quiet_factor가 높을수록                                             */
+    /*  - raw slope를 조금 더 섞어서 onset을 빠르게 보고                    */
+    /*  - truth backbone에서 fast trigger 쪽으로 더 세게 당긴다.            */
+    /*                                                                      */
+    /*  residual envelope가 이미 큰 경우에는                                 */
+    /*  raw weight와 blend를 동시에 낮춰 false beep를 줄인다.               */
+    /* ------------------------------------------------------------------ */
+    raw_weight = APP_ALTITUDE_LerpF(((float)APP_ALTITUDE_FAST_TRIGGER_RAW_WEIGHT_NOISY_PERMILLE) * 0.001f,
+                                    ((float)APP_ALTITUDE_FAST_TRIGGER_RAW_WEIGHT_QUIET_PERMILLE) * 0.001f,
+                                    quiet_factor);
+
+    if ((APP_ALTITUDE_HasOppositeSignF(s_altitude_runtime.baro_vario_raw_cms,
+                                       s_altitude_runtime.baro_vario_filt_cms) != false) &&
+        (fabsf(s_altitude_runtime.baro_vario_raw_cms) <= APP_ALTITUDE_FAST_TRIGGER_SIGN_HOLD_CMS))
+    {
+        raw_weight = 0.0f;
+    }
+
+    fast_baro_cms = ((1.0f - raw_weight) * s_altitude_runtime.baro_vario_filt_cms) +
+                    (raw_weight * s_altitude_runtime.baro_vario_raw_cms);
+    fast_baro_cms = APP_ALTITUDE_ClampF(fast_baro_cms,
+                                        -APP_ALTITUDE_FAST_TRIGGER_CLIP_CMS,
+                                        APP_ALTITUDE_FAST_TRIGGER_CLIP_CMS);
+
+    blend = ((float)APP_ALTITUDE_FAST_TRIGGER_BLEND_PERMILLE) * 0.001f;
+    blend *= APP_ALTITUDE_LerpF(0.55f, 1.00f, quiet_factor);
+    blend = APP_ALTITUDE_Clamp01F(blend);
+
+    return truth_velocity_cms + (blend * (fast_baro_cms - truth_velocity_cms));
+}
+
+static float APP_ALTITUDE_UpdateImuAttackAssistCms(bool assist_enabled,
+                                                   float imu_vertical_cms2,
+                                                   float baro_fast_target_cms,
+                                                   float dt_s)
+{
+    float tau_s;
+    float predict_weight;
+    float assist_cms;
+
+    tau_s = APP_ALTITUDE_ClampF(((float)APP_ALTITUDE_IMU_ATTACK_LEAK_TAU_MS) * 0.001f,
+                                0.040f,
+                                2.000f);
+
+    predict_weight = APP_ALTITUDE_ClampF(s_altitude_runtime.imu_predict_weight_permille * 0.001f,
+                                         0.0f,
+                                         1.0f);
+
+    if ((assist_enabled == false) || (predict_weight <= 0.05f))
+    {
+        s_altitude_runtime.imu_attack_velocity_cms =
+            APP_ALTITUDE_LpfUpdate(s_altitude_runtime.imu_attack_velocity_cms,
+                                   0.0f,
+                                   APP_ALTITUDE_IMU_ATTACK_LEAK_TAU_MS,
+                                   dt_s);
+        return 0.0f;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  IMU는 장기 velocity truth를 대신하지 않는다.                         */
+    /*  여기서는 짧은 leak integrator로만 써서                               */
+    /*  움직임 시작 순간의 attack을 살짝 앞당긴다.                          */
+    /* ------------------------------------------------------------------ */
+    s_altitude_runtime.imu_attack_velocity_cms +=
+        ((((imu_vertical_cms2 * APP_ALTITUDE_IMU_ATTACK_GAIN) * predict_weight)) -
+         (s_altitude_runtime.imu_attack_velocity_cms / tau_s)) * dt_s;
+
+    s_altitude_runtime.imu_attack_velocity_cms =
+        APP_ALTITUDE_ClampF(s_altitude_runtime.imu_attack_velocity_cms,
+                            -APP_ALTITUDE_IMU_ATTACK_CLIP_CMS,
+                            APP_ALTITUDE_IMU_ATTACK_CLIP_CMS);
+
+    assist_cms = s_altitude_runtime.imu_attack_velocity_cms;
+
+    if (fabsf(assist_cms) < APP_ALTITUDE_IMU_ATTACK_DEADBAND_CMS)
+    {
+        assist_cms = 0.0f;
+    }
+
+    if ((APP_ALTITUDE_HasOppositeSignF(assist_cms, baro_fast_target_cms) != false) &&
+        (fabsf(baro_fast_target_cms) >= APP_ALTITUDE_IMU_ATTACK_MIN_BARO_TRUST_CMS))
+    {
+        assist_cms *= 0.20f;
+    }
+
+    return assist_cms;
 }
 
 static float APP_ALTITUDE_LerpF(float start_value, float end_value, float t)
@@ -1502,39 +1736,42 @@ static float APP_ALTITUDE_ComputeAdaptiveBaroNoiseCm(const app_altitude_settings
 /*  - 정지 bench에서 ±0.1hPa 수준 흔들림이 있을 때                            */
 /*    derivative 관측을 덜 믿게 되어 오디오 sign flip / 고속 잔떨림이 줄어든다. */
 /* -------------------------------------------------------------------------- */
-static float APP_ALTITUDE_ComputeAdaptiveBaroVarioNoiseCms(const app_altitude_settings_t *settings)
+static float APP_ALTITUDE_ComputeAdaptiveBaroVarioNoiseCms(float base_noise_cms)
 {
-    float base_noise_cms;
-    float max_noise_cms;
     float spread_cms;
+    float spread_penalty_cms;
     float residual_cms;
     float fit_rmse_cm;
     float adaptive_noise_cms;
-
-    if (settings == 0)
-    {
-        return 50.0f;
-    }
-
-    base_noise_cms = (float)settings->baro_vario_measurement_noise_cms;
-    if (base_noise_cms < 1.0f)
-    {
-        base_noise_cms = 1.0f;
-    }
+    float max_noise_cms;
+    bool sign_disagree;
 
     spread_cms = fabsf(s_altitude_runtime.baro_vario_raw_cms -
                        s_altitude_runtime.baro_vario_filt_cms);
     residual_cms = fabsf(s_altitude_runtime.baro_residual_lp_cm);
     fit_rmse_cm = fabsf(s_altitude_runtime.baro_vario_fit_rmse_cm);
+    sign_disagree = APP_ALTITUDE_HasOppositeSignF(s_altitude_runtime.baro_vario_raw_cms,
+                                                  s_altitude_runtime.baro_vario_filt_cms);
+
+    /* ------------------------------------------------------------------ */
+    /*  spread 자체는 onset에서 커지는 것이 정상이다.                       */
+    /*  따라서 raw/filt가 같은 부호로 "같은 방향으로 뛰는" 경우에는        */
+    /*  spread penalty를 크게 줄여, 움직임 시작을 noise로 오인하지 않는다. */
+    /* ------------------------------------------------------------------ */
+    spread_penalty_cms = spread_cms * APP_ALTITUDE_BARO_VARIO_NOISE_SPREAD_GAIN;
+    if (sign_disagree == false)
+    {
+        spread_penalty_cms *= 0.30f;
+    }
 
     adaptive_noise_cms = base_noise_cms +
-                         (spread_cms * APP_ALTITUDE_BARO_VARIO_NOISE_SPREAD_GAIN) +
+                         spread_penalty_cms +
                          (residual_cms * APP_ALTITUDE_BARO_VARIO_NOISE_RESIDUAL_GAIN) +
                          (fit_rmse_cm * APP_ALTITUDE_BARO_VARIO_NOISE_FIT_RMSE_GAIN);
 
     if (s_altitude_runtime.baro_vario_fit_span_s < APP_ALTITUDE_BARO_VARIO_MIN_SPAN_S)
     {
-        adaptive_noise_cms *= 1.25f;
+        adaptive_noise_cms *= 1.10f;
     }
 
     max_noise_cms = base_noise_cms * APP_ALTITUDE_BARO_VARIO_NOISE_MAX_SCALE;
@@ -1550,6 +1787,7 @@ static float APP_ALTITUDE_AdjustBaroVelocityMeasurementNearRest(const app_altitu
                                                                 bool rest_hint)
 {
     float rest_threshold_cms;
+    float abs_meas_cms;
 
     if (settings == 0)
     {
@@ -1561,13 +1799,27 @@ static float APP_ALTITUDE_AdjustBaroVelocityMeasurementNearRest(const app_altitu
         return baro_velocity_meas_cms;
     }
 
-    rest_threshold_cms = (float)settings->rest_detect_vario_cms;
-    if (fabsf(baro_velocity_meas_cms) <= (rest_threshold_cms * 1.50f))
+    rest_threshold_cms = APP_ALTITUDE_ZUPT_EXIT_VARIO_CMS;
+    abs_meas_cms = fabsf(baro_velocity_meas_cms);
+
+    /* ------------------------------------------------------------------ */
+    /*  예전 구현은 rest_hint가 켜지면 작은 값을 바로 0으로 만들어           */
+    /*  first chirp를 잘라 먹었다.                                           */
+    /*                                                                      */
+    /*  이제는 truth path에서만 "살짝 덜 믿는" 정도로 낮춘다.               */
+    /*  즉, KF는 조용해지지만 움직임 시작의 존재 자체는 남긴다.              */
+    /* ------------------------------------------------------------------ */
+    if (abs_meas_cms <= (rest_threshold_cms * 0.75f))
     {
-        return 0.0f;
+        return baro_velocity_meas_cms * 0.70f;
     }
 
-    return baro_velocity_meas_cms * 0.75f;
+    if (abs_meas_cms <= rest_threshold_cms)
+    {
+        return baro_velocity_meas_cms * 0.88f;
+    }
+
+    return baro_velocity_meas_cms;
 }
 
 static float APP_ALTITUDE_AdjustBaroVelocityNoiseNearRest(const app_altitude_settings_t *settings,
@@ -1576,26 +1828,28 @@ static float APP_ALTITUDE_AdjustBaroVelocityNoiseNearRest(const app_altitude_set
                                                           bool rest_hint)
 {
     float rest_threshold_cms;
+    float abs_meas_cms;
 
     if (settings == 0)
     {
         return baro_velocity_noise_cms;
     }
 
-    rest_threshold_cms = (float)settings->rest_detect_vario_cms;
+    rest_threshold_cms = APP_ALTITUDE_ZUPT_EXIT_VARIO_CMS;
+    abs_meas_cms = fabsf(baro_velocity_meas_cms);
 
     if (rest_hint != false)
     {
-        if (fabsf(baro_velocity_meas_cms) <= (rest_threshold_cms * 1.50f))
+        if (abs_meas_cms <= (rest_threshold_cms * 0.75f))
         {
             baro_velocity_noise_cms *= APP_ALTITUDE_BARO_VELOCITY_REST_NOISE_SCALE;
         }
-        else
+        else if (abs_meas_cms <= rest_threshold_cms)
         {
-            baro_velocity_noise_cms *= 1.80f;
+            baro_velocity_noise_cms *= 1.20f;
         }
     }
-    else if (fabsf(baro_velocity_meas_cms) <= (rest_threshold_cms * 2.00f))
+    else if (abs_meas_cms <= (rest_threshold_cms * 0.65f))
     {
         baro_velocity_noise_cms *= APP_ALTITUDE_BARO_VELOCITY_NEAR_ZERO_NOISE_SCALE;
     }
@@ -1791,30 +2045,29 @@ static float APP_ALTITUDE_UpdateProductDisplayAltitudeCm(const app_altitude_sett
     return s_altitude_runtime.display_alt_present_cm;
 }
 
-static bool APP_ALTITUDE_IsCoreRestActive(const app_altitude_settings_t *settings,
-                                          float baro_vario_filt_cms,
-                                          float imu_vertical_cms2,
-                                          bool imu_vector_valid,
-                                          uint16_t imu_trust_permille)
+static bool APP_ALTITUDE_UpdateCoreRestState(const app_altitude_settings_t *settings,
+                                               float baro_vario_filt_cms,
+                                               float imu_vertical_cms2,
+                                               bool imu_vector_valid,
+                                               uint16_t imu_trust_permille,
+                                               uint32_t now_ms)
 {
     float accel_abs_mg;
+    float speed_limit_cms;
+    bool stationary;
 
     if ((settings == 0) || (settings->zupt_enabled == 0u))
     {
+        s_altitude_runtime.core_rest_latched = false;
+        s_altitude_runtime.core_rest_candidate_since_ms = 0u;
         return false;
     }
 
-    /* ------------------------------------------------------------------ */
-    /*  core rest / ZUPT는 display rest보다 조금 더 보수적으로 본다.       */
-    /*  기준이 되는 속도는 core filter의 source가 아니라                   */
-    /*  "baro에서 직접 만든 velocity observation" 이다.                     */
-    /*  이렇게 해야 display LPF나 IMU display source 상태와                */
-    /*  독립적으로 stationarity 판단이 가능하다.                           */
-    /* ------------------------------------------------------------------ */
-    if (fabsf(baro_vario_filt_cms) > (float)settings->rest_detect_vario_cms)
-    {
-        return false;
-    }
+    speed_limit_cms = s_altitude_runtime.core_rest_latched ?
+                      APP_ALTITUDE_ZUPT_EXIT_VARIO_CMS :
+                      APP_ALTITUDE_ZUPT_ENTER_VARIO_CMS;
+
+    stationary = (fabsf(baro_vario_filt_cms) <= speed_limit_cms);
 
     if (imu_vector_valid != false)
     {
@@ -1822,16 +2075,52 @@ static bool APP_ALTITUDE_IsCoreRestActive(const app_altitude_settings_t *setting
 
         if (imu_trust_permille < settings->imu_predict_min_trust_permille)
         {
-            return false;
+            stationary = false;
         }
 
         if (accel_abs_mg > (float)settings->rest_detect_accel_mg)
         {
-            return false;
+            stationary = false;
         }
     }
 
-    return true;
+    /* ------------------------------------------------------------------ */
+    /*  ZUPT는 "조금 조용해 보이는 순간" 에 바로 들어가면 안 된다.          */
+    /*  그래서                                                                 */
+    /*  - entry : 더 엄격한 속도 문턱 + dwell                                 */
+    /*  - exit  : 더 넓은 속도 문턱                                           */
+    /*  으로 분리해 작은 lift onset을 먼저 통과시킨다.                        */
+    /* ------------------------------------------------------------------ */
+    if (s_altitude_runtime.core_rest_latched != false)
+    {
+        if (stationary == false)
+        {
+            s_altitude_runtime.core_rest_latched = false;
+            s_altitude_runtime.core_rest_candidate_since_ms = 0u;
+        }
+
+        return s_altitude_runtime.core_rest_latched;
+    }
+
+    if (stationary == false)
+    {
+        s_altitude_runtime.core_rest_candidate_since_ms = 0u;
+        return false;
+    }
+
+    if (s_altitude_runtime.core_rest_candidate_since_ms == 0u)
+    {
+        s_altitude_runtime.core_rest_candidate_since_ms = now_ms;
+        return false;
+    }
+
+    if ((uint32_t)(now_ms - s_altitude_runtime.core_rest_candidate_since_ms) >=
+        APP_ALTITUDE_ZUPT_HOLD_MS)
+    {
+        s_altitude_runtime.core_rest_latched = true;
+    }
+
+    return s_altitude_runtime.core_rest_latched;
 }
 
 static bool APP_ALTITUDE_IsImuInputEnabled(const app_altitude_settings_t *settings)
@@ -1882,6 +2171,7 @@ static void APP_ALTITUDE_ResetImuRuntimeForUnavailableInput(void)
     s_altitude_runtime.imu_predict_weight_permille = 0.0f;
     s_altitude_runtime.imu_blend_weight_permille = 0.0f;
     s_altitude_runtime.imu_vario_disagree_lp_cms = 0.0f;
+    s_altitude_runtime.imu_attack_velocity_cms = 0.0f;
 }
 
 static float APP_ALTITUDE_GetDebugAudioSourceVarioCms(const app_altitude_settings_t *settings)
@@ -3390,6 +3680,11 @@ void APP_ALTITUDE_Init(uint32_t now_ms)
     s_altitude_runtime.initialized = true;
     s_altitude_runtime.last_task_ms = now_ms;
     s_altitude_runtime.qnh_equiv_filt_hpa = ((float)g_app_state.settings.altitude.manual_qnh_hpa_x100) * 0.01f;
+    s_altitude_runtime.display_baro_gate_ref_cm = 0.0f;
+    s_altitude_runtime.display_baro_gate_valid = false;
+    s_altitude_runtime.display_gate_qnh_hpa_x100 = g_app_state.settings.altitude.manual_qnh_hpa_x100;
+    s_altitude_runtime.display_gate_pressure_correction_hpa_x100 =
+        g_app_state.settings.altitude.pressure_correction_hpa_x100;
     s_altitude_runtime.audio_mode = 0;
     s_altitude_runtime.audio_mode_candidate = 0;
     s_altitude_runtime.audio_mode_candidate_since_ms = now_ms;
@@ -3429,12 +3724,17 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
     float qnh_equiv_hpa;
     float alt_std_cm;
     float alt_qnh_cm;
+    float alt_qnh_vario_cm;
     float alt_gps_cm;
     float gps_noise_cm;
     float baro_noise_cm;
     float baro_altitude_residual_cm;
     float baro_velocity_meas_cms;
+    float baro_velocity_truth_meas_cms;
     float baro_velocity_noise_cms;
+    float fast_noimu_target_cms;
+    float fast_trigger_target_cms;
+    float imu_attack_assist_cms;
     float imu_vertical_cms2;
     float imu_predict_weight;
     float imu_predict_cms2;
@@ -3449,6 +3749,9 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
     float display_source_vario_cms;
     uint32_t display_tau_ms;
     bool display_rest_active;
+    bool display_baro_available;
+    bool display_baro_target_accepted;
+    bool display_baro_basis_changed;
     float H_baro3[3];
     float H_gps3[3];
     float H_vel3[3];
@@ -3501,12 +3804,17 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
     qnh_equiv_hpa = s_altitude_runtime.qnh_equiv_filt_hpa;
     alt_std_cm = 0.0f;
     alt_qnh_cm = 0.0f;
+    alt_qnh_vario_cm = 0.0f;
     alt_gps_cm = 0.0f;
     gps_noise_cm = 0.0f;
     baro_noise_cm = (float)settings->baro_measurement_noise_cm;
     baro_altitude_residual_cm = 0.0f;
     baro_velocity_meas_cms = s_altitude_runtime.baro_vario_filt_cms;
+    baro_velocity_truth_meas_cms = baro_velocity_meas_cms;
     baro_velocity_noise_cms = (float)settings->baro_vario_measurement_noise_cms;
+    fast_noimu_target_cms = 0.0f;
+    fast_trigger_target_cms = 0.0f;
+    imu_attack_assist_cms = 0.0f;
     imu_vertical_cms2 = 0.0f;
     imu_predict_weight = 0.0f;
     imu_predict_cms2 = 0.0f;
@@ -3521,6 +3829,9 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
     display_source_vario_cms = 0.0f;
     display_tau_ms = settings->display_lpf_tau_ms;
     display_rest_active = false;
+    display_baro_available = false;
+    display_baro_target_accepted = true;
+    display_baro_basis_changed = false;
     baro_dt_s = dt_s;
 
     qnh_manual_hpa = ((float)settings->manual_qnh_hpa_x100) * 0.01f;
@@ -3572,6 +3883,21 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
         pressure_corrected_hpa = pressure_raw_hpa + (((float)settings->pressure_correction_hpa_x100) * 0.01f);
         pressure_prefilt_hpa = APP_ALTITUDE_UpdatePressurePrefilter(pressure_corrected_hpa);
 
+        /* ------------------------------------------------------------------ */
+        /*  pressure source 분리                                               */
+        /*                                                                    */
+        /*  slow branch  : altitude / fused altitude / display 안정화용         */
+        /*  fast branch  : vario regression slope 계산 전용                     */
+        /*                                                                    */
+        /*  왜 분리하나?                                                        */
+        /*  기존 구조에서는 settings->pressure_lpf_tau_ms 하나를 줄이면         */
+        /*  "vario는 빨라지지만 altitude도 같이 흔들리는" trade-off 가 생겼다. */
+        /*                                                                    */
+        /*  commercial-grade 목표는                                            */
+        /*  - 숫자 altitude 는 차분하게                                         */
+        /*  - fast vario / audio 는 즉각적이되 false tone 는 과하지 않게       */
+        /*  이므로, pressure source 를 두 갈래로 나눠야 한다.                  */
+        /* ------------------------------------------------------------------ */
         if ((s_altitude_runtime.pressure_filt_hpa <= 0.0f) || (alt_prev->baro_valid == false))
         {
             s_altitude_runtime.pressure_residual_hpa = 0.0f;
@@ -3586,10 +3912,24 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
                                                                           baro_dt_s);
         }
 
+        if ((s_altitude_runtime.pressure_vario_filt_hpa <= 0.0f) || (alt_prev->baro_valid == false))
+        {
+            s_altitude_runtime.pressure_vario_filt_hpa = pressure_prefilt_hpa;
+        }
+        else
+        {
+            s_altitude_runtime.pressure_vario_filt_hpa = APP_ALTITUDE_LpfUpdate(s_altitude_runtime.pressure_vario_filt_hpa,
+                                                                                pressure_prefilt_hpa,
+                                                                                APP_ALTITUDE_VARIO_PRESSURE_TAU_MS,
+                                                                                baro_dt_s);
+        }
+
         alt_std_cm = APP_ALTITUDE_PressureToAltitudeMeters(s_altitude_runtime.pressure_filt_hpa,
                                                            APP_ALTITUDE_STD_QNH_HPA) * 100.0f;
         alt_qnh_cm = APP_ALTITUDE_PressureToAltitudeMeters(s_altitude_runtime.pressure_filt_hpa,
                                                            qnh_manual_hpa) * 100.0f;
+        alt_qnh_vario_cm = APP_ALTITUDE_PressureToAltitudeMeters(s_altitude_runtime.pressure_vario_filt_hpa,
+                                                                 qnh_manual_hpa) * 100.0f;
 
         baro_noise_cm = APP_ALTITUDE_ComputeAdaptiveBaroNoiseCm(settings,
                                                                 s_altitude_runtime.pressure_filt_hpa,
@@ -3597,10 +3937,10 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
                                                                 baro_dt_s);
 
         baro_velocity_meas_cms = APP_ALTITUDE_UpdateBaroVarioMeasurement(settings,
-                                                                         alt_qnh_cm,
+                                                                         alt_qnh_vario_cm,
                                                                          baro_dt_s,
                                                                          baro->timestamp_ms);
-        baro_velocity_noise_cms = APP_ALTITUDE_ComputeAdaptiveBaroVarioNoiseCms(settings);
+        baro_velocity_noise_cms = APP_ALTITUDE_ComputeAdaptiveBaroVarioNoiseCms(baro_velocity_noise_cms);
     }
     else if (alt_prev->baro_valid != false)
     {
@@ -3609,6 +3949,7 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
         pressure_prefilt_hpa = ((float)alt_prev->pressure_prefilt_hpa_x100) * 0.01f;
         alt_std_cm = (float)alt_prev->alt_pressure_std_cm;
         alt_qnh_cm = (float)alt_prev->alt_qnh_manual_cm;
+        alt_qnh_vario_cm = alt_qnh_cm;
         baro_noise_cm = (float)alt_prev->baro_noise_used_cm;
         if (baro_noise_cm <= 0.0f)
         {
@@ -3713,18 +4054,19 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
     /*  - ZUPT와 동일한 stationarity rule을 먼저 한 번 보고                  */
     /*    near-zero velocity observation을 더 덜 믿는다.                     */
     /* ------------------------------------------------------------------ */
-    baro_rest_hint = APP_ALTITUDE_IsCoreRestActive(settings,
-                                                    s_altitude_runtime.baro_vario_filt_cms,
-                                                    imu_vertical_cms2,
-                                                    imu_vector_valid,
-                                                    (uint16_t)APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.imu_attitude_trust_permille));
+    baro_rest_hint = APP_ALTITUDE_UpdateCoreRestState(settings,
+                                                     s_altitude_runtime.baro_vario_filt_cms,
+                                                     imu_vertical_cms2,
+                                                     imu_vector_valid,
+                                                     (uint16_t)APP_ALTITUDE_RoundFloatToS32(s_altitude_runtime.imu_attitude_trust_permille),
+                                                     now_ms);
 
-    baro_velocity_meas_cms = APP_ALTITUDE_AdjustBaroVelocityMeasurementNearRest(settings,
-                                                                                 baro_velocity_meas_cms,
-                                                                                 baro_rest_hint);
+    baro_velocity_truth_meas_cms = APP_ALTITUDE_AdjustBaroVelocityMeasurementNearRest(settings,
+                                                                                       baro_velocity_meas_cms,
+                                                                                       baro_rest_hint);
     baro_velocity_noise_cms = APP_ALTITUDE_AdjustBaroVelocityNoiseNearRest(settings,
                                                                            baro_velocity_noise_cms,
-                                                                           baro_velocity_meas_cms,
+                                                                           baro_velocity_truth_meas_cms,
                                                                            baro_rest_hint);
 
     if (s_altitude_runtime.kf_noimu.valid != false)
@@ -3805,7 +4147,7 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
     {
         if (s_altitude_runtime.kf_noimu.valid != false)
         {
-            if (APP_ALTITUDE_IsResidualAccepted(baro_velocity_meas_cms - s_altitude_runtime.kf_noimu.x[1],
+            if (APP_ALTITUDE_IsResidualAccepted(baro_velocity_truth_meas_cms - s_altitude_runtime.kf_noimu.x[1],
                                                 baro_velocity_noise_cms,
                                                 APP_ALTITUDE_BARO_VELOCITY_GATE_SIGMA,
                                                 APP_ALTITUDE_BARO_VELOCITY_GATE_FLOOR_CMS) != false)
@@ -3813,14 +4155,14 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
                 APP_ALTITUDE_Kf3_UpdateScalar(s_altitude_runtime.kf_noimu.x,
                                               s_altitude_runtime.kf_noimu.P,
                                               H_vel3,
-                                              baro_velocity_meas_cms,
+                                              baro_velocity_truth_meas_cms,
                                               APP_ALTITUDE_SquareF(baro_velocity_noise_cms));
             }
         }
 
         if (s_altitude_runtime.kf_imu.valid != false)
         {
-            if (APP_ALTITUDE_IsResidualAccepted(baro_velocity_meas_cms - s_altitude_runtime.kf_imu.x[1],
+            if (APP_ALTITUDE_IsResidualAccepted(baro_velocity_truth_meas_cms - s_altitude_runtime.kf_imu.x[1],
                                                 baro_velocity_noise_cms,
                                                 APP_ALTITUDE_BARO_VELOCITY_GATE_SIGMA,
                                                 APP_ALTITUDE_BARO_VELOCITY_GATE_FLOOR_CMS) != false)
@@ -3828,7 +4170,7 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
                 APP_ALTITUDE_Kf4_UpdateScalar(s_altitude_runtime.kf_imu.x,
                                               s_altitude_runtime.kf_imu.P,
                                               H_vel4,
-                                              baro_velocity_meas_cms,
+                                              baro_velocity_truth_meas_cms,
                                               APP_ALTITUDE_SquareF(baro_velocity_noise_cms));
             }
         }
@@ -3918,18 +4260,38 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
     if (s_altitude_runtime.kf_noimu.valid != false)
     {
         /* ------------------------------------------------------------------ */
-        /*  전통적인 baro/GPS backed vario                                     */
+        /*  no-IMU fast path                                                   */
         /*                                                                    */
-        /*  이 경로는 INS와 무관하게 항상 유지된다.                             */
-        /*  즉, 상용 variometer가 갖는                                          */
-        /*  "조금 느려도 진실에 가까운 전통 baro vario" 역할을 맡는다.         */
+        /*  여기서부터는 truth backbone과 fast trigger를 분리한다.             */
+        /*  - kf_noimu.x[1]          : 상대적으로 정직한 backbone velocity     */
+        /*  - fast_trigger_target    : regression onset을 살린 빠른 target     */
+        /*  - vario_fast_noimu_cms   : audio / fast bar가 직접 쓰는 출력       */
+        /*  - vario_slow_noimu_cms   : 숫자 / glide 계산용 느린 truth path      */
         /* ------------------------------------------------------------------ */
-        s_altitude_runtime.vario_fast_noimu_cms = APP_ALTITUDE_LpfUpdate(s_altitude_runtime.vario_fast_noimu_cms,
-                                                                         s_altitude_runtime.kf_noimu.x[1],
-                                                                         settings->vario_fast_tau_ms,
-                                                                         dt_s);
+        fast_trigger_target_cms = APP_ALTITUDE_ComputeFastTriggerTargetCms(s_altitude_runtime.kf_noimu.x[1]);
+        fast_noimu_target_cms = fast_trigger_target_cms;
+
+        s_altitude_runtime.vario_fast_noimu_cms = APP_ALTITUDE_UpdateAsymmetricVario(s_altitude_runtime.vario_fast_noimu_cms,
+                                                                                      fast_noimu_target_cms,
+                                                                                      APP_ALTITUDE_FAST_VARIO_ATTACK_TAU_MS,
+                                                                                      settings->vario_fast_tau_ms,
+                                                                                      dt_s);
         s_altitude_runtime.vario_slow_noimu_cms = APP_ALTITUDE_LpfUpdate(s_altitude_runtime.vario_slow_noimu_cms,
-                                                                         s_altitude_runtime.vario_fast_noimu_cms,
+                                                                         s_altitude_runtime.kf_noimu.x[1],
+                                                                         settings->vario_slow_tau_ms,
+                                                                         dt_s);
+    }
+    else
+    {
+        fast_trigger_target_cms = APP_ALTITUDE_ComputeFastTriggerTargetCms(baro_velocity_truth_meas_cms);
+        fast_noimu_target_cms = fast_trigger_target_cms;
+        s_altitude_runtime.vario_fast_noimu_cms = APP_ALTITUDE_UpdateAsymmetricVario(s_altitude_runtime.vario_fast_noimu_cms,
+                                                                                      fast_noimu_target_cms,
+                                                                                      APP_ALTITUDE_FAST_VARIO_ATTACK_TAU_MS,
+                                                                                      settings->vario_fast_tau_ms,
+                                                                                      dt_s);
+        s_altitude_runtime.vario_slow_noimu_cms = APP_ALTITUDE_LpfUpdate(s_altitude_runtime.vario_slow_noimu_cms,
+                                                                         baro_velocity_truth_meas_cms,
                                                                          settings->vario_slow_tau_ms,
                                                                          dt_s);
     }
@@ -3948,8 +4310,8 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
     /* ---------------------------------------------------------------------- */
     imu_anchor_velocity_cms = s_altitude_runtime.kf_noimu.valid ?
                               s_altitude_runtime.kf_noimu.x[1] :
-                              baro_velocity_meas_cms;
-    imu_fast_target_cms = imu_anchor_velocity_cms;
+                              baro_velocity_truth_meas_cms;
+    imu_fast_target_cms = fast_noimu_target_cms;
     imu_slow_target_cms = imu_anchor_velocity_cms;
     s_altitude_runtime.imu_blend_weight_permille = 0.0f;
 
@@ -3977,7 +4339,7 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
         imu_blend_fast = sqrtf(APP_ALTITUDE_Clamp01F(imu_blend_fast));
         imu_blend_slow = APP_ALTITUDE_Clamp01F(imu_blend_slow);
 
-        imu_fast_target_cms = imu_anchor_velocity_cms +
+        imu_fast_target_cms = fast_noimu_target_cms +
                               (imu_blend_fast * (s_altitude_runtime.kf_imu.x[1] - imu_anchor_velocity_cms));
         imu_slow_target_cms = imu_anchor_velocity_cms +
                               (imu_blend_slow * (s_altitude_runtime.kf_imu.x[1] - imu_anchor_velocity_cms));
@@ -3992,10 +4354,19 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
                                                                               dt_s);
     }
 
-    s_altitude_runtime.vario_fast_imu_cms = APP_ALTITUDE_LpfUpdate(s_altitude_runtime.vario_fast_imu_cms,
-                                                                   imu_fast_target_cms,
-                                                                   settings->vario_fast_tau_ms,
-                                                                   dt_s);
+    imu_attack_assist_cms = APP_ALTITUDE_UpdateImuAttackAssistCms((settings->imu_aid_enabled != 0u) &&
+                                                                  (imu_input_enabled != false) &&
+                                                                  (imu_vector_valid != false),
+                                                                  imu_vertical_cms2,
+                                                                  imu_fast_target_cms,
+                                                                  dt_s);
+    imu_fast_target_cms += imu_attack_assist_cms;
+
+    s_altitude_runtime.vario_fast_imu_cms = APP_ALTITUDE_UpdateAsymmetricVario(s_altitude_runtime.vario_fast_imu_cms,
+                                                                                imu_fast_target_cms,
+                                                                                APP_ALTITUDE_FAST_VARIO_ATTACK_TAU_MS,
+                                                                                settings->vario_fast_tau_ms,
+                                                                                dt_s);
     s_altitude_runtime.vario_slow_imu_cms = APP_ALTITUDE_LpfUpdate(s_altitude_runtime.vario_slow_imu_cms,
                                                                    imu_slow_target_cms,
                                                                    settings->vario_slow_tau_ms,
@@ -4007,13 +4378,56 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
     /*  display/QNH 숫자는 INS가 아니라 manual QNH 기반 barometric altitude 를 */
     /*  사용한다.                                                              */
     /*                                                                          */
-    /*  이유                                                                    */
-    /*  - 상용 vario의 ALT 숫자는 대개 QNH/baro canonical path 다.             */
-    /*  - GPS absolute anchor 와 instant INS vario 는 좋은 보조지만            */
-    /*    메인 숫자 고도를 흔들지 않는 편이 낫다.                              */
+    /*  다만 Alt1이 법적 primary altitude 인 만큼,                              */
+    /*  fused/GPS로 우회하지는 않되 baro/QNH path의 순간적인 비현실 step 은     */
+    /*  마지막으로 accept 된 barometric target 에서 한 번 막아 준다.           */
+    /*                                                                          */
+    /*  중요한 점                                                              */
+    /*  - raw/fused internal state는 그대로 유지한다.                          */
+    /*  - Alt1용 display path만 spike 를 무시한다.                             */
     /* ---------------------------------------------------------------------- */
-    display_target_cm = (alt_prev->baro_valid != false) ? alt_qnh_cm :
-                        (s_altitude_runtime.kf_noimu.valid ? s_altitude_runtime.kf_noimu.x[0] : alt_qnh_cm);
+    display_baro_available = (new_baro_sample != false) || (alt_prev->baro_valid != false);
+    display_baro_basis_changed =
+        (s_altitude_runtime.display_gate_qnh_hpa_x100 != settings->manual_qnh_hpa_x100) ||
+        (s_altitude_runtime.display_gate_pressure_correction_hpa_x100 !=
+         settings->pressure_correction_hpa_x100);
+
+    if (display_baro_basis_changed != false)
+    {
+        s_altitude_runtime.display_baro_gate_valid = false;
+    }
+
+    if (display_baro_available != false)
+    {
+        if (s_altitude_runtime.display_baro_gate_valid == false)
+        {
+            s_altitude_runtime.display_baro_gate_ref_cm = alt_qnh_cm;
+            s_altitude_runtime.display_baro_gate_valid = true;
+            display_baro_target_accepted = true;
+        }
+        else
+        {
+            display_baro_target_accepted = APP_ALTITUDE_IsResidualAccepted(alt_qnh_cm -
+                                                                           s_altitude_runtime.display_baro_gate_ref_cm,
+                                                                           baro_noise_cm,
+                                                                           APP_ALTITUDE_BARO_ALTITUDE_GATE_SIGMA,
+                                                                           APP_ALTITUDE_BARO_ALTITUDE_GATE_FLOOR_CM);
+
+            if (display_baro_target_accepted != false)
+            {
+                s_altitude_runtime.display_baro_gate_ref_cm = alt_qnh_cm;
+            }
+        }
+
+        display_target_cm = (display_baro_target_accepted != false) ?
+                            alt_qnh_cm :
+                            s_altitude_runtime.display_baro_gate_ref_cm;
+    }
+    else
+    {
+        display_target_cm = s_altitude_runtime.kf_noimu.valid ? s_altitude_runtime.kf_noimu.x[0] :
+                                                                alt_qnh_cm;
+    }
 
     display_source_vario_cms = s_altitude_runtime.vario_slow_noimu_cms;
 
@@ -4079,6 +4493,10 @@ void APP_ALTITUDE_Task(uint32_t now_ms)
         g_app_state.altitude.alt_rel_home_noimu_cm = 0;
         g_app_state.altitude.alt_rel_home_imu_cm = 0;
     }
+
+    s_altitude_runtime.display_gate_qnh_hpa_x100 = settings->manual_qnh_hpa_x100;
+    s_altitude_runtime.display_gate_pressure_correction_hpa_x100 =
+        settings->pressure_correction_hpa_x100;
 
     g_app_state.altitude.initialized                = true;
     g_app_state.altitude.baro_valid                 = (new_baro_sample != false) || (alt_prev->baro_valid != false);
