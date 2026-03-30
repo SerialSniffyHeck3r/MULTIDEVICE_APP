@@ -1,12 +1,18 @@
 #include "ui_confirm.h"
+#include "ui_popup.h"
+#include "ui_toast.h"
+#include "ui_menu.h"
 
 #include <string.h>
 
-#define UI_CONFIRM_BOX_W      208
-#define UI_CONFIRM_BOX_H       82
-#define UI_CONFIRM_TITLE_MAX   31
-#define UI_CONFIRM_BODY_MAX    47
-#define UI_CONFIRM_OPTION_MAX  23
+#define UI_CONFIRM_BOX_W              208
+#define UI_CONFIRM_BOX_H               82
+#define UI_CONFIRM_TITLE_MAX           31
+#define UI_CONFIRM_BODY_MAX            47
+#define UI_CONFIRM_OPTION_MAX          23
+#define UI_CONFIRM_SAFE_MARGIN_X        8
+#define UI_CONFIRM_SAFE_TOP_Y          (UI_STATUSBAR_H + UI_STATUSBAR_GAP_H + 2)
+#define UI_CONFIRM_SAFE_BOTTOM_RESERVED (UI_BOTTOMBAR_H + UI_BOTTOMBAR_GAP_H + 3)
 
 typedef struct
 {
@@ -20,6 +26,59 @@ typedef struct
 } ui_confirm_state_t;
 
 static ui_confirm_state_t s_confirm;
+
+static void ui_confirm_compute_box(int16_t *out_x0,
+                                   int16_t *out_y0,
+                                   int16_t *out_w,
+                                   int16_t *out_h)
+{
+    int16_t box_w;
+    int16_t box_h;
+    int16_t safe_top;
+    int16_t safe_bottom;
+    int16_t safe_h;
+    int16_t x0;
+    int16_t y0;
+
+    box_w = UI_CONFIRM_BOX_W;
+    if (box_w > (int16_t)(UI_LCD_W - (2 * UI_CONFIRM_SAFE_MARGIN_X)))
+    {
+        box_w = (int16_t)(UI_LCD_W - (2 * UI_CONFIRM_SAFE_MARGIN_X));
+    }
+
+    box_h = UI_CONFIRM_BOX_H;
+    safe_top = UI_CONFIRM_SAFE_TOP_Y;
+    safe_bottom = (int16_t)(UI_LCD_H - UI_CONFIRM_SAFE_BOTTOM_RESERVED);
+    if (safe_bottom < safe_top)
+    {
+        safe_bottom = safe_top;
+    }
+
+    safe_h = (int16_t)(safe_bottom - safe_top);
+    x0 = (int16_t)((UI_LCD_W - box_w) / 2);
+    y0 = (int16_t)(safe_top + ((safe_h - box_h) / 2));
+    if (y0 < safe_top)
+    {
+        y0 = safe_top;
+    }
+
+    if (out_x0 != NULL)
+    {
+        *out_x0 = x0;
+    }
+    if (out_y0 != NULL)
+    {
+        *out_y0 = y0;
+    }
+    if (out_w != NULL)
+    {
+        *out_w = box_w;
+    }
+    if (out_h != NULL)
+    {
+        *out_h = box_h;
+    }
+}
 
 static void ui_confirm_copy_text(char *dst, uint32_t dst_size, const char *src)
 {
@@ -75,6 +134,9 @@ void UI_Confirm_Show(const char *title,
     (void)now_ms;
 
     memset(&s_confirm, 0, sizeof(s_confirm));
+    UI_Popup_Hide();
+    UI_Toast_Hide();
+    UI_Menu_Hide();
     ui_confirm_copy_text(s_confirm.title, sizeof(s_confirm.title), title);
     ui_confirm_copy_text(s_confirm.body, sizeof(s_confirm.body), body);
     ui_confirm_copy_text(s_confirm.option1, sizeof(s_confirm.option1), option1);
@@ -101,6 +163,8 @@ uint16_t UI_Confirm_GetContextId(void)
 
 void UI_Confirm_Draw(u8g2_t *u8g2)
 {
+    int16_t box_w;
+    int16_t box_h;
     int16_t x0;
     int16_t y0;
     int16_t cx;
@@ -110,19 +174,18 @@ void UI_Confirm_Draw(u8g2_t *u8g2)
         return;
     }
 
-    x0 = (int16_t)((UI_LCD_W - UI_CONFIRM_BOX_W) / 2);
-    y0 = (int16_t)((UI_LCD_H - UI_CONFIRM_BOX_H) / 2);
-    cx = (int16_t)(x0 + (UI_CONFIRM_BOX_W / 2));
+    ui_confirm_compute_box(&x0, &y0, &box_w, &box_h);
+    cx = (int16_t)(x0 + (box_w / 2));
 
     u8g2_SetDrawColor(u8g2, 0);
-    u8g2_DrawBox(u8g2, (u8g2_uint_t)x0, (u8g2_uint_t)y0, UI_CONFIRM_BOX_W, UI_CONFIRM_BOX_H);
+    u8g2_DrawBox(u8g2, (u8g2_uint_t)x0, (u8g2_uint_t)y0, (u8g2_uint_t)box_w, (u8g2_uint_t)box_h);
 
     u8g2_SetDrawColor(u8g2, 1);
-    u8g2_DrawFrame(u8g2, (u8g2_uint_t)x0, (u8g2_uint_t)y0, UI_CONFIRM_BOX_W, UI_CONFIRM_BOX_H);
+    u8g2_DrawFrame(u8g2, (u8g2_uint_t)x0, (u8g2_uint_t)y0, (u8g2_uint_t)box_w, (u8g2_uint_t)box_h);
     u8g2_DrawHLine(u8g2,
                    (u8g2_uint_t)(x0 + 6),
                    (u8g2_uint_t)(y0 + 22),
-                   (u8g2_uint_t)(UI_CONFIRM_BOX_W - 12));
+                   (u8g2_uint_t)(box_w - 12));
 
     ui_confirm_draw_centered(u8g2, u8g2_font_6x12_mf, cx, (int16_t)(y0 + 15), s_confirm.title);
     ui_confirm_draw_centered(u8g2, u8g2_font_5x8_tr,  cx, (int16_t)(y0 + 33), s_confirm.body);
@@ -132,6 +195,6 @@ void UI_Confirm_Draw(u8g2_t *u8g2)
     ui_confirm_draw_centered(u8g2,
                              u8g2_font_5x7_tr,
                              cx,
-                             (int16_t)(y0 + UI_CONFIRM_BOX_H - 4),
+                             (int16_t)(y0 + box_h - 4),
                              "LONG PRESS FN KEY TO CHOOSE!");
 }

@@ -1,12 +1,18 @@
 #include "ui_menu.h"
+#include "ui_popup.h"
+#include "ui_toast.h"
+#include "ui_confirm.h"
 
 #include <string.h>
 
-#define UI_MENU_BOX_W        180
-#define UI_MENU_TITLE_H      10
-#define UI_MENU_ROW_H        14
-#define UI_MENU_TITLE_MAX    31
-#define UI_MENU_TEXT_MAX     31
+#define UI_MENU_BOX_W                180
+#define UI_MENU_TITLE_H               10
+#define UI_MENU_ROW_H                 14
+#define UI_MENU_TITLE_MAX             31
+#define UI_MENU_TEXT_MAX              31
+#define UI_MENU_SAFE_MARGIN_X          8
+#define UI_MENU_SAFE_TOP_Y            (UI_STATUSBAR_H + UI_STATUSBAR_GAP_H + 2)
+#define UI_MENU_SAFE_BOTTOM_RESERVED  (UI_BOTTOMBAR_H + UI_BOTTOMBAR_GAP_H + 3)
 
 typedef struct
 {
@@ -19,6 +25,64 @@ typedef struct
 } ui_menu_state_t;
 
 static ui_menu_state_t s_menu;
+
+static void ui_menu_compute_box(int16_t *out_x0,
+                                int16_t *out_y0,
+                                int16_t *out_w,
+                                int16_t *out_h)
+{
+    int16_t box_w;
+    int16_t box_h;
+    int16_t safe_top;
+    int16_t safe_bottom;
+    int16_t safe_h;
+    int16_t x0;
+    int16_t y0;
+
+    box_w = UI_MENU_BOX_W;
+    if (box_w > (int16_t)(UI_LCD_W - (2 * UI_MENU_SAFE_MARGIN_X)))
+    {
+        box_w = (int16_t)(UI_LCD_W - (2 * UI_MENU_SAFE_MARGIN_X));
+    }
+
+    box_h = (int16_t)(UI_MENU_TITLE_H + 4 + ((int16_t)s_menu.count * UI_MENU_ROW_H));
+    if (box_h < 28)
+    {
+        box_h = 28;
+    }
+
+    safe_top = UI_MENU_SAFE_TOP_Y;
+    safe_bottom = (int16_t)(UI_LCD_H - UI_MENU_SAFE_BOTTOM_RESERVED);
+    if (safe_bottom < safe_top)
+    {
+        safe_bottom = safe_top;
+    }
+
+    safe_h = (int16_t)(safe_bottom - safe_top);
+    x0 = (int16_t)((UI_LCD_W - box_w) / 2);
+    y0 = (int16_t)(safe_top + ((safe_h - box_h) / 2));
+    if (y0 < safe_top)
+    {
+        y0 = safe_top;
+    }
+
+    if (out_x0 != NULL)
+    {
+        *out_x0 = x0;
+    }
+    if (out_y0 != NULL)
+    {
+        *out_y0 = y0;
+    }
+    if (out_w != NULL)
+    {
+        *out_w = box_w;
+    }
+    if (out_h != NULL)
+    {
+        *out_h = box_h;
+    }
+}
 
 static void ui_menu_copy_text(char *dst, uint32_t dst_size, const char *src)
 {
@@ -50,6 +114,9 @@ void UI_Menu_Show(const char *title,
     uint8_t i;
 
     memset(&s_menu, 0, sizeof(s_menu));
+    UI_Popup_Hide();
+    UI_Toast_Hide();
+    UI_Confirm_Hide();
     ui_menu_copy_text(s_menu.title, sizeof(s_menu.title), title);
 
     if (item_count > UI_MENU_MAX_ITEMS)
@@ -129,6 +196,7 @@ void UI_Menu_MoveSelection(int8_t direction)
 
 void UI_Menu_Draw(u8g2_t *u8g2)
 {
+    int16_t box_w;
     int16_t box_h;
     int16_t x0;
     int16_t y0;
@@ -139,21 +207,14 @@ void UI_Menu_Draw(u8g2_t *u8g2)
         return;
     }
 
-    box_h = (int16_t)(UI_MENU_TITLE_H + 4 + ((int16_t)s_menu.count * UI_MENU_ROW_H));
-    if (box_h < 28)
-    {
-        box_h = 28;
-    }
-
-    x0 = (int16_t)((UI_LCD_W - UI_MENU_BOX_W) / 2);
-    y0 = (int16_t)((UI_LCD_H - box_h) / 2);
+    ui_menu_compute_box(&x0, &y0, &box_w, &box_h);
 
     u8g2_SetDrawColor(u8g2, 0);
-    u8g2_DrawBox(u8g2, (u8g2_uint_t)x0, (u8g2_uint_t)y0, UI_MENU_BOX_W, (u8g2_uint_t)box_h);
+    u8g2_DrawBox(u8g2, (u8g2_uint_t)x0, (u8g2_uint_t)y0, (u8g2_uint_t)box_w, (u8g2_uint_t)box_h);
 
     u8g2_SetDrawColor(u8g2, 1);
-    u8g2_DrawFrame(u8g2, (u8g2_uint_t)x0, (u8g2_uint_t)y0, UI_MENU_BOX_W, (u8g2_uint_t)box_h);
-    u8g2_DrawBox(u8g2, (u8g2_uint_t)x0, (u8g2_uint_t)y0, UI_MENU_BOX_W, UI_MENU_TITLE_H);
+    u8g2_DrawFrame(u8g2, (u8g2_uint_t)x0, (u8g2_uint_t)y0, (u8g2_uint_t)box_w, (u8g2_uint_t)box_h);
+    u8g2_DrawBox(u8g2, (u8g2_uint_t)x0, (u8g2_uint_t)y0, (u8g2_uint_t)box_w, UI_MENU_TITLE_H);
 
     u8g2_SetFont(u8g2, u8g2_font_5x7_tr);
     u8g2_SetDrawColor(u8g2, 0);
@@ -170,7 +231,7 @@ void UI_Menu_Draw(u8g2_t *u8g2)
             u8g2_DrawBox(u8g2,
                          (u8g2_uint_t)(x0 + 4),
                          (u8g2_uint_t)row_y,
-                         (u8g2_uint_t)(UI_MENU_BOX_W - 8),
+                         (u8g2_uint_t)(box_w - 8),
                          (u8g2_uint_t)(UI_MENU_ROW_H - 2));
             u8g2_SetDrawColor(u8g2, 0);
         }
@@ -180,7 +241,7 @@ void UI_Menu_Draw(u8g2_t *u8g2)
             u8g2_DrawFrame(u8g2,
                            (u8g2_uint_t)(x0 + 4),
                            (u8g2_uint_t)row_y,
-                           (u8g2_uint_t)(UI_MENU_BOX_W - 8),
+                           (u8g2_uint_t)(box_w - 8),
                            (u8g2_uint_t)(UI_MENU_ROW_H - 2));
         }
 
