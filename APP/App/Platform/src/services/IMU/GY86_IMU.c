@@ -109,6 +109,54 @@ extern I2C_HandleTypeDef GY86_IMU_I2C2_HANDLE;
 #endif
 
 /* -------------------------------------------------------------------------- */
+/*  MS5611 published-sample plausibility gate                                 */
+/*                                                                            */
+/*  목적                                                                       */
+/*  - HAL/I2C가 HAL_OK를 돌려도 ADC 바이트가 한 번 깨지면                     */
+/*    compensated pressure 하나가 그대로 APP_STATE로 publish 된다.            */
+/*  - Alt1은 latest code에서 pure baro/display path를 그대로 쓰므로,          */
+/*    sample 하나의 발광도 메인 altitude spike로 직결될 수 있다.              */
+/*                                                                            */
+/*  정책                                                                       */
+/*  - driver 내부 per-device runtime / fusion 계산은 그대로 둔다.             */
+/*  - "상위로 publish 되는 fused sample" 직전에만                             */
+/*    raw/range/step plausibility를 한 번 더 본다.                            */
+/*  - reject 시 last-good published sample을 그대로 유지하여                   */
+/*    APP_ALTITUDE_Task()가 새 sample_count를 보지 않게 만든다.               */
+/*                                                                            */
+/*  이 gate는 정상 비행 envelope보다 한참 넓다.                               */
+/*  따라서 실제 climb/sink 응답은 거의 건드리지 않고,                         */
+/*  순간적인 I2C/ADC glitch만 자르는 용도다.                                  */
+/* -------------------------------------------------------------------------- */
+#ifndef GY86_MS5611_PUBLISH_MIN_PRESSURE_PA
+#define GY86_MS5611_PUBLISH_MIN_PRESSURE_PA 20000
+#endif
+
+#ifndef GY86_MS5611_PUBLISH_MAX_PRESSURE_PA
+#define GY86_MS5611_PUBLISH_MAX_PRESSURE_PA 120000
+#endif
+
+#ifndef GY86_MS5611_PUBLISH_MIN_TEMP_CDEG
+#define GY86_MS5611_PUBLISH_MIN_TEMP_CDEG (-4000)
+#endif
+
+#ifndef GY86_MS5611_PUBLISH_MAX_TEMP_CDEG
+#define GY86_MS5611_PUBLISH_MAX_TEMP_CDEG 8500
+#endif
+
+#ifndef GY86_MS5611_PUBLISH_STEP_FLOOR_PA
+#define GY86_MS5611_PUBLISH_STEP_FLOOR_PA 35u
+#endif
+
+#ifndef GY86_MS5611_PUBLISH_STEP_RATE_PA_PER_S
+#define GY86_MS5611_PUBLISH_STEP_RATE_PA_PER_S 500u
+#endif
+
+#ifndef GY86_MS5611_PUBLISH_TEMP_STEP_FLOOR_CDEG
+#define GY86_MS5611_PUBLISH_TEMP_STEP_FLOOR_CDEG 200u
+#endif
+
+/* -------------------------------------------------------------------------- */
 /*  backend 공통 타입                                                          */
 /*                                                                            */
 /*  포인트                                                                     */
@@ -1602,6 +1650,93 @@ static void GY86_Ms5611_StoreCompensatedSample(gy86_ms5611_device_t *dev,
     dev->valid = 1u;
 }
 
+static uint8_t GY86_Ms5611_PublishedSampleAccepted(const app_gy86_state_t *imu,
+                                                   const gy86_ms5611_device_t *primary_dev,
+                                                   uint32_t candidate_timestamp_ms,
+                                                   int32_t candidate_pressure_pa,
+                                                   int32_t candidate_temp_cdeg)
+{
+    uint32_t dt_ms;
+    uint32_t pressure_limit_pa;
+
+    if ((imu == 0) || (primary_dev == 0))
+    {
+        return 0u;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  raw ADC가 all-zero / all-one 같은 버스 쓰레기면 바로 버린다.       */
+    /* ------------------------------------------------------------------ */
+    if ((primary_dev->d1_raw == 0u) ||
+        (primary_dev->d2_raw == 0u) ||
+        (primary_dev->d1_raw >= 0xFFFFFFu) ||
+        (primary_dev->d2_raw >= 0xFFFFFFu))
+    {
+        return 0u;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  보정된 pressure / temperature 절대 범위 검사                        */
+    /* ------------------------------------------------------------------ */
+    if ((candidate_pressure_pa < GY86_MS5611_PUBLISH_MIN_PRESSURE_PA) ||
+        (candidate_pressure_pa > GY86_MS5611_PUBLISH_MAX_PRESSURE_PA) ||
+        (candidate_temp_cdeg < GY86_MS5611_PUBLISH_MIN_TEMP_CDEG) ||
+        (candidate_temp_cdeg > GY86_MS5611_PUBLISH_MAX_TEMP_CDEG))
+    {
+        return 0u;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  첫 publish는 비교 기준이 없으므로 절대 범위만 통과하면 허용          */
+    /* ------------------------------------------------------------------ */
+    if ((imu->baro.sample_count == 0u) ||
+        (imu->baro.timestamp_ms == 0u) ||
+        (imu->baro.pressure_pa <= 0))
+    {
+        return 1u;
+    }
+
+    dt_ms = candidate_timestamp_ms - imu->baro.timestamp_ms;
+    if ((candidate_timestamp_ms == 0u) || (candidate_timestamp_ms <= imu->baro.timestamp_ms))
+    {
+        dt_ms = GY86_IMU_BARO_PERIOD_MS;
+    }
+    else if (dt_ms > GY86_MS5611_FUSION_FRESH_TIMEOUT_MS)
+    {
+        dt_ms = GY86_MS5611_FUSION_FRESH_TIMEOUT_MS;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  pressure step gate                                                 */
+    /*                                                                    */
+    /*  35Pa floor + 500Pa/s slope                                         */
+    /*  - 20ms sample에서는 약 45Pa (~3.8m 상당)                            */
+    /*  - 80ms stale/fallback edge에서도 약 75Pa (~6.3m 상당)               */
+    /*                                                                    */
+    /*  실제 비행 envelope보다 넓게 잡아, 고도 spike만 자르는 용도다.       */
+    /* ------------------------------------------------------------------ */
+    pressure_limit_pa = GY86_MS5611_PUBLISH_STEP_FLOOR_PA +
+                        (uint32_t)(((uint64_t)GY86_MS5611_PUBLISH_STEP_RATE_PA_PER_S *
+                                    (uint64_t)dt_ms + 999u) / 1000u);
+
+    if (GY86_Abs32(candidate_pressure_pa - imu->baro.pressure_pa) > pressure_limit_pa)
+    {
+        return 0u;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  D2 깨짐으로 compensation이 발광하는 경우를 위해                     */
+    /*  temperature jump도 한 번 막는다.                                   */
+    /* ------------------------------------------------------------------ */
+    if (GY86_Abs32(candidate_temp_cdeg - imu->baro.temp_cdeg) >
+        (uint32_t)GY86_MS5611_PUBLISH_TEMP_STEP_FLOOR_CDEG)
+    {
+        return 0u;
+    }
+
+    return 1u;
+}
+
 static void GY86_Ms5611_PublishFusedSample(app_gy86_state_t *imu,
                                            uint32_t now_ms,
                                            uint8_t *updated)
@@ -1868,6 +2003,16 @@ static void GY86_Ms5611_PublishFusedSample(app_gy86_state_t *imu,
 
     fused_pressure_pa = (int32_t)(pressure_acc / (int64_t)fused_weight_sum);
     fused_temp_cdeg = (int32_t)(temp_acc / (int64_t)fused_weight_sum);
+
+    if (GY86_Ms5611_PublishedSampleAccepted(imu,
+                                            primary_dev,
+                                            latest_timestamp_ms,
+                                            fused_pressure_pa,
+                                            fused_temp_cdeg) == 0u)
+    {
+        GY86_Ms5611_UpdateAppStateDiagnostics(imu, now_ms);
+        return;
+    }
 
     imu->baro.timestamp_ms      = latest_timestamp_ms;
     imu->baro.sample_count      = ++s_gy86_rt.fused_baro_sample_count;
