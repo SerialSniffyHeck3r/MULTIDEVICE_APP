@@ -156,7 +156,7 @@ static const unsigned char vario_icon_vario_led_down_bits[] = {
 #define VARIO_UI_TOP_GLD_GAUGE_TOP_Y               0
 #define VARIO_UI_TOP_GLD_GAUGE_H                  10
 #define VARIO_UI_TOP_GLD_GAUGE_TEXT_GAP_Y          2
-#define VARIO_UI_TOP_GLD_GAUGE_MAX_RATIO          60.0f
+#define VARIO_UI_TOP_GLD_GAUGE_MAX_RATIO          20.0f
 #define VARIO_UI_TOP_GLD_GAUGE_MINOR_STEP          5.0f
 #define VARIO_UI_TOP_GLD_GAUGE_MAJOR_STEP         10.0f
 #define VARIO_UI_TOP_GLD_GAUGE_MINOR_TICK_H        5
@@ -1392,20 +1392,32 @@ static void vario_display_update_slow_number_caches(const vario_runtime_t *rt)
     }
 
     now_ms = (rt->last_task_ms != 0u) ? rt->last_task_ms : rt->last_publish_ms;
-    target_speed_kmh = (rt->gs_bar_speed_kmh > 0.0f) ? rt->gs_bar_speed_kmh : rt->ground_speed_kmh;
+    target_speed_kmh = rt->filtered_ground_speed_kmh;
     if (target_speed_kmh < 0.0f)
     {
         target_speed_kmh = 0.0f;
     }
 
     /* ------------------------------------------------------------------ */
-    /* 큰 GS 숫자는 smoothing 없이 raw GPS ground speed를 그대로 쓴다.     */
-    /* trainer mode 역시 runtime.gps/gs_bar 경로에 synthetic speed를      */
-    /* 주입하므로, 여기서는 source만 raw path로 맞추면 된다.              */
+    /* 큰 GS 숫자만 느리게 보이게 만든다.                                  */
+    /*                                                                    */
+    /* - source : Vario_State 가 10 Hz GPS 샘플로 만든 filtered GS        */
+    /* - cadence: display layer 에서는 1초에 1번만 latch 한다.            */
+    /* - trainer mode 도 같은 runtime.filtered_ground_speed_kmh 경로를   */
+    /*   사용하므로 별도 분기 없이 trainer synthetic speed 가 표시된다.   */
     /* ------------------------------------------------------------------ */
-    s_vario_ui_dynamic.displayed_speed_valid = true;
-    s_vario_ui_dynamic.displayed_speed_kmh = target_speed_kmh;
-    s_vario_ui_dynamic.last_display_smoothing_ms = now_ms;
+    if ((s_vario_ui_dynamic.displayed_speed_valid == false) ||
+        (s_vario_ui_dynamic.last_display_smoothing_ms == 0u))
+    {
+        s_vario_ui_dynamic.displayed_speed_valid = true;
+        s_vario_ui_dynamic.displayed_speed_kmh = target_speed_kmh;
+        s_vario_ui_dynamic.last_display_smoothing_ms = now_ms;
+    }
+    else if ((now_ms - s_vario_ui_dynamic.last_display_smoothing_ms) >= 1000u)
+    {
+        s_vario_ui_dynamic.displayed_speed_kmh = target_speed_kmh;
+        s_vario_ui_dynamic.last_display_smoothing_ms = now_ms;
+    }
 
     if (s_vario_ui_dynamic.fast_average_glide_valid == false)
     {
@@ -1494,36 +1506,18 @@ static void vario_display_get_bar_display_values(const vario_runtime_t *rt,
     /* ---------------------------------------------------------------------- */
     /* 좌측 VARIO bar는 display layer에서 추가 필터를 넣지 않는다.            */
     /*                                                                        */
-    /* - source 값은 Vario_State 가 만든 fast snapshot 을 그대로 쓴다.         */
-    /* - 여기서는 scale-aware clamp 만 수행한다.                              */
-    /*                                                                        */
-    /* 우측 GS bar는 기존과 같은 가벼운 smoothing 을 유지하되,                */
-    /* smoothing 결과 역시 settings 기반 top speed 를 넘지 않게 고정한다.     */
+    /* 우측 GS bar 역시 raw path 를 그대로 쓴다.                             */
+    /* - 큰 GS 숫자만 1초 cadence / filtered path 를 타고,                    */
+    /* - 옆 그래프 bar 는 날것 속도를 즉시 보여 준다.                        */
     /* ---------------------------------------------------------------------- */
     *out_vario_bar_mps = target_vario_mps;
-
-    if ((s_vario_ui_dynamic.last_bar_update_ms == 0u) || (now_ms == 0u))
-    {
-        s_vario_ui_dynamic.filtered_gs_bar_kmh = target_gs_kmh;
-        s_vario_ui_dynamic.last_bar_update_ms = now_ms;
-    }
-    else if (now_ms != s_vario_ui_dynamic.last_bar_update_ms)
-    {
-        dt_s = ((float)(now_ms - s_vario_ui_dynamic.last_bar_update_ms)) * 0.001f;
-        dt_s = vario_display_clampf(dt_s, 0.010f, 0.250f);
-        alpha = dt_s / (0.12f + dt_s);
-        s_vario_ui_dynamic.filtered_gs_bar_kmh += alpha *
-            (target_gs_kmh - s_vario_ui_dynamic.filtered_gs_bar_kmh);
-        s_vario_ui_dynamic.filtered_gs_bar_kmh =
-            vario_display_clampf(s_vario_ui_dynamic.filtered_gs_bar_kmh,
-                                 0.0f,
-                                 gs_bar_limit_kmh);
-        s_vario_ui_dynamic.last_bar_update_ms = now_ms;
-    }
-
     *out_avg_vario_mps = average_vario_mps;
-    *out_gs_bar_kmh = s_vario_ui_dynamic.filtered_gs_bar_kmh;
+    *out_gs_bar_kmh = target_gs_kmh;
     *out_avg_speed_kmh = average_speed_kmh;
+
+    (void)now_ms;
+    (void)dt_s;
+    (void)alpha;
 }
 
 static bool vario_display_get_oldest_trail_point(const vario_runtime_t *rt,
