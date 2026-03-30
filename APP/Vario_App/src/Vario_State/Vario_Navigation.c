@@ -26,12 +26,12 @@
 #define VARIO_NAV_LIST_VISIBLE_ROWS 5u
 #endif
 
-#ifndef VARIO_NAV_TITLE_ROW_Y0
-#define VARIO_NAV_TITLE_ROW_Y0 20
+#ifndef VARIO_NAV_FIRST_ROW_BASELINE_Y
+#define VARIO_NAV_FIRST_ROW_BASELINE_Y 28
 #endif
 
-#ifndef VARIO_NAV_TITLE_ROW_STEP
-#define VARIO_NAV_TITLE_ROW_STEP 16
+#ifndef VARIO_NAV_ROW_STEP_Y
+#define VARIO_NAV_ROW_STEP_Y 16
 #endif
 
 #ifndef VARIO_NAV_EARTH_METERS_PER_DEG_LAT
@@ -508,7 +508,7 @@ static const char *vario_nav_source_name(vario_nav_target_source_t source)
             return "MARK";
         case VARIO_NAV_SOURCE_NONE:
         default:
-            return "NONE";
+            return "OFF";
     }
 }
 
@@ -1387,7 +1387,7 @@ void Vario_Navigation_HandleConfirmChoice(uint16_t context_id, uint8_t button_id
 
     if (button_id == 1u)
     {
-        vario_nav_show_simple_toast("Landing kept in RAM", now_ms);
+        vario_nav_show_simple_toast("Landing noted", now_ms);
     }
     else if (button_id == 2u)
     {
@@ -1510,11 +1510,15 @@ static void vario_nav_draw_list_row(u8g2_t *u8g2,
 {
     char left_text[40];
     char right_text[20];
+    char name_buf[VARIO_NAV_NAME_MAX];
+    const char *cardinal;
     int16_t row_top;
     int16_t row_h;
     int16_t arrow_cx;
     int16_t arrow_cy;
     int16_t text_x;
+    int16_t max_left_w;
+    uint8_t trim_len;
 
     if ((u8g2 == NULL) || (v == NULL) || (point == NULL) || (sol == NULL))
     {
@@ -1548,12 +1552,6 @@ static void vario_nav_draw_list_row(u8g2_t *u8g2,
     arrow_cy = (int16_t)(row_top + (row_h / 2));
     vario_nav_draw_dir_arrow(u8g2, arrow_cx, arrow_cy, sol->relative_bearing_deg);
 
-    snprintf(left_text,
-             sizeof(left_text),
-             "%s %s",
-             point->name,
-             vario_nav_cardinal16(sol->bearing_deg));
-
     if (sol->valid != false)
     {
         snprintf(right_text,
@@ -1569,9 +1567,51 @@ static void vario_nav_draw_list_row(u8g2_t *u8g2,
 
     u8g2_SetFont(u8g2, u8g2_font_5x8_tr);
     text_x = (int16_t)(arrow_cx + 9);
+    max_left_w = (int16_t)((v->x + v->w - 8) - text_x - 6 - u8g2_GetStrWidth(u8g2, right_text));
+    if (max_left_w < 24)
+    {
+        max_left_w = 24;
+    }
+
+    cardinal = vario_nav_cardinal16(sol->bearing_deg);
+    strncpy(name_buf, point->name, sizeof(name_buf) - 1u);
+    name_buf[sizeof(name_buf) - 1u] = '\0';
+    snprintf(left_text, sizeof(left_text), "%s %s", name_buf, cardinal);
+
+    if (u8g2_GetStrWidth(u8g2, left_text) > (uint16_t)max_left_w)
+    {
+        trim_len = (uint8_t)strlen(name_buf);
+        while ((trim_len > 3u) && (u8g2_GetStrWidth(u8g2, left_text) > (uint16_t)max_left_w))
+        {
+            --trim_len;
+            name_buf[trim_len] = '\0';
+            snprintf(left_text, sizeof(left_text), "%s~ %s", name_buf, cardinal);
+        }
+    }
+
     u8g2_DrawStr(u8g2, (u8g2_uint_t)text_x, (u8g2_uint_t)y_baseline, left_text);
     Vario_Display_DrawTextRight(u8g2, (int16_t)(v->x + v->w - 8), y_baseline, right_text);
     u8g2_SetDrawColor(u8g2, 1);
+}
+
+static int16_t vario_nav_get_row_baseline(const vario_viewport_t *v, uint8_t row_index)
+{
+    if (v == NULL)
+    {
+        return (int16_t)(VARIO_NAV_FIRST_ROW_BASELINE_Y + ((int16_t)row_index * VARIO_NAV_ROW_STEP_Y));
+    }
+
+    return (int16_t)(v->y + VARIO_NAV_FIRST_ROW_BASELINE_Y + ((int16_t)row_index * VARIO_NAV_ROW_STEP_Y));
+}
+
+static int16_t vario_nav_get_empty_state_baseline(const vario_viewport_t *v)
+{
+    if (v == NULL)
+    {
+        return 64;
+    }
+
+    return (int16_t)(v->y + (v->h / 2));
 }
 
 static void vario_nav_get_page_title(char *title, size_t title_size)
@@ -1584,16 +1624,16 @@ static void vario_nav_get_page_title(char *title, size_t title_size)
     switch (s_nav.open_page)
     {
         case VARIO_NAV_PAGE_HOME:
-            snprintf(title, title_size, "TARGET HOME");
+            snprintf(title, title_size, "HOME");
             break;
         case VARIO_NAV_PAGE_LAUNCH:
-            snprintf(title, title_size, "TARGET LAUNCH");
+            snprintf(title, title_size, "LAUNCH");
             break;
         case VARIO_NAV_PAGE_NEARBY_LANDABLE:
             snprintf(title, title_size, "NEARBY LANDABLE");
             break;
         case VARIO_NAV_PAGE_USER_WAYPOINTS:
-            snprintf(title, title_size, "USER WAYPOINTS");
+            snprintf(title, title_size, "WAYPOINTS");
             break;
         case VARIO_NAV_PAGE_MARK_HERE:
             snprintf(title, title_size, "MARK HERE");
@@ -1693,37 +1733,37 @@ void Vario_Navigation_RenderSettingPage(u8g2_t *u8g2)
 
     if (s_nav.open_page == VARIO_NAV_PAGE_HOME)
     {
-        Vario_Display_DrawMenuRow(u8g2, v, (int16_t)(v->y + 20), (s_nav.cursor == 0u), "Activate", (s_nav.home.valid != false) ? "HOME" : "--");
-        Vario_Display_DrawMenuRow(u8g2, v, (int16_t)(v->y + 36), (s_nav.cursor == 1u), "Set Home Here", "GPS");
-        Vario_Display_DrawMenuRow(u8g2, v, (int16_t)(v->y + 52), (s_nav.cursor == 2u), "Home = Launch", (s_nav.launch.valid != false) ? "COPY" : "--");
-        Vario_Display_DrawMenuRow(u8g2, v, (int16_t)(v->y + 68), (s_nav.cursor == 3u), "Clear Home", " ");
+        Vario_Display_DrawMenuRow(u8g2, v, vario_nav_get_row_baseline(v, 0u), (s_nav.cursor == 0u), "Activate", (s_nav.home.valid != false) ? "HOME" : "--");
+        Vario_Display_DrawMenuRow(u8g2, v, vario_nav_get_row_baseline(v, 1u), (s_nav.cursor == 1u), "Set Home Here", "GPS");
+        Vario_Display_DrawMenuRow(u8g2, v, vario_nav_get_row_baseline(v, 2u), (s_nav.cursor == 2u), "Use Launch", (s_nav.launch.valid != false) ? "SET" : "--");
+        Vario_Display_DrawMenuRow(u8g2, v, vario_nav_get_row_baseline(v, 3u), (s_nav.cursor == 3u), "Clear Home", "");
         return;
     }
 
     if (s_nav.open_page == VARIO_NAV_PAGE_LAUNCH)
     {
-        Vario_Display_DrawMenuRow(u8g2, v, (int16_t)(v->y + 20), (s_nav.cursor == 0u), "Activate", (s_nav.launch.valid != false) ? "LAUNCH" : "--");
-        Vario_Display_DrawMenuRow(u8g2, v, (int16_t)(v->y + 36), (s_nav.cursor == 1u), "Save as Field", "RAM");
-        Vario_Display_DrawMenuRow(u8g2, v, (int16_t)(v->y + 52), (s_nav.cursor == 2u), "Set Home = Launch", "COPY");
+        Vario_Display_DrawMenuRow(u8g2, v, vario_nav_get_row_baseline(v, 0u), (s_nav.cursor == 0u), "Activate", (s_nav.launch.valid != false) ? "LAUNCH" : "--");
+        Vario_Display_DrawMenuRow(u8g2, v, vario_nav_get_row_baseline(v, 1u), (s_nav.cursor == 1u), "Save as Field", "SAVE");
+        Vario_Display_DrawMenuRow(u8g2, v, vario_nav_get_row_baseline(v, 2u), (s_nav.cursor == 2u), "Set as Home", "HOME");
         return;
     }
 
     if (s_nav.open_page == VARIO_NAV_PAGE_MARK_HERE)
     {
-        Vario_Display_DrawMenuRow(u8g2, v, (int16_t)(v->y + 20), (s_nav.cursor == 0u), "Save as WP", "RAM");
-        Vario_Display_DrawMenuRow(u8g2, v, (int16_t)(v->y + 36), (s_nav.cursor == 1u), "Save as Field", "RAM");
-        Vario_Display_DrawMenuRow(u8g2, v, (int16_t)(v->y + 52), (s_nav.cursor == 2u), "Set Home Here", "GPS");
-        Vario_Display_DrawMenuRow(u8g2, v, (int16_t)(v->y + 68), (s_nav.cursor == 3u), "Target Here", "MARK");
+        Vario_Display_DrawMenuRow(u8g2, v, vario_nav_get_row_baseline(v, 0u), (s_nav.cursor == 0u), "Save as WP", "SAVE");
+        Vario_Display_DrawMenuRow(u8g2, v, vario_nav_get_row_baseline(v, 1u), (s_nav.cursor == 1u), "Save as Field", "SAVE");
+        Vario_Display_DrawMenuRow(u8g2, v, vario_nav_get_row_baseline(v, 2u), (s_nav.cursor == 2u), "Set Home Here", "HOME");
+        Vario_Display_DrawMenuRow(u8g2, v, vario_nav_get_row_baseline(v, 3u), (s_nav.cursor == 3u), "Use as Target", "MARK");
         return;
     }
 
     if (s_nav.open_page == VARIO_NAV_PAGE_CLEAR_TARGET)
     {
-        Vario_Display_DrawMenuRow(u8g2, v, (int16_t)(v->y + 20), true, "Clear Active Target", "OK");
+        Vario_Display_DrawMenuRow(u8g2, v, vario_nav_get_row_baseline(v, 0u), true, "Clear Active Target", "CLEAR");
         return;
     }
 
-    y = (int16_t)(v->y + VARIO_NAV_TITLE_ROW_Y0);
+    y = vario_nav_get_row_baseline(v, 0u);
     for (row = 0u; row < rows; ++row)
     {
         vario_nav_point_t point;
@@ -1754,15 +1794,15 @@ void Vario_Navigation_RenderSettingPage(u8g2_t *u8g2)
                                     &point,
                                     &sol);
         }
-        y = (int16_t)(y + VARIO_NAV_TITLE_ROW_STEP);
+        y = (int16_t)(y + VARIO_NAV_ROW_STEP_Y);
     }
 
     if ((count == 0u) && (s_nav.open_page == VARIO_NAV_PAGE_NEARBY_LANDABLE))
     {
-        Vario_Display_DrawTextCentered(u8g2, (int16_t)(v->x + (v->w / 2)), (int16_t)(v->y + 44), "NO LANDABLES IN RAM");
+        Vario_Display_DrawTextCentered(u8g2, (int16_t)(v->x + (v->w / 2)), vario_nav_get_empty_state_baseline(v), "NO LANDABLES SAVED");
     }
     else if ((count == 0u) && (s_nav.open_page == VARIO_NAV_PAGE_USER_WAYPOINTS))
     {
-        Vario_Display_DrawTextCentered(u8g2, (int16_t)(v->x + (v->w / 2)), (int16_t)(v->y + 44), "NO WAYPOINTS IN RAM");
+        Vario_Display_DrawTextCentered(u8g2, (int16_t)(v->x + (v->w / 2)), vario_nav_get_empty_state_baseline(v), "NO WAYPOINTS SAVED");
     }
 }
