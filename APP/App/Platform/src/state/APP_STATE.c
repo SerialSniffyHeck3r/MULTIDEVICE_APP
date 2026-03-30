@@ -94,7 +94,7 @@ static void APP_STATE_ApplyDefaultSettingsUnlocked(void)
         g_app_state.settings.altitude.pressure_correction_hpa_x100   = 0;
                g_app_state.settings.altitude.gps_auto_equiv_qnh_enabled     = 1u;
                g_app_state.settings.altitude.gps_bias_correction_enabled    = 1u;
-               g_app_state.settings.altitude.imu_aid_enabled                = 0u;
+               g_app_state.settings.altitude.imu_aid_enabled                = 1u;
                g_app_state.settings.altitude.auto_home_capture_enabled      = 1u;
 
                /*  IMU sign + sensor poll debug gate 기본값                           */
@@ -123,43 +123,56 @@ static void APP_STATE_ApplyDefaultSettingsUnlocked(void)
                /* ------------------------------------------------------------------ */
                /*  pressure / vario / display 반응 속도                               */
                /*                                                                    */
-               /*  pressure_lpf_tau_ms = 110ms                                        */
-               /*  - raw pressure 잔떨림을 줄이되, baro 고유 응답성은 유지한다.       */
+               /*  pressure_lpf_tau_ms = 100ms                                        */
+               /*  - 느린 altitude backbone 쪽 pressure LPF                           */
+               /*  - fast audio path는 이제 별도 pressure tau(18ms)를 쓰므로         */
+               /*    여기 값을 너무 극단적으로 줄일 필요는 없다.                     */
+               /*  - 값을 더 줄이면 숫자 altitude / display가 더 예민해지고,          */
+               /*    더 늘리면 숫자는 차분해지지만 QNH altitude step 반응이 둔해진다. */
                /*                                                                    */
-               /*  vario_fast_tau_ms = 160ms                                          */
-               /*  - 오디오/즉응용 fast vario                                         */
+               /*  vario_fast_tau_ms = 60ms                                           */
+               /*  - 이제 "fast vario의 release / decay tau" 의미가 강하다.          */
+               /*  - attack은 APP_ALTITUDE 내부의 FAST_VARIO_ATTACK_TAU_MS가          */
+               /*    담당하므로, 이 값은 onset을 늦추기보다 chatter / tail을          */
+               /*    얼마나 눌러 줄지에 더 가깝다.                                   */
+               /*  - 값을 줄이면 툭 들었을 때/내렸을 때 더 즉각적이고,                 */
+               /*    늘리면 더 고급스럽게 매끈하지만 꼬리가 길어진다.                */
                /*                                                                    */
-               /*  vario_slow_tau_ms = 900ms                                          */
-               /*  - 숫자 표시/경사도용 slow vario                                    */
+               /*  vario_slow_tau_ms = 850ms                                          */
+               /*  - 숫자 표시/평균적인 truth vario 용 느린 경로                      */
+               /*  - 값이 작아질수록 숫자 vario도 더 예민해진다.                      */
                /*                                                                    */
                /*  display_lpf_tau_ms = 650ms                                         */
-               /*  - stage-1 display altitude 기본 LPF                                */
-               /*  - 이번 패치에서는 최종 UI presentation 계층이 한 번 더 있으므로     */
-               /*    기존 450ms보다 약간만 더 눌러서 제품 느낌을 만든다.              */
+               /*  - display altitude stage-1 LPF                                     */
+               /*  - fast trigger와 분리되므로 표시감만 따로 유지한다.               */
                /* ------------------------------------------------------------------ */
-               g_app_state.settings.altitude.pressure_lpf_tau_ms            = 110u;
-               g_app_state.settings.altitude.vario_fast_tau_ms              = 160u;
-               g_app_state.settings.altitude.vario_slow_tau_ms              = 900u;
+               g_app_state.settings.altitude.pressure_lpf_tau_ms            = 100u;
+               g_app_state.settings.altitude.vario_fast_tau_ms              = 60u;
+               g_app_state.settings.altitude.vario_slow_tau_ms              = 850u;
                g_app_state.settings.altitude.display_lpf_tau_ms             = 650u;
 
                /* ------------------------------------------------------------------ */
                /*  정지 상태 display 안정화 + ZUPT 기본값                             */
                /*                                                                    */
-               /*  rest_detect_vario_cms  = 0.12m/s                                   */
+               /*  rest_detect_vario_cms  = 0.10m/s                                   */
+               /*  - display rest 판정용 기준                                         */
+               /*  - 이번 수술 이후 ZUPT entry/exit/hysteresis 는                      */
+               /*    APP_ALTITUDE 내부의 별도 상수로 분리되었다.                      */
+               /*  - 즉, 이 값을 만져도 fast audio onset이 예전만큼 크게 죽지 않는다. */
+               /*                                                                    */
                /*  rest_detect_accel_mg   = 15mg                                       */
                /*  rest_display_tau_ms    = 2.6s                                       */
                /*  rest_display_hold_cm   = ±20cm                                      */
                /*  zupt_enabled           = 1                                          */
                /*                                                                    */
                /*  주의                                                               */
-               /*  - rest_detect_* 는 ZUPT 판정과도 공유되므로 그대로 둔다.           */
-               /*  - 이번 변경은 "정지로 판정된 뒤 숫자를 얼마나 오래 붙잡을지"만     */
-               /*    더 제품화하는 조정이다.                                          */
+               /*  - display rest는 숫자 안정화 역할                                  */
+               /*  - core ZUPT는 dwell+hysteresis를 통과한 뒤에만 걸린다.             */
                /* ------------------------------------------------------------------ */
                g_app_state.settings.altitude.rest_display_enabled           = 1u;
                g_app_state.settings.altitude.zupt_enabled                   = 1u;
                g_app_state.settings.altitude.reserved_rest0                 = 0u;
-               g_app_state.settings.altitude.rest_detect_vario_cms          = 12u;
+               g_app_state.settings.altitude.rest_detect_vario_cms          = 10u;
                g_app_state.settings.altitude.rest_detect_accel_mg           = 15u;
                g_app_state.settings.altitude.rest_display_tau_ms            = 2600u;
                g_app_state.settings.altitude.rest_display_hold_cm           = 20u;
@@ -179,19 +192,20 @@ static void APP_STATE_ApplyDefaultSettingsUnlocked(void)
                /* ------------------------------------------------------------------ */
                /*  baro velocity observation                                          */
                /*                                                                    */
-               /*  baro_vario_lpf_tau_ms            = 80ms                            */
-               /*  baro_vario_measurement_noise_cms = 0.65m/s                         */
+               /*  baro_vario_lpf_tau_ms            = 55ms                            */
+               /*  - regression slope 후단 truth LPF                                  */
+               /*  - raw slope는 fast trigger branch가 따로 가져가므로                 */
+               /*    여기 값은 backbone을 얼마나 매끈하게 둘지 조절한다.              */
+               /*  - 줄이면 더 민감, 늘리면 더 안정.                                  */
                /*                                                                    */
-               /*  regression slope로 만든 velocity 관측은                            */
-               /*  정지 bench에서도 가장 시끄러운 경로이므로                           */
-               /*  nominal R를 기존보다 보수적으로 높여                               */
-               /*  small pressure jitter를 덜 믿게 만든다.                             */
-               /*                                                                    */
-               /*  이 값은 regression slope를 velocity measurement로 사용할 때        */
-               /*  얼마나 매끈하게 / 얼마나 신뢰할지 정한다.                           */
+               /*  baro_vario_measurement_noise_cms = 0.42m/s                         */
+               /*  - KF가 baro velocity observation을 얼마나 믿을지 정하는 nominal R  */
+               /*  - adaptive noise / rest-aware scaling / residual gate가            */
+               /*    여전히 남아 있으므로, 기존 0.65m/s보다 과감하게 낮춘다.          */
+               /*  - 값을 더 줄이면 onset은 빨라지지만 false climb도 늘 수 있다.      */
                /* ------------------------------------------------------------------ */
-               g_app_state.settings.altitude.baro_vario_lpf_tau_ms            = 80u;
-               g_app_state.settings.altitude.baro_vario_measurement_noise_cms = 65u;
+               g_app_state.settings.altitude.baro_vario_lpf_tau_ms            = 55u;
+               g_app_state.settings.altitude.baro_vario_measurement_noise_cms = 42u;
 
                 /* ------------------------------------------------------------------ */
                 /*  IMU vertical estimate 기본값                                       */

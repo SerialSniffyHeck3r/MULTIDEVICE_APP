@@ -382,9 +382,26 @@ typedef enum
 
 typedef enum
 {
+    /* ------------------------------------------------------------------ */
+    /*  BANK ANGLE CALC backend selection                                  */
+    /*                                                                    */
+    /*  FUSION   : IMU + coordinated manoeuvre + GNSS/OBD aid 를 모두 사용 */
+    /*  OBD      : OBD speed + IMU yaw-rate 기반 coordinated lean 우선      */
+    /*  GNSS     : GNSS speed/course + IMU 기반 lean aid 우선               */
+    /*  IMU_ONLY : 외부 aid를 lean / LatG 계산에 전혀 사용하지 않음         */
+    /* ------------------------------------------------------------------ */
+    APP_BIKE_BANK_CALC_MODE_FUSION   = 0u,
+    APP_BIKE_BANK_CALC_MODE_OBD      = 1u,
+    APP_BIKE_BANK_CALC_MODE_GNSS     = 2u,
+    APP_BIKE_BANK_CALC_MODE_IMU_ONLY = 3u
+} app_bike_bank_calc_mode_t;
+
+typedef enum
+{
     APP_BIKE_ESTIMATOR_MODE_IMU_ONLY   = 0u,
     APP_BIKE_ESTIMATOR_MODE_GNSS_AIDED = 1u,
-    APP_BIKE_ESTIMATOR_MODE_OBD_AIDED  = 2u
+    APP_BIKE_ESTIMATOR_MODE_OBD_AIDED  = 2u,
+    APP_BIKE_ESTIMATOR_MODE_FUSION     = 3u
 } app_bike_estimator_mode_t;
 
 /* -------------------------------------------------------------------------- */
@@ -413,6 +430,7 @@ typedef struct
     uint8_t auto_zero_on_boot;           /* 1이면 첫 유효 IMU 샘플에서 자동 reset   */
     uint8_t gnss_aid_enabled;            /* 1이면 GNSS speed/course aid 사용        */
     uint8_t obd_aid_enabled;             /* 1이면 future OBD speed aid 사용         */
+    uint8_t bank_calc_mode;              /* app_bike_bank_calc_mode_t raw           */
 
     /* ---------------------------------------------------------------------- */
     /*  장착 축 / yaw trim                                                      */

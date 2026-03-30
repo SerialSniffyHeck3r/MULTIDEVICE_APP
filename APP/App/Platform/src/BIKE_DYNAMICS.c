@@ -116,6 +116,48 @@
 #define BIKE_DYN_TRUST_SMOOTH_TAU_MS         (120u)
 
 /* -------------------------------------------------------------------------- */
+/*  coordinated manoeuvre lean fusion                                         */
+/*                                                                            */
+/*  논문식 핵심 아이디어                                                      */
+/*  - steady / quasi-steady corner 에서는                                     */
+/*      tan(bank) ≈ lateral_specific_force / g                                */
+/*  - 즉, speed * yaw-rate 또는 GNSS course-rate 로 얻은 lateral reference 를  */
+/*    lean pseudo-measurement 로 다시 사용할 수 있다.                         */
+/*                                                                            */
+/*  tuning 경향                                                               */
+/*  - MIN_LAT_G 를 올리면 직진/저동특성에서 외부 aid 영향이 줄고 더 보수적     */
+/*  - FULL_LAT_G 를 내리면 코너 진입부터 coordinated lean 비중이 빨라짐       */
+/*  - MAX_LON_G 를 낮추면 제동/가속이 섞인 구간에서 coordinated lean 비중 감소 */
+/* -------------------------------------------------------------------------- */
+#define BIKE_DYN_COORD_MIN_LAT_G                (0.08f)
+#define BIKE_DYN_COORD_FULL_LAT_G               (0.45f)
+#define BIKE_DYN_COORD_MAX_LON_G                (0.35f)
+#define BIKE_DYN_COORD_BLEND_MAX_FUSION         (0.60f)
+#define BIKE_DYN_COORD_BLEND_MAX_SOURCE_ONLY    (1.00f)
+
+/* -------------------------------------------------------------------------- */
+/*  online mount self-calibration                                             */
+/*                                                                            */
+/*  구현 범위                                                                 */
+/*  - 현재 구조에서는 zero capture 가 roll/pitch mounting 오차를 이미 흡수한다.*/
+/*  - 따라서 온라인 self-cal의 실질적 핵심은 yaw mounting trim 을              */
+/*    주행 중 천천히 추정하는 것이다.                                         */
+/*                                                                            */
+/*  tuning 경향                                                               */
+/*  - MIN_REF_G 를 올리면 더 큰 동특성 구간에서만 학습 -> 안정적이지만 느림    */
+/*  - MAX_ERR_DEG 를 내리면 이상치 억제는 좋아지나 수렴 속도 저하             */
+/*  - RATE_DEG_PER_S 를 올리면 빠르게 맞지만 transient에 과민해질 수 있음      */
+/*  - MAX_ABS_YAW_DEG 는 기계 장착 오차 허용 상한                             */
+/* -------------------------------------------------------------------------- */
+#define BIKE_DYN_MOUNT_SELF_CAL_MIN_REF_G       (0.20f)
+#define BIKE_DYN_MOUNT_SELF_CAL_MAX_REF_G       (1.20f)
+#define BIKE_DYN_MOUNT_SELF_CAL_MAX_ERR_DEG     (8.0f)
+#define BIKE_DYN_MOUNT_SELF_CAL_MAX_ABS_YAW_DEG (12.0f)
+#define BIKE_DYN_MOUNT_SELF_CAL_RATE_DEG_PER_S  (0.32f)
+#define BIKE_DYN_MOUNT_SELF_CAL_MIN_QUALITY     (450.0f)
+#define BIKE_DYN_MOUNT_SELF_CAL_MIN_SPEED_MMPS  (2500)
+
+/* -------------------------------------------------------------------------- */
 /*  내부 런타임                                                                 */
 /*                                                                            */
 /*  중요                                                                       */
@@ -266,10 +308,22 @@ typedef struct
     /* ---------------------------------------------------------------------- */
     float bank_raw_deg;
     float grade_raw_deg;
+    float bank_imu_deg;      /* gravity-only instantaneous bank estimate      */
+    float bank_coord_deg;    /* coordinated-manouevre pseudo measurement      */
     float bank_display_deg;
     float grade_display_deg;
     float bank_rate_dps;
     float grade_rate_dps;
+
+    /* ---------------------------------------------------------------------- */
+    /*  online yaw mount self-cal                                              */
+    /*                                                                        */
+    /*  mount_auto_yaw_deg                                                     */
+    /*  - static user trim(settings->mount_yaw_trim_deg_x10) 과 별도로          */
+    /*    주행 중 천천히 적응되는 runtime trim                                  */
+    /*  - zero capture는 roll/pitch 오차를 잡고, 이 변수는 yaw 오차를 잡는다.  */
+    /* ---------------------------------------------------------------------- */
+    float mount_auto_yaw_deg;
 
     /* ---------------------------------------------------------------------- */
     /*  IMU level-frame acceleration                                            */
@@ -1039,22 +1093,71 @@ static void BIKE_DYN_UpdateGnssAidHysteresis(bool raw_speed_good,
 }
 
 /* -------------------------------------------------------------------------- */
-/*  speed source selection                                                      */
+/*  bank calculation backend / speed source selection                           */
 /* -------------------------------------------------------------------------- */
-static uint8_t BIKE_DYN_SelectSpeedSource(bool obd_speed_valid,
+static uint8_t BIKE_DYN_GetBankCalcMode(const app_bike_settings_t *settings)
+{
+    if (settings == 0)
+    {
+        return (uint8_t)APP_BIKE_BANK_CALC_MODE_FUSION;
+    }
+
+    switch ((app_bike_bank_calc_mode_t)settings->bank_calc_mode)
+    {
+    case APP_BIKE_BANK_CALC_MODE_FUSION:
+    case APP_BIKE_BANK_CALC_MODE_OBD:
+    case APP_BIKE_BANK_CALC_MODE_GNSS:
+    case APP_BIKE_BANK_CALC_MODE_IMU_ONLY:
+        return settings->bank_calc_mode;
+
+    default:
+        return (uint8_t)APP_BIKE_BANK_CALC_MODE_FUSION;
+    }
+}
+
+static bool BIKE_DYN_ModeAllowsGnss(uint8_t bank_calc_mode)
+{
+    return ((bank_calc_mode == (uint8_t)APP_BIKE_BANK_CALC_MODE_FUSION) ||
+            (bank_calc_mode == (uint8_t)APP_BIKE_BANK_CALC_MODE_GNSS)) ? true : false;
+}
+
+static bool BIKE_DYN_ModeAllowsObd(uint8_t bank_calc_mode)
+{
+    return ((bank_calc_mode == (uint8_t)APP_BIKE_BANK_CALC_MODE_FUSION) ||
+            (bank_calc_mode == (uint8_t)APP_BIKE_BANK_CALC_MODE_OBD)) ? true : false;
+}
+
+static uint8_t BIKE_DYN_SelectSpeedSource(uint8_t bank_calc_mode,
+                                          bool obd_speed_valid,
                                           bool gnss_speed_valid)
 {
-    if (obd_speed_valid != false)
+    switch ((app_bike_bank_calc_mode_t)bank_calc_mode)
     {
-        return (uint8_t)APP_BIKE_SPEED_SOURCE_OBD;
-    }
+    case APP_BIKE_BANK_CALC_MODE_OBD:
+        return (obd_speed_valid != false) ? (uint8_t)APP_BIKE_SPEED_SOURCE_OBD
+                                          : (uint8_t)APP_BIKE_SPEED_SOURCE_IMU_FALLBACK;
 
-    if (gnss_speed_valid != false)
-    {
-        return (uint8_t)APP_BIKE_SPEED_SOURCE_GNSS;
-    }
+    case APP_BIKE_BANK_CALC_MODE_GNSS:
+        return (gnss_speed_valid != false) ? (uint8_t)APP_BIKE_SPEED_SOURCE_GNSS
+                                           : (uint8_t)APP_BIKE_SPEED_SOURCE_IMU_FALLBACK;
 
-    return (uint8_t)APP_BIKE_SPEED_SOURCE_IMU_FALLBACK;
+    case APP_BIKE_BANK_CALC_MODE_IMU_ONLY:
+        return (uint8_t)APP_BIKE_SPEED_SOURCE_IMU_FALLBACK;
+
+    case APP_BIKE_BANK_CALC_MODE_FUSION:
+    default:
+        if (obd_speed_valid != false)
+        {
+            return (uint8_t)APP_BIKE_SPEED_SOURCE_OBD;
+        }
+
+        if (gnss_speed_valid != false)
+        {
+            return (uint8_t)APP_BIKE_SPEED_SOURCE_GNSS;
+        }
+
+        return (uint8_t)APP_BIKE_SPEED_SOURCE_IMU_FALLBACK;
+    }
 }
 
 static int32_t BIKE_DYN_GetSelectedSpeedMmps(uint8_t speed_source,
@@ -1726,6 +1829,8 @@ static bool BIKE_DYN_RebuildZeroBasis(const app_bike_settings_t *settings)
     /* ---------------------------------------------------------------------- */
     s_bike_runtime.bank_raw_deg      = 0.0f;
     s_bike_runtime.grade_raw_deg     = 0.0f;
+    s_bike_runtime.bank_imu_deg      = 0.0f;
+    s_bike_runtime.bank_coord_deg    = 0.0f;
     s_bike_runtime.bank_display_deg  = 0.0f;
     s_bike_runtime.grade_display_deg = 0.0f;
 
@@ -1738,6 +1843,108 @@ static bool BIKE_DYN_RebuildZeroBasis(const app_bike_settings_t *settings)
 }
 
 
+static int16_t BIKE_DYN_GetRuntimeAutoYawTrimDegX10(void)
+{
+    return BIKE_DYN_RoundFloatToS16X10(BIKE_DYN_ClampF(s_bike_runtime.mount_auto_yaw_deg * 10.0f,
+                                                       -300.0f,
+                                                        300.0f));
+}
+
+static bool BIKE_DYN_GetCorrectedZeroHints(float *out_fwd_x,
+                                           float *out_fwd_y,
+                                           float *out_fwd_z,
+                                           float *out_left_x,
+                                           float *out_left_y,
+                                           float *out_left_z,
+                                           float *out_up_x,
+                                           float *out_up_y,
+                                           float *out_up_z)
+{
+    float fwd_x;
+    float fwd_y;
+    float fwd_z;
+    float left_x;
+    float left_y;
+    float left_z;
+    float up_x;
+    float up_y;
+    float up_z;
+    float rot_fwd_x;
+    float rot_fwd_y;
+    float rot_fwd_z;
+    float angle_rad;
+
+    if ((out_fwd_x == 0) || (out_fwd_y == 0) || (out_fwd_z == 0) ||
+        (out_left_x == 0) || (out_left_y == 0) || (out_left_z == 0) ||
+        (out_up_x == 0) || (out_up_y == 0) || (out_up_z == 0))
+    {
+        return false;
+    }
+
+    if (s_bike_runtime.zero_valid == false)
+    {
+        return false;
+    }
+
+    fwd_x = s_bike_runtime.zero_fwd_x_s;
+    fwd_y = s_bike_runtime.zero_fwd_y_s;
+    fwd_z = s_bike_runtime.zero_fwd_z_s;
+    left_x = s_bike_runtime.zero_left_x_s;
+    left_y = s_bike_runtime.zero_left_y_s;
+    left_z = s_bike_runtime.zero_left_z_s;
+    up_x = s_bike_runtime.zero_up_x_s;
+    up_y = s_bike_runtime.zero_up_y_s;
+    up_z = s_bike_runtime.zero_up_z_s;
+
+    /* ------------------------------------------------------------------ */
+    /*  online yaw mount self-cal 적용                                       */
+    /*                                                                      */
+    /*  zero capture는 static up + mount axis로 roll/pitch 기준을 잡는다.   */
+    /*  남는 장착 오차는 주로 vertical axis 주위 yaw trim 이므로,            */
+    /*  주행 중 학습된 runtime yaw trim 을 zero hints 에만 추가 회전한다.   */
+    /* ------------------------------------------------------------------ */
+    if (fabsf(s_bike_runtime.mount_auto_yaw_deg) > 0.01f)
+    {
+        angle_rad = s_bike_runtime.mount_auto_yaw_deg * BIKE_DYN_DEG2RAD;
+        BIKE_DYN_RotateVecAroundAxis(fwd_x,
+                                     fwd_y,
+                                     fwd_z,
+                                     up_x,
+                                     up_y,
+                                     up_z,
+                                     angle_rad,
+                                     &rot_fwd_x,
+                                     &rot_fwd_y,
+                                     &rot_fwd_z);
+
+        fwd_x = rot_fwd_x;
+        fwd_y = rot_fwd_y;
+        fwd_z = rot_fwd_z;
+
+        if (BIKE_DYN_Normalize3(&fwd_x, &fwd_y, &fwd_z) == false)
+        {
+            return false;
+        }
+
+        BIKE_DYN_Cross3(up_x, up_y, up_z, fwd_x, fwd_y, fwd_z, &left_x, &left_y, &left_z);
+        if (BIKE_DYN_Normalize3(&left_x, &left_y, &left_z) == false)
+        {
+            return false;
+        }
+    }
+
+    *out_fwd_x = fwd_x;
+    *out_fwd_y = fwd_y;
+    *out_fwd_z = fwd_z;
+    *out_left_x = left_x;
+    *out_left_y = left_y;
+    *out_left_z = left_z;
+    *out_up_x = up_x;
+    *out_up_y = up_y;
+    *out_up_z = up_z;
+    return true;
+}
+
 static bool BIKE_DYN_BuildCurrentLevelAxes(float *out_fwd_x,
                                            float *out_fwd_y,
                                            float *out_fwd_z,
@@ -1748,6 +1955,15 @@ static bool BIKE_DYN_BuildCurrentLevelAxes(float *out_fwd_x,
     float up_x;
     float up_y;
     float up_z;
+    float hint_fwd_x;
+    float hint_fwd_y;
+    float hint_fwd_z;
+    float hint_left_x;
+    float hint_left_y;
+    float hint_left_z;
+    float hint_up_x;
+    float hint_up_y;
+    float hint_up_z;
     float discard_up_x;
     float discard_up_y;
     float discard_up_z;
@@ -1763,6 +1979,23 @@ static bool BIKE_DYN_BuildCurrentLevelAxes(float *out_fwd_x,
         return false;
     }
 
+    if (BIKE_DYN_GetCorrectedZeroHints(&hint_fwd_x,
+                                       &hint_fwd_y,
+                                       &hint_fwd_z,
+                                       &hint_left_x,
+                                       &hint_left_y,
+                                       &hint_left_z,
+                                       &hint_up_x,
+                                       &hint_up_y,
+                                       &hint_up_z) == false)
+    {
+        return false;
+    }
+
+    (void)hint_up_x;
+    (void)hint_up_y;
+    (void)hint_up_z;
+
     up_x = s_bike_runtime.gravity_est_x_s;
     up_y = s_bike_runtime.gravity_est_y_s;
     up_z = s_bike_runtime.gravity_est_z_s;
@@ -1770,12 +2003,12 @@ static bool BIKE_DYN_BuildCurrentLevelAxes(float *out_fwd_x,
     return BIKE_DYN_BuildAxesFromUpAndHints(up_x,
                                             up_y,
                                             up_z,
-                                            s_bike_runtime.zero_fwd_x_s,
-                                            s_bike_runtime.zero_fwd_y_s,
-                                            s_bike_runtime.zero_fwd_z_s,
-                                            s_bike_runtime.zero_left_x_s,
-                                            s_bike_runtime.zero_left_y_s,
-                                            s_bike_runtime.zero_left_z_s,
+                                            hint_fwd_x,
+                                            hint_fwd_y,
+                                            hint_fwd_z,
+                                            hint_left_x,
+                                            hint_left_y,
+                                            hint_left_z,
                                             0,
                                             out_fwd_x,
                                             out_fwd_y,
@@ -2593,6 +2826,15 @@ static void BIKE_DYN_UpdateOutputsFromCurrentImu(const app_bike_settings_t *sett
     float level_left_x;
     float level_left_y;
     float level_left_z;
+    float zero_hint_fwd_x;
+    float zero_hint_fwd_y;
+    float zero_hint_fwd_z;
+    float zero_hint_left_x;
+    float zero_hint_left_y;
+    float zero_hint_left_z;
+    float zero_hint_up_x;
+    float zero_hint_up_y;
+    float zero_hint_up_z;
     float dyn_x_s;
     float dyn_y_s;
     float dyn_z_s;
@@ -2613,13 +2855,30 @@ static void BIKE_DYN_UpdateOutputsFromCurrentImu(const app_bike_settings_t *sett
     {
         /* ------------------------------------------------------------------ */
         /*  zero 기준이 유효한 뒤에는 bank/grade/rate 모두 canonical basis를    */
-        /*  사용해 계산한다.                                                    */
+        /*  사용한다.                                                           */
+        /*                                                                    */
+        /*  단, canonical basis 자체에도 runtime yaw self-cal 을 반영해서      */
+        /*  mounting yaw 오차 때문에 bank 와 grade 가 서로 섞이는 현상을      */
+        /*  완화한다.                                                           */
         /* ------------------------------------------------------------------ */
-        up_bx = BIKE_DYN_Dot3(s_bike_runtime.zero_fwd_x_s,  s_bike_runtime.zero_fwd_y_s,  s_bike_runtime.zero_fwd_z_s,
+        if (BIKE_DYN_GetCorrectedZeroHints(&zero_hint_fwd_x,
+                                           &zero_hint_fwd_y,
+                                           &zero_hint_fwd_z,
+                                           &zero_hint_left_x,
+                                           &zero_hint_left_y,
+                                           &zero_hint_left_z,
+                                           &zero_hint_up_x,
+                                           &zero_hint_up_y,
+                                           &zero_hint_up_z) == false)
+        {
+            return;
+        }
+
+        up_bx = BIKE_DYN_Dot3(zero_hint_fwd_x,  zero_hint_fwd_y,  zero_hint_fwd_z,
                               s_bike_runtime.gravity_est_x_s, s_bike_runtime.gravity_est_y_s, s_bike_runtime.gravity_est_z_s);
-        up_by = BIKE_DYN_Dot3(s_bike_runtime.zero_left_x_s, s_bike_runtime.zero_left_y_s, s_bike_runtime.zero_left_z_s,
+        up_by = BIKE_DYN_Dot3(zero_hint_left_x, zero_hint_left_y, zero_hint_left_z,
                               s_bike_runtime.gravity_est_x_s, s_bike_runtime.gravity_est_y_s, s_bike_runtime.gravity_est_z_s);
-        up_bz = BIKE_DYN_Dot3(s_bike_runtime.zero_up_x_s,   s_bike_runtime.zero_up_y_s,   s_bike_runtime.zero_up_z_s,
+        up_bz = BIKE_DYN_Dot3(zero_hint_up_x,   zero_hint_up_y,   zero_hint_up_z,
                               s_bike_runtime.gravity_est_x_s, s_bike_runtime.gravity_est_y_s, s_bike_runtime.gravity_est_z_s);
 
         level_axes_valid = BIKE_DYN_BuildCurrentLevelAxes(&level_fwd_x,
@@ -2632,7 +2891,9 @@ static void BIKE_DYN_UpdateOutputsFromCurrentImu(const app_bike_settings_t *sett
         bank_rad  = atan2f(-up_by, BIKE_DYN_ClampF(up_bz, -1.0f, 1.0f));
         grade_rad = atan2f(-up_bx, BIKE_DYN_SafeSqrtF((up_by * up_by) + (up_bz * up_bz)));
 
-        s_bike_runtime.bank_raw_deg  = bank_rad  * BIKE_DYN_RAD2DEG;
+        s_bike_runtime.bank_imu_deg  = bank_rad  * BIKE_DYN_RAD2DEG;
+        s_bike_runtime.bank_coord_deg = s_bike_runtime.bank_imu_deg;
+        s_bike_runtime.bank_raw_deg  = s_bike_runtime.bank_imu_deg;
         s_bike_runtime.grade_raw_deg = grade_rad * BIKE_DYN_RAD2DEG;
 
         if (level_axes_valid != false)
@@ -2657,10 +2918,15 @@ static void BIKE_DYN_UpdateOutputsFromCurrentImu(const app_bike_settings_t *sett
             s_bike_runtime.grade_rate_dps = 0.0f;
         }
 
-        s_bike_runtime.bank_display_deg = BIKE_DYN_LpfUpdate(s_bike_runtime.bank_display_deg,
-                                                             s_bike_runtime.bank_raw_deg,
-                                                             settings->lean_display_tau_ms,
-                                                             dt_s);
+        /* ------------------------------------------------------------------ */
+        /*  bank_display_deg 는 coordinated fusion 단계에서 최종 목표값으로     */
+        /*  업데이트한다.                                                       */
+        /*                                                                    */
+        /*  이유                                                               */
+        /*  - gravity-only bank 와 coordinated lean pseudo-measurement 를      */
+        /*    한 프레임 안에서 다시 합성해야 하므로                              */
+        /*    display LPF 는 그 합성 뒤에 한 번만 적용하는 편이 더 명확하다.    */
+        /* ------------------------------------------------------------------ */
         s_bike_runtime.grade_display_deg = BIKE_DYN_LpfUpdate(s_bike_runtime.grade_display_deg,
                                                               s_bike_runtime.grade_raw_deg,
                                                               settings->grade_display_tau_ms,
@@ -2694,6 +2960,8 @@ static void BIKE_DYN_UpdateOutputsFromCurrentImu(const app_bike_settings_t *sett
 
         s_bike_runtime.bank_raw_deg      = 0.0f;
         s_bike_runtime.grade_raw_deg     = 0.0f;
+        s_bike_runtime.bank_imu_deg      = 0.0f;
+        s_bike_runtime.bank_coord_deg    = 0.0f;
         s_bike_runtime.bank_rate_dps     = 0.0f;
         s_bike_runtime.grade_rate_dps    = 0.0f;
         s_bike_runtime.bank_display_deg  = 0.0f;
@@ -2917,6 +3185,233 @@ static void BIKE_DYN_UpdateMotionReferenceBlend(uint8_t speed_source,
 }
 
 /* -------------------------------------------------------------------------- */
+/*  coordinated lean / online mount self-cal helpers                           */
+/* -------------------------------------------------------------------------- */
+static float BIKE_DYN_CalcCoordinatedBankBlend01(const app_bike_settings_t *settings,
+                                                 uint8_t bank_calc_mode,
+                                                 uint8_t speed_source,
+                                                 int32_t selected_speed_mmps)
+{
+    float lat_abs_g;
+    float lon_abs_g;
+    float dyn01;
+    float steady01;
+    float quality01;
+    float trust01;
+    float speed01;
+    float max_blend01;
+    float min_trust_floor;
+
+    if (settings == 0)
+    {
+        return 0.0f;
+    }
+
+    if ((bank_calc_mode == (uint8_t)APP_BIKE_BANK_CALC_MODE_IMU_ONLY) ||
+        (speed_source == (uint8_t)APP_BIKE_SPEED_SOURCE_IMU_FALLBACK) ||
+        (s_bike_runtime.zero_valid == false))
+    {
+        return 0.0f;
+    }
+
+    lat_abs_g = fabsf(s_bike_runtime.lat_ref_g);
+    lon_abs_g = fabsf(s_bike_runtime.lon_ref_g);
+    if (lat_abs_g < BIKE_DYN_COORD_MIN_LAT_G)
+    {
+        return 0.0f;
+    }
+
+    dyn01 = BIKE_DYN_Clamp01F((lat_abs_g - BIKE_DYN_COORD_MIN_LAT_G) /
+                              BIKE_DYN_ClampF(BIKE_DYN_COORD_FULL_LAT_G - BIKE_DYN_COORD_MIN_LAT_G,
+                                              0.05f,
+                                              2.0f));
+    steady01 = BIKE_DYN_Clamp01F((BIKE_DYN_COORD_MAX_LON_G - lon_abs_g) /
+                                 BIKE_DYN_ClampF(BIKE_DYN_COORD_MAX_LON_G,
+                                                 0.10f,
+                                                 2.0f));
+    quality01 = BIKE_DYN_Clamp01F(s_bike_runtime.lat_ref_quality_permille * 0.001f);
+
+    min_trust_floor = (float)BIKE_DYN_ClampS32((int32_t)settings->imu_predict_min_trust_permille,
+                                               150,
+                                               700);
+    trust01 = BIKE_DYN_Clamp01F((s_bike_runtime.last_attitude_trust_permille - min_trust_floor) /
+                                BIKE_DYN_ClampF(1000.0f - min_trust_floor,
+                                                100.0f,
+                                                1000.0f));
+    speed01 = BIKE_DYN_Clamp01F((((float)BIKE_DYN_SpeedAbsMmps(selected_speed_mmps)) - 2000.0f) / 10000.0f);
+
+    max_blend01 = (bank_calc_mode == (uint8_t)APP_BIKE_BANK_CALC_MODE_FUSION) ?
+                  BIKE_DYN_COORD_BLEND_MAX_FUSION :
+                  BIKE_DYN_COORD_BLEND_MAX_SOURCE_ONLY;
+
+    return max_blend01 * dyn01 * steady01 * quality01 * BIKE_DYN_ClampF(speed01 + 0.10f, 0.0f, 1.0f) *
+           BIKE_DYN_ClampF(trust01 + 0.15f, 0.0f, 1.0f);
+}
+
+static void BIKE_DYN_UpdateOnlineMountSelfCalibration(const app_bike_settings_t *settings,
+                                                      uint8_t bank_calc_mode,
+                                                      uint8_t speed_source,
+                                                      int32_t selected_speed_mmps)
+{
+    float ref_lon_g;
+    float ref_lat_g;
+    float ref_mag2_g2;
+    float ref_mag_g;
+    float residual_yaw_rad;
+    float residual_yaw_deg;
+    float innovation_deg;
+    float dt_s;
+    float max_step_deg;
+    float quality01;
+    float jerk_limit_mg_per_s;
+    float trust_floor;
+
+    if (settings == 0)
+    {
+        return;
+    }
+
+    if ((bank_calc_mode == (uint8_t)APP_BIKE_BANK_CALC_MODE_IMU_ONLY) ||
+        (speed_source == (uint8_t)APP_BIKE_SPEED_SOURCE_IMU_FALLBACK) ||
+        (s_bike_runtime.zero_valid == false) ||
+        (s_bike_runtime.imu_sample_valid == false))
+    {
+        return;
+    }
+
+    if (BIKE_DYN_SpeedAbsMmps(selected_speed_mmps) < BIKE_DYN_MOUNT_SELF_CAL_MIN_SPEED_MMPS)
+    {
+        return;
+    }
+
+    trust_floor = (float)BIKE_DYN_ClampS32((int32_t)settings->imu_predict_min_trust_permille,
+                                           150,
+                                           700);
+    if (s_bike_runtime.last_attitude_trust_permille < trust_floor)
+    {
+        return;
+    }
+
+    jerk_limit_mg_per_s = BIKE_DYN_ClampF(((float)settings->imu_jerk_gate_mg_per_s) * 0.70f,
+                                          1000.0f,
+                                          6000.0f);
+    if (fabsf(s_bike_runtime.last_jerk_mg_per_s) > jerk_limit_mg_per_s)
+    {
+        return;
+    }
+
+    ref_lon_g = s_bike_runtime.lon_ref_g;
+    ref_lat_g = s_bike_runtime.lat_ref_g;
+    ref_mag2_g2 = (ref_lon_g * ref_lon_g) + (ref_lat_g * ref_lat_g);
+    ref_mag_g = BIKE_DYN_SafeSqrtF(ref_mag2_g2);
+
+    if ((ref_mag_g < BIKE_DYN_MOUNT_SELF_CAL_MIN_REF_G) ||
+        (ref_mag_g > BIKE_DYN_MOUNT_SELF_CAL_MAX_REF_G))
+    {
+        return;
+    }
+
+    quality01 = BIKE_DYN_Clamp01F(BIKE_DYN_ClampF(
+        (s_bike_runtime.lon_ref_quality_permille < s_bike_runtime.lat_ref_quality_permille)
+            ? (s_bike_runtime.lon_ref_quality_permille * 0.001f)
+            : (s_bike_runtime.lat_ref_quality_permille * 0.001f),
+        0.0f,
+        1.0f));
+
+    if ((quality01 * 1000.0f) < BIKE_DYN_MOUNT_SELF_CAL_MIN_QUALITY)
+    {
+        return;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  small-angle yaw residual estimator                                   */
+    /*                                                                      */
+    /*  reference vector r = [lon_ref, lat_ref]                              */
+    /*  measured  vector m = [lon_imu, lat_imu]                              */
+    /*                                                                      */
+    /*  m ≈ R(yaw_err) * r 일 때, 작은 각도 근사로                            */
+    /*      yaw_err ≈ (r_x * m_y - r_y * m_x) / |r|^2                        */
+    /*                                                                      */
+    /*  여기서 얻은 residual yaw 를 반대 방향으로 천천히 적분해서             */
+    /*  mounting yaw trim 을 추정한다.                                       */
+    /* ------------------------------------------------------------------ */
+    residual_yaw_rad = ((ref_lon_g * s_bike_runtime.lat_imu_g) -
+                        (ref_lat_g * s_bike_runtime.lon_imu_g)) /
+                       BIKE_DYN_ClampF(ref_mag2_g2, 0.020f, 4.000f);
+    residual_yaw_deg = BIKE_DYN_ClampF(residual_yaw_rad * BIKE_DYN_RAD2DEG,
+                                       -BIKE_DYN_MOUNT_SELF_CAL_MAX_ERR_DEG,
+                                        BIKE_DYN_MOUNT_SELF_CAL_MAX_ERR_DEG);
+
+    dt_s = BIKE_DYN_ClampF(s_bike_runtime.last_dt_s, BIKE_DYN_MIN_DT_S, BIKE_DYN_MAX_IMU_DT_S);
+    max_step_deg = BIKE_DYN_MOUNT_SELF_CAL_RATE_DEG_PER_S * dt_s;
+
+    innovation_deg = -residual_yaw_deg * quality01 * 0.08f * dt_s;
+    innovation_deg = BIKE_DYN_ClampF(innovation_deg, -max_step_deg, max_step_deg);
+
+    s_bike_runtime.mount_auto_yaw_deg = BIKE_DYN_ClampF(s_bike_runtime.mount_auto_yaw_deg + innovation_deg,
+                                                        -BIKE_DYN_MOUNT_SELF_CAL_MAX_ABS_YAW_DEG,
+                                                         BIKE_DYN_MOUNT_SELF_CAL_MAX_ABS_YAW_DEG);
+}
+
+static void BIKE_DYN_UpdateCoordinatedBankEstimate(const app_bike_settings_t *settings,
+                                                   uint8_t bank_calc_mode,
+                                                   uint8_t speed_source,
+                                                   int32_t selected_speed_mmps)
+{
+    float dt_s;
+    float blend01;
+    float bank_target_deg;
+
+    if (settings == 0)
+    {
+        return;
+    }
+
+    dt_s = BIKE_DYN_ClampF(s_bike_runtime.last_dt_s, BIKE_DYN_MIN_DT_S, BIKE_DYN_MAX_IMU_DT_S);
+    s_bike_runtime.bank_coord_deg = atanf(BIKE_DYN_ClampF(s_bike_runtime.lat_ref_g,
+                                                          -BIKE_DYN_MAX_DYNAMIC_COMP_ABS_G,
+                                                           BIKE_DYN_MAX_DYNAMIC_COMP_ABS_G)) * BIKE_DYN_RAD2DEG;
+
+    blend01 = BIKE_DYN_CalcCoordinatedBankBlend01(settings,
+                                                  bank_calc_mode,
+                                                  speed_source,
+                                                  selected_speed_mmps);
+
+    if ((bank_calc_mode == (uint8_t)APP_BIKE_BANK_CALC_MODE_IMU_ONLY) ||
+        (speed_source == (uint8_t)APP_BIKE_SPEED_SOURCE_IMU_FALLBACK))
+    {
+        bank_target_deg = s_bike_runtime.bank_imu_deg;
+        s_bike_runtime.bank_coord_deg = s_bike_runtime.bank_imu_deg;
+    }
+    else if (((bank_calc_mode == (uint8_t)APP_BIKE_BANK_CALC_MODE_OBD) ||
+              (bank_calc_mode == (uint8_t)APP_BIKE_BANK_CALC_MODE_GNSS)) &&
+             (fabsf(s_bike_runtime.lat_ref_g) >= BIKE_DYN_COORD_MIN_LAT_G) &&
+             (s_bike_runtime.lat_ref_quality_permille >= 500.0f))
+    {
+        /* ------------------------------------------------------------------ */
+        /*  dedicated backend mode                                              */
+        /*                                                                      */
+        /*  사용자가 OBD 또는 GNSS 전용 모드를 고르면                           */
+        /*  coordinated pseudo bank 를 해당 backend의 대표값으로 간주한다.      */
+        /*  즉, IMU bank 와 절충하지 않고 외부 reference가 충분할 때는          */
+        /*  bank_coord_deg 를 canonical bank target으로 그대로 쓴다.           */
+        /* ------------------------------------------------------------------ */
+        bank_target_deg = s_bike_runtime.bank_coord_deg;
+    }
+    else
+    {
+        bank_target_deg = s_bike_runtime.bank_imu_deg +
+                          (blend01 * (s_bike_runtime.bank_coord_deg - s_bike_runtime.bank_imu_deg));
+    }
+
+    s_bike_runtime.bank_raw_deg = bank_target_deg;
+    s_bike_runtime.bank_display_deg = BIKE_DYN_LpfUpdate(s_bike_runtime.bank_display_deg,
+                                                         s_bike_runtime.bank_raw_deg,
+                                                         settings->lean_display_tau_ms,
+                                                         dt_s);
+}
+
+/* -------------------------------------------------------------------------- */
 /*  bias adaptation / fused output                                              */
 /* -------------------------------------------------------------------------- */
 static void BIKE_DYN_UpdateBiasAndFusedOutputs(const app_bike_settings_t *settings,
@@ -2935,12 +3430,14 @@ static void BIKE_DYN_UpdateBiasAndFusedOutputs(const app_bike_settings_t *settin
     bool  allow_lon_ref;
     bool  allow_lat_ref;
     int32_t lat_bias_min_speed_mmps;
+    uint8_t bank_calc_mode;
 
     if (settings == 0)
     {
         return;
     }
 
+    bank_calc_mode = BIKE_DYN_GetBankCalcMode(settings);
     dt_s = BIKE_DYN_ClampF(s_bike_runtime.last_dt_s, BIKE_DYN_MIN_DT_S, BIKE_DYN_MAX_IMU_DT_S);
     outlier_gate_g = ((float)settings->gnss_outlier_gate_mg) * 0.001f;
     outlier_gate_g = BIKE_DYN_ClampF(outlier_gate_g, 0.120f, 0.800f);
@@ -2950,33 +3447,18 @@ static void BIKE_DYN_UpdateBiasAndFusedOutputs(const app_bike_settings_t *settin
                      (obd_speed_valid || gnss_speed_valid) &&
                      (s_bike_runtime.lon_ref_quality_permille >= 450.0f)) ? true : false;
 
-    /* ---------------------------------------------------------------------- */
-    /*  lateral bias adaptation gate                                           */
-    /*                                                                        */
-    /*  핵심 수정                                                               */
-    /*  - 기존 구현은 GNSS heading이 실제로 invalid 이어도,                    */
-    /*    speed source가 GNSS/OBD인 상태에서 fast reference만으로              */
-    /*    lateral bias 학습이 열릴 수 있었다.                                 */
-    /*  - 그 경우 steady cornering 성분 일부가 bias로 먹혀 들어가             */
-    /*    rider-facing Lat G가 과도하게 눌릴 가능성이 있다.                   */
-    /*                                                                        */
-    /*  따라서 lateral bias는 아래 조건을 모두 만족할 때만 연다.               */
-    /*  1) zero 기준이 이미 유효한 상태에서                                     */
-    /*  2) GNSS heading aid가 실제로 valid 하고                                 */
-    /*  3) 속도도 최소 기준 이상이며                                            */
-    /*  4) heading quality도 충분히 높은 경우                                   */
-    /*                                                                        */
-    /*  fast reference(speed * yaw-rate)는 observer 보조용으로는 유지하지만,   */
-    /*  bias 학습 gate를 여는 키로는 사용하지 않는다.                          */
-    /* ---------------------------------------------------------------------- */
     lat_bias_min_speed_mmps = BIKE_DYN_ClampS32((((int32_t)settings->gnss_min_speed_kmh_x10) * 1000) / 36,
                                                  1500,
                                                  20000);
 
     allow_lat_ref = ((speed_source != (uint8_t)APP_BIKE_SPEED_SOURCE_IMU_FALLBACK) &&
-                     (gnss_heading_valid != false) &&
                      (BIKE_DYN_SpeedAbsMmps(selected_speed_mmps) >= lat_bias_min_speed_mmps) &&
-                     (s_bike_runtime.lat_ref_quality_permille >= 650.0f)) ? true : false;
+                     (((gnss_heading_valid != false) &&
+                       (s_bike_runtime.lat_ref_quality_permille >= 650.0f)) ||
+                      ((bank_calc_mode == (uint8_t)APP_BIKE_BANK_CALC_MODE_OBD) &&
+                       (speed_source == (uint8_t)APP_BIKE_SPEED_SOURCE_OBD) &&
+                       (s_bike_runtime.lat_ref_quality_permille >= 600.0f) &&
+                       (fabsf(s_bike_runtime.lon_ref_g) <= 0.20f)))) ? true : false;
 
     if ((s_bike_runtime.last_attitude_trust_permille >= (float)settings->imu_predict_min_trust_permille) &&
         (allow_lon_ref != false))
@@ -3025,6 +3507,15 @@ static void BIKE_DYN_UpdateBiasAndFusedOutputs(const app_bike_settings_t *settin
                                   settings->output_clip_mg),
         settings->accel_display_tau_ms,
         dt_s);
+
+    BIKE_DYN_UpdateOnlineMountSelfCalibration(settings,
+                                              bank_calc_mode,
+                                              speed_source,
+                                              selected_speed_mmps);
+    BIKE_DYN_UpdateCoordinatedBankEstimate(settings,
+                                           bank_calc_mode,
+                                           speed_source,
+                                           selected_speed_mmps);
 }
 
 static void BIKE_DYN_UpdateProvisionalDisplayOutputs(const app_bike_settings_t *settings)
@@ -3298,8 +3789,19 @@ static void BIKE_DYN_PublishState(uint32_t now_ms,
     uint16_t zero_conf;
     uint16_t gyro_conf;
     uint16_t final_conf;
+    uint8_t  bank_calc_mode;
+    float    hint_fwd_x;
+    float    hint_fwd_y;
+    float    hint_fwd_z;
+    float    hint_left_x;
+    float    hint_left_y;
+    float    hint_left_z;
+    float    hint_up_x;
+    float    hint_up_y;
+    float    hint_up_z;
 
     bike = (app_bike_state_t *)&g_app_state.bike;
+    bank_calc_mode = BIKE_DYN_GetBankCalcMode(settings);
 
     attitude_conf = (uint16_t)BIKE_DYN_ClampS32(BIKE_DYN_RoundFloatToS32(s_bike_runtime.last_attitude_trust_permille), 0, 1000);
     zero_conf     = (s_bike_runtime.zero_valid != false) ? 1000u : 0u;
@@ -3349,9 +3851,10 @@ static void BIKE_DYN_PublishState(uint32_t now_ms,
     bike->obd_speed_valid     = (uint8_t)(obd_speed_valid ? 1u : 0u);
     bike->speed_source        = speed_source;
     bike->estimator_mode      =
-        (speed_source == (uint8_t)APP_BIKE_SPEED_SOURCE_OBD)  ? (uint8_t)APP_BIKE_ESTIMATOR_MODE_OBD_AIDED  :
-        (speed_source == (uint8_t)APP_BIKE_SPEED_SOURCE_GNSS) ? (uint8_t)APP_BIKE_ESTIMATOR_MODE_GNSS_AIDED :
-                                                                 (uint8_t)APP_BIKE_ESTIMATOR_MODE_IMU_ONLY;
+        (speed_source == (uint8_t)APP_BIKE_SPEED_SOURCE_IMU_FALLBACK) ? (uint8_t)APP_BIKE_ESTIMATOR_MODE_IMU_ONLY :
+        (bank_calc_mode == (uint8_t)APP_BIKE_BANK_CALC_MODE_FUSION)   ? (uint8_t)APP_BIKE_ESTIMATOR_MODE_FUSION   :
+        (bank_calc_mode == (uint8_t)APP_BIKE_BANK_CALC_MODE_OBD)      ? (uint8_t)APP_BIKE_ESTIMATOR_MODE_OBD_AIDED:
+                                                                        (uint8_t)APP_BIKE_ESTIMATOR_MODE_GNSS_AIDED;
     bike->confidence_permille = final_conf;
 
     bike->last_update_ms       = now_ms;
@@ -3440,16 +3943,26 @@ static void BIKE_DYN_PublishState(uint32_t now_ms,
     bike->imu_jerk_mg_per_s           = BIKE_DYN_RoundFloatToS32(s_bike_runtime.last_jerk_mg_per_s);
     bike->imu_attitude_trust_permille = attitude_conf;
 
-    if ((s_bike_runtime.zero_valid != false) && (s_bike_runtime.gravity_valid != false))
+    if ((s_bike_runtime.zero_valid != false) &&
+        (s_bike_runtime.gravity_valid != false) &&
+        (BIKE_DYN_GetCorrectedZeroHints(&hint_fwd_x,
+                                        &hint_fwd_y,
+                                        &hint_fwd_z,
+                                        &hint_left_x,
+                                        &hint_left_y,
+                                        &hint_left_z,
+                                        &hint_up_x,
+                                        &hint_up_y,
+                                        &hint_up_z) != false))
     {
         bike->up_bx_milli = BIKE_DYN_RoundFloatToS32(
-            BIKE_DYN_Dot3(s_bike_runtime.zero_fwd_x_s,  s_bike_runtime.zero_fwd_y_s,  s_bike_runtime.zero_fwd_z_s,
+            BIKE_DYN_Dot3(hint_fwd_x,  hint_fwd_y,  hint_fwd_z,
                           s_bike_runtime.gravity_est_x_s, s_bike_runtime.gravity_est_y_s, s_bike_runtime.gravity_est_z_s) * 1000.0f);
         bike->up_by_milli = BIKE_DYN_RoundFloatToS32(
-            BIKE_DYN_Dot3(s_bike_runtime.zero_left_x_s, s_bike_runtime.zero_left_y_s, s_bike_runtime.zero_left_z_s,
+            BIKE_DYN_Dot3(hint_left_x, hint_left_y, hint_left_z,
                           s_bike_runtime.gravity_est_x_s, s_bike_runtime.gravity_est_y_s, s_bike_runtime.gravity_est_z_s) * 1000.0f);
         bike->up_bz_milli = BIKE_DYN_RoundFloatToS32(
-            BIKE_DYN_Dot3(s_bike_runtime.zero_up_x_s,   s_bike_runtime.zero_up_y_s,   s_bike_runtime.zero_up_z_s,
+            BIKE_DYN_Dot3(hint_up_x,   hint_up_y,   hint_up_z,
                           s_bike_runtime.gravity_est_x_s, s_bike_runtime.gravity_est_y_s, s_bike_runtime.gravity_est_z_s) * 1000.0f);
     }
     else
@@ -3466,7 +3979,9 @@ static void BIKE_DYN_PublishState(uint32_t now_ms,
         BIKE_DYN_RoundFloatToS32(((float)g_app_state.gps.fix.sAcc) * 0.036f), 0, 65535);
     bike->gnss_head_acc_deg_x10  = (uint16_t)BIKE_DYN_ClampS32(
         BIKE_DYN_RoundFloatToS32(((float)g_app_state.gps.fix.headAcc) * 0.0001f), 0, 65535);
-    bike->mount_yaw_trim_deg_x10 = (settings != 0) ? settings->mount_yaw_trim_deg_x10 : 0;
+    bike->mount_yaw_trim_deg_x10 = (settings != 0)
+                                 ? (int16_t)((int32_t)settings->mount_yaw_trim_deg_x10 + (int32_t)BIKE_DYN_GetRuntimeAutoYawTrimDegX10())
+                                 : BIKE_DYN_GetRuntimeAutoYawTrimDegX10();
 
     bike->gnss_fix_ok     = (uint8_t)(g_app_state.gps.fix.fixOk ? 1u : 0u);
     bike->gnss_numsv_used = g_app_state.gps.fix.numSV_used;
@@ -3505,6 +4020,7 @@ static void BIKE_DYN_ResetRuntime(uint32_t now_ms)
     float    keep_gyro_bias_x_dps;
     float    keep_gyro_bias_y_dps;
     float    keep_gyro_bias_z_dps;
+    float    keep_mount_auto_yaw_deg;
     uint32_t keep_gyro_bias_cal_success_count;
     uint32_t keep_last_gyro_bias_cal_ms;
     bool     keep_gyro_bias_cal_last_success;
@@ -3513,6 +4029,7 @@ static void BIKE_DYN_ResetRuntime(uint32_t now_ms)
     keep_gyro_bias_x_dps              = s_bike_runtime.gyro_bias_x_dps;
     keep_gyro_bias_y_dps              = s_bike_runtime.gyro_bias_y_dps;
     keep_gyro_bias_z_dps              = s_bike_runtime.gyro_bias_z_dps;
+    keep_mount_auto_yaw_deg           = s_bike_runtime.mount_auto_yaw_deg;
     keep_gyro_bias_cal_success_count  = s_bike_runtime.gyro_bias_cal_success_count;
     keep_last_gyro_bias_cal_ms        = s_bike_runtime.last_gyro_bias_cal_ms;
     keep_gyro_bias_cal_last_success   = s_bike_runtime.gyro_bias_cal_last_success;
@@ -3529,6 +4046,7 @@ static void BIKE_DYN_ResetRuntime(uint32_t now_ms)
     s_bike_runtime.gyro_bias_x_dps            = keep_gyro_bias_x_dps;
     s_bike_runtime.gyro_bias_y_dps            = keep_gyro_bias_y_dps;
     s_bike_runtime.gyro_bias_z_dps            = keep_gyro_bias_z_dps;
+    s_bike_runtime.mount_auto_yaw_deg          = keep_mount_auto_yaw_deg;
     s_bike_runtime.gyro_bias_cal_success_count = keep_gyro_bias_cal_success_count;
     s_bike_runtime.last_gyro_bias_cal_ms      = keep_last_gyro_bias_cal_ms;
     s_bike_runtime.gyro_bias_cal_last_success = keep_gyro_bias_cal_last_success;
@@ -3591,10 +4109,13 @@ void BIKE_DYNAMICS_Task(uint32_t now_ms)
     const app_bike_state_t    *bike_state;
     bool raw_gnss_speed_good;
     bool raw_gnss_heading_good;
-    bool gnss_speed_valid;
-    bool gnss_heading_valid;
-    bool obd_speed_valid;
+    bool gnss_speed_valid_raw;
+    bool gnss_heading_valid_raw;
+    bool gnss_speed_valid_est;
+    bool gnss_heading_valid_est;
+    bool obd_speed_valid_est;
     bool imu_new_sample;
+    uint8_t bank_calc_mode;
     uint8_t speed_source;
     int32_t selected_speed_mmps;
 
@@ -3607,6 +4128,7 @@ void BIKE_DYNAMICS_Task(uint32_t now_ms)
     mpu        = (const app_gy86_mpu_raw_t *)&g_app_state.gy86.mpu;
     fix        = (const gps_fix_basic_t *)&g_app_state.gps.fix;
     bike_state = (const app_bike_state_t *)&g_app_state.bike;
+    bank_calc_mode = BIKE_DYN_GetBankCalcMode(settings);
 
     if (settings->enabled == 0u)
     {
@@ -3659,18 +4181,23 @@ void BIKE_DYNAMICS_Task(uint32_t now_ms)
     raw_gnss_heading_good = (settings->gnss_aid_enabled != 0u) ? BIKE_DYN_IsGnssHeadingGoodRaw(fix, settings, now_ms) : false;
     BIKE_DYN_UpdateGnssAidHysteresis(raw_gnss_speed_good, raw_gnss_heading_good);
 
-    gnss_speed_valid   = (settings->gnss_aid_enabled != 0u) ? s_bike_runtime.gnss_speed_armed   : false;
-    gnss_heading_valid = (settings->gnss_aid_enabled != 0u) ? s_bike_runtime.gnss_heading_armed : false;
-    obd_speed_valid    = BIKE_DYN_IsObdSpeedValid(bike_state, settings, now_ms);
+    gnss_speed_valid_raw   = (settings->gnss_aid_enabled != 0u) ? s_bike_runtime.gnss_speed_armed   : false;
+    gnss_heading_valid_raw = (settings->gnss_aid_enabled != 0u) ? s_bike_runtime.gnss_heading_armed : false;
 
-    speed_source        = BIKE_DYN_SelectSpeedSource(obd_speed_valid, gnss_speed_valid);
+    gnss_speed_valid_est   = (BIKE_DYN_ModeAllowsGnss(bank_calc_mode) != false) ? gnss_speed_valid_raw   : false;
+    gnss_heading_valid_est = (BIKE_DYN_ModeAllowsGnss(bank_calc_mode) != false) ? gnss_heading_valid_raw : false;
+    obd_speed_valid_est    = (BIKE_DYN_ModeAllowsObd(bank_calc_mode)  != false) ? BIKE_DYN_IsObdSpeedValid(bike_state, settings, now_ms) : false;
+
+    speed_source        = BIKE_DYN_SelectSpeedSource(bank_calc_mode,
+                                                     obd_speed_valid_est,
+                                                     gnss_speed_valid_est);
     selected_speed_mmps = BIKE_DYN_GetSelectedSpeedMmps(speed_source, fix, bike_state);
 
     BIKE_DYN_UpdateExternalReferences(settings,
                                       speed_source,
-                                      gnss_speed_valid,
-                                      gnss_heading_valid,
-                                      obd_speed_valid,
+                                      gnss_speed_valid_est,
+                                      gnss_heading_valid_est,
+                                      obd_speed_valid_est,
                                       selected_speed_mmps,
                                       now_ms);
 
@@ -3678,7 +4205,7 @@ void BIKE_DYNAMICS_Task(uint32_t now_ms)
                                                     settings,
                                                     speed_source,
                                                     selected_speed_mmps,
-                                                    gnss_heading_valid,
+                                                    gnss_heading_valid_est,
                                                     now_ms);
 
     if ((imu_new_sample != false) &&
@@ -3717,14 +4244,14 @@ void BIKE_DYNAMICS_Task(uint32_t now_ms)
             if (s_bike_runtime.zero_valid != false)
             {
                 BIKE_DYN_UpdateMotionReferenceBlend(speed_source,
-                                                    gnss_heading_valid,
+                                                    gnss_heading_valid_est,
                                                     selected_speed_mmps);
 
                 BIKE_DYN_UpdateBiasAndFusedOutputs(settings,
                                                    speed_source,
-                                                   gnss_speed_valid,
-                                                   gnss_heading_valid,
-                                                   obd_speed_valid,
+                                                   gnss_speed_valid_est,
+                                                   gnss_heading_valid_est,
+                                                   obd_speed_valid_est,
                                                    selected_speed_mmps);
             }
             else
@@ -3747,14 +4274,14 @@ void BIKE_DYNAMICS_Task(uint32_t now_ms)
         s_bike_runtime.lat_fused_g       = 0.0f;
     }
 
-    BIKE_DYN_UpdateHeadingOutput(gnss_heading_valid);
+    BIKE_DYN_UpdateHeadingOutput(gnss_heading_valid_raw);
 
     BIKE_DYN_PublishState(now_ms,
                           settings,
                           speed_source,
-                          gnss_speed_valid,
-                          gnss_heading_valid,
-                          obd_speed_valid,
+                          gnss_speed_valid_est,
+                          gnss_heading_valid_est,
+                          obd_speed_valid_est,
                           selected_speed_mmps);
 
     s_bike_runtime.last_task_ms = now_ms;
