@@ -153,7 +153,7 @@
 /*  - 1 : Motor_App                                                           */
 /*  - 0 : Vario_App                                                           */
 /* -------------------------------------------------------------------------- */
-static uint8_t g_use_motor_app = 0u;
+static uint8_t g_use_motor_app = 1u;
 
 /* USER CODE END PD */
 
