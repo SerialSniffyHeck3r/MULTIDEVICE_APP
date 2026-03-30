@@ -180,6 +180,40 @@ typedef enum
     MOTOR_DISPLAY_BRIGHTNESS_COUNT
 } motor_display_brightness_mode_t;
 
+typedef enum
+{
+    MOTOR_MAIN_TOP_MODE_SPEED = 0u,
+    MOTOR_MAIN_TOP_MODE_RPM,
+    MOTOR_MAIN_TOP_MODE_COUNT
+} motor_main_top_mode_t;
+
+typedef enum
+{
+    MOTOR_MAIN_SPEED_SCALE_100 = 0u,
+    MOTOR_MAIN_SPEED_SCALE_200,
+    MOTOR_MAIN_SPEED_SCALE_300,
+    MOTOR_MAIN_SPEED_SCALE_COUNT
+} motor_main_speed_scale_t;
+
+typedef enum
+{
+    MOTOR_MAIN_RPM_SCALE_6K = 0u,
+    MOTOR_MAIN_RPM_SCALE_8K,
+    MOTOR_MAIN_RPM_SCALE_10K,
+    MOTOR_MAIN_RPM_SCALE_12K,
+    MOTOR_MAIN_RPM_SCALE_14K,
+    MOTOR_MAIN_RPM_SCALE_16K,
+    MOTOR_MAIN_RPM_SCALE_COUNT
+} motor_main_rpm_scale_t;
+
+typedef enum
+{
+    MOTOR_MAIN_G_SCALE_0P5 = 0u,
+    MOTOR_MAIN_G_SCALE_1P0,
+    MOTOR_MAIN_G_SCALE_1P5,
+    MOTOR_MAIN_G_SCALE_COUNT
+} motor_main_g_scale_t;
+
 /* -------------------------------------------------------------------------- */
 /*  GPS 고급 옵션                                                              */
 /*                                                                            */
@@ -303,6 +337,10 @@ typedef struct
     uint8_t frame_limit_enabled;                  /* frame limiter enable                 */
     uint8_t page_wrap_enabled;                    /* page wrap for drive screens          */
     uint8_t lock_while_moving;                    /* moving state lock for settings       */
+    uint8_t main_top_mode;                        /* motor_main_top_mode_t raw            */
+    uint8_t main_speed_scale;                     /* motor_main_speed_scale_t raw         */
+    uint8_t main_rpm_scale;                       /* motor_main_rpm_scale_t raw           */
+    uint8_t main_g_scale;                         /* motor_main_g_scale_t raw             */
 } motor_display_settings_t;
 
 /* -------------------------------------------------------------------------- */

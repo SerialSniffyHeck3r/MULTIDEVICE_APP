@@ -285,25 +285,45 @@ static void vario_task_apply_platform_settings(void)
     audio_response_norm = vario_task_audio_response_norm_from_settings(settings);
 
     /* ------------------------------------------------------------------ */
-    /*  commercial-grade accuracy 우선 low-level mirror                    */
+    /*  commercial fast-trigger mirror                                      */
     /*                                                                    */
-    /*  이전 aggressive patch는 "조금만 움직여도 바로 반응" 쪽에는 좋았지만, */
-    /*  실제 pressure / IMU 입력 품질이 아직 완벽히 정돈되지 않은 하드웨어에 */
-    /*  그대로 얹으면 near-zero 구간 false climb / false sink 를 키웠다.    */
+    /*  이번 구조에서는 APP_ALTITUDE 내부에서                               */
+    /*  - 빠른 attack tau                                                   */
+    /*  - onset-friendly fast trigger blend                                */
+    /*  - ZUPT hysteresis / dwell                                           */
+    /*  - optional IMU attack assist                                        */
+    /*  를 이미 담당한다.                                                   */
     /*                                                                    */
-    /*  여기서는 상용기 감각을 목표로                                      */
-    /*  - fast tau       : 충분히 빠르되 완전 hair-trigger 는 아니게        */
-    /*  - baro vario tau : regression slope 후단을 조금 더 정직하게          */
-    /*  - baro vario R   : KF가 baro velocity를 믿되, 과신하지는 않게        */
-    /*  로 되돌린다.                                                        */
+    /*  따라서 여기서 Vario_App damping knob 이 만지는 것은                 */
+    /*  "공격성 그 자체" 보다는                                             */
+    /*  - fast path release tail                                            */
+    /*  - truth backbone smoothing                                          */
+    /*  - baro velocity measurement nominal trust                           */
+    /*  세 축이다.                                                          */
+    /*                                                                    */
+    /*  숫자의 의미                                                         */
+    /*  - fast_tau_ms                                                       */
+    /*      fast output의 release/decay 쪽을 얼마나 길게 둘지               */
+    /*      값을 줄이면 짧게 툭 치고 바로 살아난다.                         */
+    /*      값을 늘리면 좀 더 고급스럽게 매끈하지만 tail이 길어진다.         */
+    /*                                                                    */
+    /*  - baro_vario_tau_ms                                                 */
+    /*      regression slope backbone LPF                                   */
+    /*      값을 줄이면 작은 들림에도 더 빨리 따라가고,                     */
+    /*      늘리면 정지 bench에서 더 조용해진다.                            */
+    /*                                                                    */
+    /*  - baro_vario_noise_cms                                              */
+    /*      KF가 baro velocity observation을 믿는 정도                      */
+    /*      값을 줄이면 즉응성↑ / false trigger risk↑                        */
+    /*      값을 늘리면 보수성↑ / small lift miss risk↑                      */
     /*                                                                    */
     /*  중요                                                                 */
     /*  이 값들은 Vario_App 전용 runtime mirror 다.                         */
     /*  Motor_App / bike dynamics 쪽 shared driver 설정은 건드리지 않는다.   */
     /* ------------------------------------------------------------------ */
-    fast_tau_ms = vario_task_lerp_u16(140u, 55u, damping_norm);
-    baro_vario_tau_ms = vario_task_lerp_u16(70u, 25u, damping_norm);
-    baro_vario_noise_cms = vario_task_lerp_u16(45u, 20u, damping_norm);
+    fast_tau_ms = vario_task_lerp_u16(100u, 40u, damping_norm);
+    baro_vario_tau_ms = vario_task_lerp_u16(46u, 16u, damping_norm);
+    baro_vario_noise_cms = vario_task_lerp_u16(36u, 12u, damping_norm);
 
     audio_deadband_cms = (uint16_t)((settings->climb_tone_threshold_cms > 0) ?
                                     settings->climb_tone_threshold_cms :

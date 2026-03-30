@@ -79,6 +79,14 @@ void Vario_Display_DrawMenuRow(u8g2_t *u8g2,
                                const char *label,
                                const char *value);
 
+void Vario_Display_DrawBarRow(u8g2_t *u8g2,
+                              const vario_viewport_t *v,
+                              int16_t y_top,
+                              bool selected,
+                              const char *label,
+                              const char *value,
+                              uint8_t percent);
+
 void Vario_Display_DrawKeyValueRow(u8g2_t *u8g2,
                                    const vario_viewport_t *v,
                                    int16_t y_baseline,

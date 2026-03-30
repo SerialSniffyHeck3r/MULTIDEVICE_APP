@@ -986,7 +986,7 @@ void Vario_Settings_Init(void)
     s_vario_settings.beep_only_when_flying         = 1u;
     s_vario_settings.audio_profile                 = VARIO_AUDIO_PROFILE_SOFT_SPEAKER;
     s_vario_settings.prethermal_mode               = VARIO_PRETHERMAL_MODE_BUZZER;
-    s_vario_settings.audio_response_level          = 7u;
+    s_vario_settings.audio_response_level          = 8u;
     s_vario_settings.audio_up_base_hz              = 700u;
     s_vario_settings.audio_modulation_depth_percent = 100u;
     s_vario_settings.audio_pitch_curve_percent     = 100u;
@@ -997,16 +997,19 @@ void Vario_Settings_Init(void)
     /* ------------------------------------------------------------------ */
     /*  default response / tone thresholds                                  */
     /*                                                                      */
-    /*  - response 7/10 : 구형 둔한 기본값보다 더 즉응적                      */
-    /*  - climb +0.15 m/s : 들어 올리는 순간 바로 살아나는 쪽으로 시작       */
-    /*  - sink start -1.00 m/s : 완전 무풍 잡음까지 울리지 않게 절충         */
+    /*  - response 8/10 : fast-trigger backbone을 살리는 쪽으로 한 단계 업   */
+    /*  - damping  8/10 : fast tail은 짧고, backbone은 아직 제품답게 유지    */
+    /*  - climb +0.12 m/s : 20~30cm급 작은 들림에서 첫 삑을 더 빨리 유도      */
+    /*  - climb off +0.05 m/s : tone hysteresis는 남겨 chatter를 억제        */
+    /*  - prethermal +0.03 m/s : 미세한 살아남음을 조금 더 빨리 알려 줌      */
+    /*  - sink start -1.00 m/s : bench 잡음까지 sink tone이 울리지는 않게     */
     /*  - sink continuous -2.50 m/s : 그 위 대역은 Digifly식 짧은 sink chirp */
     /* ------------------------------------------------------------------ */
-    s_vario_settings.vario_damping_level           = 7u;
+    s_vario_settings.vario_damping_level           = 8u;
     s_vario_settings.digital_vario_average_seconds = 5u;
-    s_vario_settings.climb_tone_threshold_cms      = 15;
-    s_vario_settings.climb_tone_off_threshold_cms  = 7;
-    s_vario_settings.prethermal_threshold_cms      = 5;
+    s_vario_settings.climb_tone_threshold_cms      = 12;
+    s_vario_settings.climb_tone_off_threshold_cms  = 5;
+    s_vario_settings.prethermal_threshold_cms      = 3;
     s_vario_settings.prethermal_off_threshold_cms  = 0;
     s_vario_settings.sink_tone_threshold_cms       = -100;
     s_vario_settings.sink_tone_off_threshold_cms   = -80;

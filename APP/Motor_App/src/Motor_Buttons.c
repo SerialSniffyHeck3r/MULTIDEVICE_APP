@@ -357,6 +357,26 @@ static void motor_buttons_adjust_setting_row(int8_t delta)
         case 12u:
             settings->display.lock_while_moving = motor_buttons_toggle_u8(settings->display.lock_while_moving);
             break;
+        case 13u:
+            settings->display.main_top_mode = motor_buttons_wrap_u8(settings->display.main_top_mode,
+                                                                    MOTOR_MAIN_TOP_MODE_COUNT,
+                                                                    delta);
+            break;
+        case 14u:
+            settings->display.main_speed_scale = motor_buttons_wrap_u8(settings->display.main_speed_scale,
+                                                                       MOTOR_MAIN_SPEED_SCALE_COUNT,
+                                                                       delta);
+            break;
+        case 15u:
+            settings->display.main_rpm_scale = motor_buttons_wrap_u8(settings->display.main_rpm_scale,
+                                                                     MOTOR_MAIN_RPM_SCALE_COUNT,
+                                                                     delta);
+            break;
+        case 16u:
+            settings->display.main_g_scale = motor_buttons_wrap_u8(settings->display.main_g_scale,
+                                                                   MOTOR_MAIN_G_SCALE_COUNT,
+                                                                   delta);
+            break;
         default:
             changed = 0u;
             break;

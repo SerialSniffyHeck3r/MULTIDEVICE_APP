@@ -146,6 +146,52 @@ static const char *motor_settings_display_mode_name(uint8_t mode_raw)
     }
 }
 
+static const char *motor_settings_main_top_mode_name(uint8_t mode_raw)
+{
+    switch ((motor_main_top_mode_t)mode_raw)
+    {
+    case MOTOR_MAIN_TOP_MODE_RPM:   return "RPM";
+    case MOTOR_MAIN_TOP_MODE_SPEED:
+    default:                        return "SPEED";
+    }
+}
+
+static const char *motor_settings_main_speed_scale_name(uint8_t mode_raw)
+{
+    switch ((motor_main_speed_scale_t)mode_raw)
+    {
+    case MOTOR_MAIN_SPEED_SCALE_100: return "100";
+    case MOTOR_MAIN_SPEED_SCALE_300: return "300";
+    case MOTOR_MAIN_SPEED_SCALE_200:
+    default:                         return "200";
+    }
+}
+
+static const char *motor_settings_main_rpm_scale_name(uint8_t mode_raw)
+{
+    switch ((motor_main_rpm_scale_t)mode_raw)
+    {
+    case MOTOR_MAIN_RPM_SCALE_6K:  return "6K";
+    case MOTOR_MAIN_RPM_SCALE_8K:  return "8K";
+    case MOTOR_MAIN_RPM_SCALE_10K: return "10K";
+    case MOTOR_MAIN_RPM_SCALE_12K: return "12K";
+    case MOTOR_MAIN_RPM_SCALE_16K: return "16K";
+    case MOTOR_MAIN_RPM_SCALE_14K:
+    default:                       return "14K";
+    }
+}
+
+static const char *motor_settings_main_g_scale_name(uint8_t mode_raw)
+{
+    switch ((motor_main_g_scale_t)mode_raw)
+    {
+    case MOTOR_MAIN_G_SCALE_0P5: return "0.5G";
+    case MOTOR_MAIN_G_SCALE_1P5: return "1.5G";
+    case MOTOR_MAIN_G_SCALE_1P0:
+    default:                     return "1.0G";
+    }
+}
+
 static const char *motor_settings_screen_title(motor_screen_t screen)
 {
     switch (screen)
@@ -205,6 +251,10 @@ void Motor_Settings_ResetToDefaults(void)
     s_motor_settings.display.frame_limit_enabled = 1u;
     s_motor_settings.display.page_wrap_enabled = 1u;
     s_motor_settings.display.lock_while_moving = 0u;
+    s_motor_settings.display.main_top_mode = (uint8_t)MOTOR_MAIN_TOP_MODE_SPEED;
+    s_motor_settings.display.main_speed_scale = (uint8_t)MOTOR_MAIN_SPEED_SCALE_200;
+    s_motor_settings.display.main_rpm_scale = (uint8_t)MOTOR_MAIN_RPM_SCALE_14K;
+    s_motor_settings.display.main_g_scale = (uint8_t)MOTOR_MAIN_G_SCALE_1P0;
 
     /* ---------------------------------------------------------------------- */
     /*  GPS                                                                    */
@@ -383,7 +433,7 @@ uint8_t Motor_Settings_GetRowCount(motor_screen_t screen)
     switch (screen)
     {
     case MOTOR_SCREEN_SETTINGS_ROOT:        return 8u;
-    case MOTOR_SCREEN_SETTINGS_DISPLAY:     return 13u;
+    case MOTOR_SCREEN_SETTINGS_DISPLAY:     return 17u;
     case MOTOR_SCREEN_SETTINGS_GPS:         return 10u;
     case MOTOR_SCREEN_SETTINGS_UNITS:       return 7u;
     case MOTOR_SCREEN_SETTINGS_RECORDING:   return 6u;
@@ -447,6 +497,10 @@ void Motor_Settings_GetRowText(const motor_state_t *state,
         case 10u: (void)snprintf(out_label, label_size, "FRAME LIMIT"); (void)snprintf(out_value, value_size, "%s", motor_settings_onoff_text(state->settings.display.frame_limit_enabled)); break;
         case 11u: (void)snprintf(out_label, label_size, "PAGE WRAP"); (void)snprintf(out_value, value_size, "%s", motor_settings_onoff_text(state->settings.display.page_wrap_enabled)); break;
         case 12u: (void)snprintf(out_label, label_size, "MOVING LOCK"); (void)snprintf(out_value, value_size, "%s", motor_settings_onoff_text(state->settings.display.lock_while_moving)); break;
+        case 13u: (void)snprintf(out_label, label_size, "HOME TOP"); (void)snprintf(out_value, value_size, "%s", motor_settings_main_top_mode_name(state->settings.display.main_top_mode)); break;
+        case 14u: (void)snprintf(out_label, label_size, "HOME SPD MAX"); (void)snprintf(out_value, value_size, "%s", motor_settings_main_speed_scale_name(state->settings.display.main_speed_scale)); break;
+        case 15u: (void)snprintf(out_label, label_size, "HOME RPM MAX"); (void)snprintf(out_value, value_size, "%s", motor_settings_main_rpm_scale_name(state->settings.display.main_rpm_scale)); break;
+        case 16u: (void)snprintf(out_label, label_size, "HOME G MAX"); (void)snprintf(out_value, value_size, "%s", motor_settings_main_g_scale_name(state->settings.display.main_g_scale)); break;
         default: break;
         }
         break;
