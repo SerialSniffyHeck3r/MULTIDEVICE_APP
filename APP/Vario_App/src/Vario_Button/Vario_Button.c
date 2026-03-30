@@ -1,12 +1,32 @@
 #include "Vario_Button.h"
 
 #include "button.h"
-#include "Vario_Settings.h"
 #include "Vario_Display_Common.h"
+#include "Vario_Navigation.h"
+#include "Vario_Settings.h"
+#include "ui_confirm.h"
+#include "ui_menu.h"
 #include "ui_toast.h"
 
 #include <stdio.h>
 #include <string.h>
+
+#ifndef VARIO_BUTTON_TRAIL_SCALE_COUNT
+#define VARIO_BUTTON_TRAIL_SCALE_COUNT 5u
+#endif
+
+static const uint16_t s_trail_scale_presets_m[VARIO_BUTTON_TRAIL_SCALE_COUNT] = {
+    100u, 250u, 500u, 750u, 1000u
+};
+
+static const ui_menu_item_t s_nav_menu_items[] = {
+    { "HOME",             (uint16_t)VARIO_NAV_MENU_ACTION_HOME },
+    { "LAUNCH",           (uint16_t)VARIO_NAV_MENU_ACTION_LAUNCH },
+    { "NEARBY LANDABLE",  (uint16_t)VARIO_NAV_MENU_ACTION_NEARBY_LANDABLE },
+    { "USER WAYPOINTS",   (uint16_t)VARIO_NAV_MENU_ACTION_USER_WAYPOINTS },
+    { "MARK HERE",        (uint16_t)VARIO_NAV_MENU_ACTION_MARK_HERE },
+    { "CLEAR TARGET",     (uint16_t)VARIO_NAV_MENU_ACTION_CLEAR_TARGET }
+};
 
 static void vario_button_show_qnh_toast(uint32_t now_ms)
 {
@@ -20,24 +40,68 @@ static void vario_button_show_qnh_toast(uint32_t now_ms)
 
 static void vario_button_show_attitude_hint_toast(uint32_t now_ms)
 {
-    UI_Toast_Show("Hold to reset attitude", NULL, 0u, 0u, now_ms, 1200u);
+    UI_Toast_Show("HOLD TO RESET ATTITUDE", NULL, 0u, 0u, now_ms, 1200u);
 }
 
 static void vario_button_show_trail_mode_toast(uint32_t now_ms)
 {
     if (Vario_Display_IsTrailHeadingUpMode() != false)
     {
-        UI_Toast_Show("Trail: Heading Up", NULL, 0u, 0u, now_ms, 1200u);
+        UI_Toast_Show("TRAIL UP", NULL, 0u, 0u, now_ms, 1200u);
     }
     else
     {
-        UI_Toast_Show("Trail: North Up", NULL, 0u, 0u, now_ms, 1200u);
+        UI_Toast_Show("NORTH UP", NULL, 0u, 0u, now_ms, 1200u);
     }
 }
 
-static void vario_button_cycle_trail_scale(void)
+static void vario_button_show_target_source_toast(uint32_t now_ms)
+{
+    char toast_text[40];
+
+    memset(toast_text, 0, sizeof(toast_text));
+    Vario_Navigation_FormatActiveSourceToast(toast_text, sizeof(toast_text));
+    UI_Toast_Show(toast_text, NULL, 0u, 0u, now_ms, 1200u);
+}
+
+static uint8_t vario_button_find_trail_scale_index(uint16_t range_m)
+{
+    uint8_t i;
+    uint8_t best_index;
+    uint16_t best_error;
+
+    best_index = 0u;
+    best_error = (uint16_t)((range_m > s_trail_scale_presets_m[0]) ?
+                            (range_m - s_trail_scale_presets_m[0]) :
+                            (s_trail_scale_presets_m[0] - range_m));
+
+    for (i = 1u; i < VARIO_BUTTON_TRAIL_SCALE_COUNT; ++i)
+    {
+        uint16_t error;
+        error = (uint16_t)((range_m > s_trail_scale_presets_m[i]) ?
+                           (range_m - s_trail_scale_presets_m[i]) :
+                           (s_trail_scale_presets_m[i] - range_m));
+        if (error < best_error)
+        {
+            best_error = error;
+            best_index = i;
+        }
+    }
+
+    return best_index;
+}
+
+static void vario_button_apply_trail_scale_preset(uint8_t preset_index)
 {
     const vario_settings_t *settings;
+    int16_t target_m;
+    int16_t current_m;
+    int16_t steps;
+
+    if (preset_index >= VARIO_BUTTON_TRAIL_SCALE_COUNT)
+    {
+        return;
+    }
 
     settings = Vario_Settings_Get();
     if (settings == NULL)
@@ -45,19 +109,167 @@ static void vario_button_cycle_trail_scale(void)
         return;
     }
 
-    if (settings->trail_range_m >= 1000u)
+    target_m = (int16_t)s_trail_scale_presets_m[preset_index];
+    current_m = (int16_t)settings->trail_range_m;
+    steps = (int16_t)((target_m - current_m) / 50);
+
+    if (steps != 0)
     {
-        Vario_Settings_AdjustValue(VARIO_VALUE_ITEM_TRAIL_RANGE, -18);
+        Vario_Settings_AdjustValue(VARIO_VALUE_ITEM_TRAIL_RANGE, (int8_t)steps);
     }
-    else
+}
+
+static void vario_button_show_trail_scale_toast(uint8_t preset_index, uint32_t now_ms)
+{
+    char toast_text[40];
+
+    if (preset_index >= VARIO_BUTTON_TRAIL_SCALE_COUNT)
     {
-        Vario_Settings_AdjustValue(VARIO_VALUE_ITEM_TRAIL_RANGE, +1);
+        preset_index = 0u;
+    }
+
+    snprintf(toast_text,
+             sizeof(toast_text),
+             "TRAIL SCALE %u/5 (%um)",
+             (unsigned)(preset_index + 1u),
+             (unsigned)s_trail_scale_presets_m[preset_index]);
+    UI_Toast_Show(toast_text, NULL, 0u, 0u, now_ms, 1200u);
+}
+
+static void vario_button_cycle_trail_scale(uint32_t now_ms)
+{
+    const vario_settings_t *settings;
+    uint8_t current_index;
+    uint8_t next_index;
+
+    settings = Vario_Settings_Get();
+    if (settings == NULL)
+    {
+        return;
+    }
+
+    current_index = vario_button_find_trail_scale_index(settings->trail_range_m);
+    next_index = (uint8_t)((current_index + 1u) % VARIO_BUTTON_TRAIL_SCALE_COUNT);
+    vario_button_apply_trail_scale_preset(next_index);
+    vario_button_show_trail_scale_toast(next_index, now_ms);
+}
+
+static void vario_button_open_nav_menu(void)
+{
+    UI_Menu_Show("NAV MENU",
+                 s_nav_menu_items,
+                 (uint8_t)(sizeof(s_nav_menu_items) / sizeof(s_nav_menu_items[0])),
+                 0u);
+}
+
+static void vario_button_handle_confirm_overlay(const button_event_t *event, uint32_t now_ms)
+{
+    if (event == NULL)
+    {
+        return;
+    }
+
+    if (event->type != BUTTON_EVENT_LONG_PRESS)
+    {
+        return;
+    }
+
+    switch (event->id)
+    {
+        case BUTTON_ID_1:
+        case BUTTON_ID_2:
+        case BUTTON_ID_3:
+            if (Vario_Navigation_HasConfirmHandler(UI_Confirm_GetContextId()) != false)
+            {
+                Vario_Navigation_HandleConfirmChoice(UI_Confirm_GetContextId(), event->id, now_ms);
+            }
+            UI_Confirm_Hide();
+            Vario_State_RequestRedraw();
+            break;
+
+        default:
+            break;
+    }
+}
+
+static void vario_button_handle_menu_overlay(const button_event_t *event, uint32_t now_ms)
+{
+    uint16_t action_id;
+
+    if ((event == NULL) || (event->type != BUTTON_EVENT_SHORT_PRESS))
+    {
+        return;
+    }
+
+    switch (event->id)
+    {
+        case BUTTON_ID_1:
+            UI_Menu_Hide();
+            Vario_State_RequestRedraw();
+            break;
+
+        case BUTTON_ID_2:
+            UI_Menu_MoveSelection(-1);
+            Vario_State_RequestRedraw();
+            break;
+
+        case BUTTON_ID_3:
+            UI_Menu_MoveSelection(+1);
+            Vario_State_RequestRedraw();
+            break;
+
+        case BUTTON_ID_6:
+            action_id = UI_Menu_GetSelectedAction();
+            UI_Menu_Hide();
+            Vario_Navigation_HandleMenuAction(action_id, now_ms);
+            Vario_State_RequestRedraw();
+            break;
+
+        default:
+            break;
+    }
+}
+
+static void vario_button_handle_nav_page(const button_event_t *event, uint32_t now_ms)
+{
+    (void)now_ms;
+
+    if ((event == NULL) || (event->type != BUTTON_EVENT_SHORT_PRESS))
+    {
+        return;
+    }
+
+    switch (event->id)
+    {
+        case BUTTON_ID_1:
+            Vario_Navigation_ClosePage();
+            Vario_State_ReturnToMain();
+            Vario_State_RequestRedraw();
+            break;
+
+        case BUTTON_ID_2:
+            Vario_Navigation_MoveCursor(-1);
+            Vario_State_RequestRedraw();
+            break;
+
+        case BUTTON_ID_3:
+            Vario_Navigation_MoveCursor(+1);
+            Vario_State_RequestRedraw();
+            break;
+
+        case BUTTON_ID_6:
+            Vario_Navigation_ActivateSelected(now_ms);
+            Vario_State_RequestRedraw();
+            break;
+
+        default:
+            break;
     }
 }
 
 static void vario_button_handle_main_screen(const button_event_t *event, uint32_t now_ms)
 {
-    bool         trainer_enabled;
+    bool trainer_enabled;
     vario_mode_t mode;
 
     if (event == NULL)
@@ -68,14 +280,6 @@ static void vario_button_handle_main_screen(const button_event_t *event, uint32_
     trainer_enabled = (Vario_Settings_Get()->trainer_enabled != 0u) ? true : false;
     mode = Vario_State_GetMode();
 
-    /* ---------------------------------------------------------------------- */
-    /* TRAINER mode                                                            */
-    /*                                                                        */
-    /* 사용자의 최신 요구사항                                                  */
-    /* - trainer 중에는 기존 page/nav 기능을 모두 막는다.                      */
-    /* - 오직 speed / altitude / heading 만 조작한다.                          */
-    /* - F6 long press 는 trainer 탈출 전용이다.                               */
-    /* ---------------------------------------------------------------------- */
     if (trainer_enabled != false)
     {
         if ((event->id == BUTTON_ID_6) && (event->type == BUTTON_EVENT_LONG_PRESS))
@@ -129,9 +333,6 @@ static void vario_button_handle_main_screen(const button_event_t *event, uint32_
         return;
     }
 
-    /* ---------------------------------------------------------------------- */
-    /* non-trainer main screen common actions                                  */
-    /* ---------------------------------------------------------------------- */
     if ((event->id == BUTTON_ID_1) && (event->type == BUTTON_EVENT_SHORT_PRESS))
     {
         Vario_State_SelectNextMainScreen();
@@ -150,7 +351,7 @@ static void vario_button_handle_main_screen(const button_event_t *event, uint32_
 
             if (mode == VARIO_MODE_SCREEN_2)
             {
-                vario_button_cycle_trail_scale();
+                vario_button_cycle_trail_scale(now_ms);
                 Vario_State_RequestRedraw();
                 return;
             }
@@ -163,6 +364,7 @@ static void vario_button_handle_main_screen(const button_event_t *event, uint32_
             if (mode == VARIO_MODE_SCREEN_3)
             {
                 Vario_State_ResetAttitudeIndicator();
+                Vario_State_RequestRedraw();
                 return;
             }
 
@@ -178,6 +380,26 @@ static void vario_button_handle_main_screen(const button_event_t *event, uint32_
         return;
     }
 
+    if (event->id == BUTTON_ID_3)
+    {
+        if (event->type == BUTTON_EVENT_SHORT_PRESS)
+        {
+            Vario_Navigation_CycleTargetSource();
+            vario_button_show_target_source_toast(now_ms);
+            Vario_State_RequestRedraw();
+            return;
+        }
+
+        if (event->type == BUTTON_EVENT_LONG_PRESS)
+        {
+            vario_button_open_nav_menu();
+            Vario_State_RequestRedraw();
+            return;
+        }
+
+        return;
+    }
+
     if (event->type != BUTTON_EVENT_SHORT_PRESS)
     {
         return;
@@ -185,10 +407,6 @@ static void vario_button_handle_main_screen(const button_event_t *event, uint32_
 
     switch (event->id)
     {
-        case BUTTON_ID_3:
-            Vario_State_SelectNextMainScreen();
-            break;
-
         case BUTTON_ID_4:
             Vario_Settings_AdjustQuickSet(VARIO_QUICKSET_ITEM_QNH, -1);
             vario_button_show_qnh_toast(now_ms);
@@ -214,7 +432,7 @@ static void vario_button_handle_setting(const button_event_t *event)
 {
     uint8_t cursor;
 
-    if (event->type != BUTTON_EVENT_SHORT_PRESS)
+    if ((event == NULL) || (event->type != BUTTON_EVENT_SHORT_PRESS))
     {
         return;
     }
@@ -316,7 +534,7 @@ static void vario_button_handle_setting(const button_event_t *event)
 
 static void vario_button_handle_quickset(const button_event_t *event)
 {
-    if (event->type != BUTTON_EVENT_SHORT_PRESS)
+    if ((event == NULL) || (event->type != BUTTON_EVENT_SHORT_PRESS))
     {
         return;
     }
@@ -351,10 +569,10 @@ static void vario_button_handle_quickset(const button_event_t *event)
 
 static void vario_button_handle_valuesetting(const button_event_t *event)
 {
-    uint8_t                  index;
+    uint8_t index;
     vario_settings_category_t category;
 
-    if (event->type != BUTTON_EVENT_SHORT_PRESS)
+    if ((event == NULL) || (event->type != BUTTON_EVENT_SHORT_PRESS))
     {
         return;
     }
@@ -406,6 +624,25 @@ void Vario_Button_Task(uint32_t now_ms)
 
     while (Button_PopEvent(&event) != false)
     {
+        if (UI_Confirm_IsVisible() != false)
+        {
+            vario_button_handle_confirm_overlay(&event, now_ms);
+            continue;
+        }
+
+        if (UI_Menu_IsVisible() != false)
+        {
+            vario_button_handle_menu_overlay(&event, now_ms);
+            continue;
+        }
+
+        if ((Vario_State_GetMode() == VARIO_MODE_SETTING) &&
+            (Vario_Navigation_IsPageOpen() != false))
+        {
+            vario_button_handle_nav_page(&event, now_ms);
+            continue;
+        }
+
         switch (Vario_State_GetMode())
         {
             case VARIO_MODE_SCREEN_1:
@@ -442,6 +679,39 @@ void Vario_Button_GetButtonBar(vario_mode_t mode, vario_buttonbar_t *out_bar)
 
     memset(out_bar, 0, sizeof(*out_bar));
 
+    if (UI_Confirm_IsVisible() != false)
+    {
+        out_bar->f1 = "NO";
+        out_bar->f2 = "FIELD";
+        out_bar->f3 = "HOME";
+        out_bar->f4 = "-";
+        out_bar->f5 = "-";
+        out_bar->f6 = "HOLD";
+        return;
+    }
+
+    if (UI_Menu_IsVisible() != false)
+    {
+        out_bar->f1 = "BACK";
+        out_bar->f2 = "UP";
+        out_bar->f3 = "DN";
+        out_bar->f4 = "-";
+        out_bar->f5 = "-";
+        out_bar->f6 = "ENTER";
+        return;
+    }
+
+    if ((mode == VARIO_MODE_SETTING) && (Vario_Navigation_IsPageOpen() != false))
+    {
+        out_bar->f1 = "BACK";
+        out_bar->f2 = "UP";
+        out_bar->f3 = "DN";
+        out_bar->f4 = "-";
+        out_bar->f5 = "-";
+        out_bar->f6 = "ENTER";
+        return;
+    }
+
     switch (mode)
     {
         case VARIO_MODE_SCREEN_1:
@@ -458,9 +728,9 @@ void Vario_Button_GetButtonBar(vario_mode_t mode, vario_buttonbar_t *out_bar)
             }
             else
             {
-                out_bar->f1 = "SCR1";
-                out_bar->f2 = "PREV";
-                out_bar->f3 = "NEXT";
+                out_bar->f1 = "VIEW";
+                out_bar->f2 = "ACT";
+                out_bar->f3 = "NAV";
                 out_bar->f4 = "QNH-";
                 out_bar->f5 = "QNH+";
                 out_bar->f6 = "SET";

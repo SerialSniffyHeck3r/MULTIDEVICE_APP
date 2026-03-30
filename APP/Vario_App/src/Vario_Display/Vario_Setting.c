@@ -3,6 +3,7 @@
 #include "Vario_Display_Common.h"
 #include "Vario_Settings.h"
 #include "Vario_State.h"
+#include "Vario_Navigation.h"
 
 #include <stdio.h>
 
@@ -24,6 +25,12 @@ void Vario_Setting_Render(u8g2_t *u8g2, const vario_buttonbar_t *buttonbar)
 
     if ((u8g2 == NULL) || (v == NULL) || (settings == NULL))
     {
+        return;
+    }
+
+    if (Vario_Navigation_IsPageOpen() != false)
+    {
+        Vario_Navigation_RenderSettingPage(u8g2);
         return;
     }
 

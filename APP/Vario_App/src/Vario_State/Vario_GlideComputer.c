@@ -1,4 +1,5 @@
 #include "Vario_GlideComputer.h"
+#include "Vario_Navigation.h"
 
 #include <math.h>
 #include <stddef.h>
@@ -196,6 +197,23 @@ static void vario_gc_unit_vector_from_bearing(float bearing_deg, float *out_n, f
     *out_e = sinf(rad);
 }
 
+static void vario_gc_copy_text(char *dst, size_t dst_size, const char *src)
+{
+    if ((dst == NULL) || (dst_size == 0u))
+    {
+        return;
+    }
+
+    if (src == NULL)
+    {
+        dst[0] = '\0';
+        return;
+    }
+
+    strncpy(dst, src, dst_size - 1u);
+    dst[dst_size - 1u] = '\0';
+}
+
 static bool vario_gc_runtime_has_valid_gps(const vario_runtime_t *rt)
 {
     if (rt == NULL)
@@ -330,6 +348,9 @@ static void vario_gc_clear_target_outputs(vario_runtime_t *rt)
     rt->target_distance_m = 0.0f;
     rt->target_bearing_deg = 0.0f;
     rt->target_altitude_m = 0.0f;
+    rt->target_has_elevation = false;
+    rt->target_kind = 0u;
+    memset(rt->target_name, 0, sizeof(rt->target_name));
     rt->required_glide_ratio = 0.0f;
     rt->arrival_height_m = 0.0f;
     rt->final_glide_valid = false;
@@ -545,23 +566,9 @@ static bool vario_gc_try_estimate_circling_wind(float *out_wind_n_mps,
 
 static void vario_gc_update_home_reference(const vario_runtime_t *rt)
 {
-    bool gps_valid;
-
     if (rt == NULL)
     {
         return;
-    }
-
-    gps_valid = vario_gc_runtime_has_valid_gps(rt);
-
-    if ((rt->flight_active != false) &&
-        ((s_vario_gc.last_flight_active == false) || (s_vario_gc.home_valid == false)) &&
-        (gps_valid != false))
-    {
-        s_vario_gc.home_valid = true;
-        s_vario_gc.home_lat_e7 = rt->gps.fix.lat;
-        s_vario_gc.home_lon_e7 = rt->gps.fix.lon;
-        s_vario_gc.home_altitude_m = rt->filtered_altitude_m;
     }
 
     s_vario_gc.last_flight_active = rt->flight_active;
@@ -631,13 +638,17 @@ static void vario_gc_update_target_geometry(vario_runtime_t *rt)
 {
     float distance_m;
     float bearing_deg;
+    vario_nav_active_target_t target;
 
     if (rt == NULL)
     {
         return;
     }
 
-    if ((s_vario_gc.home_valid == false) || (vario_gc_runtime_has_valid_gps(rt) == false))
+    memset(&target, 0, sizeof(target));
+
+    if ((vario_gc_runtime_has_valid_gps(rt) == false) ||
+        (Vario_Navigation_GetActiveTarget(&target) == false))
     {
         vario_gc_clear_target_outputs(rt);
         return;
@@ -645,8 +656,8 @@ static void vario_gc_update_target_geometry(vario_runtime_t *rt)
 
     if (vario_gc_distance_bearing_from_ll_e7(rt->gps.fix.lat,
                                              rt->gps.fix.lon,
-                                             s_vario_gc.home_lat_e7,
-                                             s_vario_gc.home_lon_e7,
+                                             target.lat_e7,
+                                             target.lon_e7,
                                              &distance_m,
                                              &bearing_deg) == false)
     {
@@ -657,7 +668,10 @@ static void vario_gc_update_target_geometry(vario_runtime_t *rt)
     rt->target_valid = true;
     rt->target_distance_m = distance_m;
     rt->target_bearing_deg = bearing_deg;
-    rt->target_altitude_m = s_vario_gc.home_altitude_m;
+    rt->target_altitude_m = target.altitude_m;
+    rt->target_has_elevation = target.has_elevation;
+    rt->target_kind = target.kind;
+    vario_gc_copy_text(rt->target_name, sizeof(rt->target_name), target.name);
 }
 
 static void vario_gc_update_estimated_airspeed(vario_runtime_t *rt)
@@ -877,7 +891,9 @@ static void vario_gc_update_final_glide(vario_runtime_t *rt,
         return;
     }
 
-    if ((rt->target_valid == false) || (rt->target_distance_m <= 1.0f))
+    if ((rt->target_valid == false) ||
+        (rt->target_has_elevation == false) ||
+        (rt->target_distance_m <= 1.0f))
     {
         rt->required_glide_ratio = 0.0f;
         rt->arrival_height_m = 0.0f;

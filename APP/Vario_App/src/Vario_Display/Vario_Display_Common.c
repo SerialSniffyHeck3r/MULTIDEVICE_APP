@@ -3,6 +3,7 @@
 #include "Vario_Dev.h"
 #include "Vario_State.h"
 #include "Vario_Settings.h"
+#include "Vario_Navigation.h"
 #include "Vario_Icon_Resources.h"
 
 #include <math.h>
@@ -1597,24 +1598,13 @@ static bool vario_display_distance_bearing(int32_t from_lat_e7,
 static void vario_display_compute_nav_solution(const vario_runtime_t *rt,
                                                vario_display_nav_solution_t *out_solution)
 {
-    int32_t target_lat_e7;
-    int32_t target_lon_e7;
-
     if (out_solution == NULL)
     {
         return;
     }
 
     memset(out_solution, 0, sizeof(*out_solution));
-
-    if (s_vario_ui_dynamic.nav_mode == VARIO_NAV_TARGET_WP)
-    {
-        snprintf(out_solution->label, sizeof(out_solution->label), "WPT1");
-    }
-    else
-    {
-        snprintf(out_solution->label, sizeof(out_solution->label), "START");
-    }
+    snprintf(out_solution->label, sizeof(out_solution->label), "DST");
 
     if (rt == NULL)
     {
@@ -1627,36 +1617,25 @@ static void vario_display_compute_nav_solution(const vario_runtime_t *rt,
                                    (rt->gps.fix.fixType != 0u));
     out_solution->heading_valid = (rt->heading_valid != false);
 
-    if (out_solution->current_valid == false)
+    if ((out_solution->current_valid == false) || (rt->target_valid == false))
     {
         return;
     }
 
-    if (s_vario_ui_dynamic.nav_mode == VARIO_NAV_TARGET_WP)
+    out_solution->target_valid = true;
+    out_solution->distance_m = (rt->target_distance_m >= 0.0f) ? rt->target_distance_m : 0.0f;
+    out_solution->bearing_deg = vario_display_wrap_360(rt->target_bearing_deg);
+
+    if (rt->target_name[0] != '\0')
     {
-        if (s_vario_ui_dynamic.wp_valid == false)
-        {
-            return;
-        }
-        target_lat_e7 = s_vario_ui_dynamic.wp_lat_e7;
-        target_lon_e7 = s_vario_ui_dynamic.wp_lon_e7;
+        snprintf(out_solution->label, sizeof(out_solution->label), "%s", rt->target_name);
     }
     else
     {
-        if (vario_display_get_oldest_trail_point(rt, &target_lat_e7, &target_lon_e7) == false)
-        {
-            return;
-        }
-    }
-
-    if (vario_display_distance_bearing(rt->gps.fix.lat,
-                                       rt->gps.fix.lon,
-                                       target_lat_e7,
-                                       target_lon_e7,
-                                       &out_solution->distance_m,
-                                       &out_solution->bearing_deg) == false)
-    {
-        return;
+        snprintf(out_solution->label,
+                 sizeof(out_solution->label),
+                 "%s",
+                 Vario_Navigation_GetShortSourceLabel(rt->target_kind));
     }
 
     if (out_solution->heading_valid != false)
@@ -1668,8 +1647,6 @@ static void vario_display_compute_nav_solution(const vario_runtime_t *rt,
     {
         out_solution->relative_bearing_deg = out_solution->bearing_deg;
     }
-
-    out_solution->target_valid = true;
 }
 
 static uint8_t vario_display_get_vario_scale_x10(const vario_settings_t *settings)
@@ -2888,6 +2865,7 @@ static void vario_display_draw_lower_left_glide_computer(u8g2_t *u8g2,
     char    final_glide_text[16];
     char    arrival_text[16];
     char    distance_text[16];
+    const char *distance_label;
     char    distance_unit[8];
     int16_t left_x;
     int16_t top_y;
@@ -2912,6 +2890,8 @@ static void vario_display_draw_lower_left_glide_computer(u8g2_t *u8g2,
     {
         return;
     }
+
+    distance_label = Vario_Navigation_GetShortSourceLabel(rt->target_kind);
 
     /* ---------------------------------------------------------------------- */
     /* 좌하단 glide-computer 3중 세트                                          */
@@ -2940,7 +2920,9 @@ static void vario_display_draw_lower_left_glide_computer(u8g2_t *u8g2,
     icon_lane_w = VARIO_ICON_FINAL_GLIDE_WIDTH;
     {
         int16_t dst_w;
-        dst_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_ALT2_UNIT, "DST");
+        dst_w = vario_display_measure_text(u8g2,
+                                           VARIO_UI_FONT_ALT2_UNIT,
+                                           Vario_Navigation_GetShortSourceLabel(rt->target_kind));
         if (icon_lane_w < dst_w)
         {
             icon_lane_w = dst_w;
@@ -3098,7 +3080,7 @@ static void vario_display_draw_lower_left_glide_computer(u8g2_t *u8g2,
                                     icon_lane_w,
                                     VARIO_UI_ALIGN_LEFT,
                                     VARIO_UI_FONT_ALT2_UNIT,
-                                    "DST");
+                                    distance_label);
     vario_display_draw_text_box_top(u8g2,
                                     value_x,
                                     (int16_t)(row2_y + ((row_h - value_h) / 2)),

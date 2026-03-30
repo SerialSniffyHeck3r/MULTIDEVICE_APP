@@ -219,6 +219,9 @@ typedef struct
     float    target_distance_m;
     float    target_bearing_deg;
     float    target_altitude_m;
+    bool     target_has_elevation;
+    uint8_t  target_kind;
+    char     target_name[12];
     float    required_glide_ratio;
     float    arrival_height_m;
     float    estimated_te_vario_mps;

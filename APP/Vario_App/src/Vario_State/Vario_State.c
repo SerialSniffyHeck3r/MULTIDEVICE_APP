@@ -2,6 +2,7 @@
 
 #include "Vario_Settings.h"
 #include "Vario_GlideComputer.h"
+#include "Vario_Navigation.h"
 #include "BIKE_DYNAMICS.h"
 
 #include <math.h>
@@ -1397,6 +1398,7 @@ static void vario_state_update_flight_logic(uint32_t now_ms)
                         s_vario_state.runtime.last_accum_altitude_m = s_vario_state.runtime.filtered_altitude_m;
                         s_vario_state.takeoff_anchor_valid = false;
                         s_vario_state.landing_anchor_valid = false;
+                        Vario_Navigation_OnTakeoff(&s_vario_state.runtime);
                         s_vario_state.redraw_request = 1u;
                     }
                 }
@@ -1430,6 +1432,7 @@ static void vario_state_update_flight_logic(uint32_t now_ms)
                 s_vario_state.runtime.last_accum_altitude_m = s_vario_state.runtime.filtered_altitude_m;
                 s_vario_state.takeoff_anchor_valid = false;
                 s_vario_state.landing_anchor_valid = false;
+                Vario_Navigation_OnTakeoff(&s_vario_state.runtime);
                 s_vario_state.redraw_request = 1u;
             }
         }
@@ -1514,6 +1517,7 @@ static void vario_state_update_flight_logic(uint32_t now_ms)
                         s_vario_state.runtime.flight_landing_candidate_ms = 0u;
                         s_vario_state.takeoff_anchor_valid = false;
                         s_vario_state.landing_anchor_valid = false;
+                        Vario_Navigation_OnLanding(&s_vario_state.runtime, now_ms);
                         s_vario_state.redraw_request = 1u;
                     }
                 }
@@ -1524,6 +1528,7 @@ static void vario_state_update_flight_logic(uint32_t now_ms)
                     s_vario_state.runtime.flight_landing_candidate_ms = 0u;
                     s_vario_state.takeoff_anchor_valid = false;
                     s_vario_state.landing_anchor_valid = false;
+                    Vario_Navigation_OnLanding(&s_vario_state.runtime, now_ms);
                     s_vario_state.redraw_request = 1u;
                 }
             }
@@ -1941,6 +1946,7 @@ void Vario_State_Init(void)
     s_vario_state.redraw_request     = 1u;
 
     Vario_GlideComputer_Init();
+    Vario_Navigation_Init();
 }
 
 void Vario_State_Task(uint32_t now_ms)
@@ -2306,6 +2312,9 @@ void Vario_State_ResetFlightMetrics(void)
     s_vario_state.runtime.target_distance_m = 0.0f;
     s_vario_state.runtime.target_bearing_deg = 0.0f;
     s_vario_state.runtime.target_altitude_m = 0.0f;
+    s_vario_state.runtime.target_has_elevation = false;
+    s_vario_state.runtime.target_kind = 0u;
+    memset(s_vario_state.runtime.target_name, 0, sizeof(s_vario_state.runtime.target_name));
     s_vario_state.runtime.required_glide_ratio = 0.0f;
     s_vario_state.runtime.arrival_height_m = 0.0f;
     s_vario_state.runtime.estimated_te_vario_mps = 0.0f;
@@ -2314,6 +2323,7 @@ void Vario_State_ResetFlightMetrics(void)
     s_vario_state.landing_anchor_valid = false;
 
     Vario_GlideComputer_ResetReference();
+    Vario_Navigation_ResetFlightRam();
     s_vario_state.redraw_request = 1u;
 }
 
