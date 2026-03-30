@@ -347,6 +347,7 @@ typedef struct
     uint8_t  auto_zero_on_boot;
     uint8_t  gnss_aid_enabled;
     uint8_t  obd_aid_enabled;
+    uint8_t  bank_calc_mode;                  /* app_bike_bank_calc_mode_t raw          */
 
     /* ---------------------------------------------------------------------- */
     /*  장착 축 / yaw trim                                                      */

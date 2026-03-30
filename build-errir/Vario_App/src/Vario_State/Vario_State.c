@@ -130,11 +130,11 @@
 #endif
 
 #ifndef VARIO_STATE_TRAINER_DEFAULT_LAT_E7
-#define VARIO_STATE_TRAINER_DEFAULT_LAT_E7 373566000
+#define VARIO_STATE_TRAINER_DEFAULT_LAT_E7 375665000
 #endif
 
 #ifndef VARIO_STATE_TRAINER_DEFAULT_LON_E7
-#define VARIO_STATE_TRAINER_DEFAULT_LON_E7 1269784000
+#define VARIO_STATE_TRAINER_DEFAULT_LON_E7 1269780000
 #endif
 
 #ifndef VARIO_STATE_TRAINER_TRUE_WIND_FROM_DEG
@@ -143,6 +143,14 @@
 
 #ifndef VARIO_STATE_TRAINER_TRUE_WIND_SPEED_KMH
 #define VARIO_STATE_TRAINER_TRUE_WIND_SPEED_KMH 18.0f
+#endif
+
+#ifndef VARIO_STATE_TRAIL_PERIOD_MS
+#define VARIO_STATE_TRAIL_PERIOD_MS 1000u
+#endif
+
+#ifndef VARIO_STATE_BIKE_PRESENT_PERIOD_MS
+#define VARIO_STATE_BIKE_PRESENT_PERIOD_MS 50u
 #endif
 
 static float vario_state_distance_between_ll_deg_e7(int32_t lat1_e7,
@@ -159,9 +167,10 @@ static float vario_state_rad_to_deg(float rad);
 /*  실제 센서값을 직접 건드리는 대신, Vario_State 내부에 별도 scenario table 을  */
 /*  두고 그 결과를 runtime snapshot staging 구조체에 덮어쓴다.                */
 /*                                                                            */
-/*  버튼 F1/F2/F5/F6은 아래 table의 입력축(speed / heading)만 조작한다.        */
-/*  QNH는 기존 canonical setting 경로를 그대로 사용하고, trainer는 그 값을      */
-/*  읽어 synthetic baro altitude를 다시 계산한다.                             */
+/*  버튼은 TRAINER 내부 synthetic 축(speed / altitude / heading)만 조작한다. */
+/*  실제 센서/APP_STATE canonical 저장소는 건드리지 않는다.                    */
+/*  trainer altitude는 synthetic pressure altitude로 반영되고,                 */
+/*  altitude 버튼은 짧은 vario impulse도 함께 걸어 사용자가 즉시 체감하게 한다. */
 /* -------------------------------------------------------------------------- */
 typedef struct
 {
@@ -178,6 +187,8 @@ typedef struct
     float    airspeed_kmh;
     float    heading_deg;
     float    vario_mps;
+    float    command_vario_mps;
+    uint32_t command_vario_until_ms;
     int32_t  lat_e7;
     int32_t  lon_e7;
 } vario_trainer_state_t;
@@ -210,6 +221,7 @@ static void    vario_state_trainer_handle_toggle(bool enabled, uint32_t now_ms);
 static float   vario_state_trainer_compute_vario_mps(uint32_t now_ms);
 static void    vario_state_trainer_step(uint32_t now_ms);
 static void    vario_state_trainer_apply_snapshots(uint32_t now_ms);
+static void    vario_state_update_bike_present(uint32_t now_ms);
 
 static struct
 {
@@ -235,6 +247,8 @@ static struct
     /* ---------------------------------------------------------------------- */
     uint32_t last_fast_present_ms;
     uint32_t last_slow_present_ms;
+    uint32_t last_bike_snapshot_ms;
+    uint32_t last_bike_present_ms;
 
     /* ---------------------------------------------------------------------- */
     /* altitude path tracking                                                  */
@@ -474,6 +488,23 @@ static float vario_state_trainer_compute_vario_mps(uint32_t now_ms)
     base_vario_mps = ((float)s_vario_trainer_heading_lift_cms[heading_idx]) * 0.01f;
     base_vario_mps += ((float)s_vario_trainer_speed_rows[speed_idx].vario_bias_cms) * 0.01f;
 
+    /* ------------------------------------------------------------------ */
+    /* altitude 버튼 입력은 trainer 전용 synthetic impulse 로 처리한다.    */
+    /* 실제 센서 로직을 쓰지 않는 모드이므로, 순간적인 climb/sink command */
+    /* 를 일정 시간 더해 사용자가 altitude/vario 변화를 즉시 보게 한다.   */
+    /* ------------------------------------------------------------------ */
+    if ((s_vario_state.trainer.command_vario_until_ms != 0u) &&
+        (now_ms <= s_vario_state.trainer.command_vario_until_ms))
+    {
+        base_vario_mps += s_vario_state.trainer.command_vario_mps;
+    }
+    else if ((s_vario_state.trainer.command_vario_until_ms != 0u) &&
+             (now_ms > s_vario_state.trainer.command_vario_until_ms))
+    {
+        s_vario_state.trainer.command_vario_until_ms = 0u;
+        s_vario_state.trainer.command_vario_mps = 0.0f;
+    }
+
     elapsed_s = ((float)(now_ms - s_vario_state.trainer.start_ms)) * 0.001f;
     wave_fast = 0.18f * sinf((elapsed_s * 1.7f) + (vario_state_wrap_360(s_vario_state.trainer.heading_deg) * 0.05f));
     wave_slow = 0.10f * sinf(elapsed_s * 0.37f);
@@ -558,7 +589,7 @@ static void vario_state_trainer_step(uint32_t now_ms)
     alt_std_cm = (int32_t)lroundf(vario_state_trainer_altitude_from_pressure_m(pressure_hpa_x100, 101325) * 100.0f);
     alt_qnh_cm = (int32_t)lroundf(vario_state_trainer_altitude_from_pressure_m(pressure_hpa_x100, qnh_hpa_x100) * 100.0f);
     alt_gps_cm = (int32_t)lroundf(s_vario_state.trainer.pressure_altitude_m * 100.0f);
-    alt_display_cm = alt_gps_cm;
+    alt_display_cm = alt_qnh_cm;
     vario_cms = (int32_t)lroundf(s_vario_state.trainer.vario_mps * 100.0f);
 
     memset(&s_vario_state.runtime.altitude, 0, sizeof(s_vario_state.runtime.altitude));
@@ -646,8 +677,26 @@ static void vario_state_trainer_step(uint32_t now_ms)
     s_vario_state.runtime.gps.fix.last_update_ms = now_ms;
     s_vario_state.runtime.gps.fix.last_fix_ms = now_ms;
 
+    s_vario_state.runtime.bike.initialized = true;
+    s_vario_state.runtime.bike.zero_valid = true;
+    s_vario_state.runtime.bike.imu_valid = true;
     s_vario_state.runtime.bike.heading_valid = true;
-    s_vario_state.runtime.bike.heading_deg_x10 = (int16_t)lroundf(vario_state_wrap_360(s_vario_state.trainer.heading_deg) * 10.0f);
+    s_vario_state.runtime.bike.confidence_permille = 950u;
+    s_vario_state.runtime.bike.last_update_ms = now_ms;
+    s_vario_state.runtime.bike.heading_deg_x10 =
+        (int16_t)lroundf(vario_state_wrap_360(s_vario_state.trainer.heading_deg) * 10.0f);
+    s_vario_state.runtime.bike.banking_angle_deg_x10 =
+        (int16_t)lroundf((18.0f * sinf((((float)(now_ms - s_vario_state.trainer.start_ms)) * 0.001f * 0.55f) +
+                                      vario_state_deg_to_rad(s_vario_state.trainer.heading_deg * 0.5f))) * 10.0f);
+    s_vario_state.runtime.bike.grade_deg_x10 =
+        (int16_t)lroundf(vario_state_clampf((s_vario_state.trainer.vario_mps * 5.0f) +
+                                            (2.5f * sinf(((float)(now_ms - s_vario_state.trainer.start_ms)) * 0.001f * 0.35f)),
+                                            -15.0f,
+                                            15.0f) * 10.0f);
+    s_vario_state.runtime.bike.banking_angle_display_deg =
+        (int8_t)lroundf(((float)s_vario_state.runtime.bike.banking_angle_deg_x10) * 0.1f);
+    s_vario_state.runtime.bike.grade_display_deg =
+        (int8_t)lroundf(((float)s_vario_state.runtime.bike.grade_deg_x10) * 0.1f);
 
     (void)settings;
     s_vario_state.trainer.last_update_ms = now_ms;
@@ -752,6 +801,30 @@ static void vario_state_capture_snapshots(void)
     APP_STATE_CopyAltitudeSnapshot(&s_vario_state.runtime.altitude);
     APP_STATE_CopyBikeSnapshot(&s_vario_state.runtime.bike);
     APP_STATE_CopyClockSnapshot(&s_vario_state.runtime.clock);
+}
+
+static void vario_state_update_bike_present(uint32_t now_ms)
+{
+    uint32_t bike_update_ms;
+
+    bike_update_ms = s_vario_state.runtime.bike.last_update_ms;
+    if (bike_update_ms == 0u)
+    {
+        return;
+    }
+
+    if (bike_update_ms == s_vario_state.last_bike_snapshot_ms)
+    {
+        return;
+    }
+
+    s_vario_state.last_bike_snapshot_ms = bike_update_ms;
+    if ((s_vario_state.last_bike_present_ms == 0u) ||
+        ((now_ms - s_vario_state.last_bike_present_ms) >= VARIO_STATE_BIKE_PRESENT_PERIOD_MS))
+    {
+        s_vario_state.last_bike_present_ms = now_ms;
+        s_vario_state.redraw_request = 1u;
+    }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1488,7 +1561,7 @@ static float vario_state_distance_between_ll_deg_e7(int32_t lat1_e7,
     return sqrtf((dx_m * dx_m) + (dy_m * dy_m));
 }
 
-static void vario_state_push_trail_point(int32_t lat_e7, int32_t lon_e7, uint32_t stamp_ms)
+static void vario_state_push_trail_point(int32_t lat_e7, int32_t lon_e7, uint32_t stamp_ms, int16_t vario_cms)
 {
     uint8_t write_index;
 
@@ -1496,6 +1569,7 @@ static void vario_state_push_trail_point(int32_t lat_e7, int32_t lon_e7, uint32_
     s_vario_state.runtime.trail_lat_e7[write_index] = lat_e7;
     s_vario_state.runtime.trail_lon_e7[write_index] = lon_e7;
     s_vario_state.runtime.trail_stamp_ms[write_index] = stamp_ms;
+    s_vario_state.runtime.trail_vario_cms[write_index] = vario_cms;
 
     s_vario_state.runtime.trail_head = (uint8_t)((write_index + 1u) % VARIO_TRAIL_MAX_POINTS);
     if (s_vario_state.runtime.trail_count < VARIO_TRAIL_MAX_POINTS)
@@ -1509,14 +1583,11 @@ static void vario_state_push_trail_point(int32_t lat_e7, int32_t lon_e7, uint32_
 
 static void vario_state_update_trail(void)
 {
-    const vario_settings_t *settings;
-    const app_gps_state_t  *gps;
-    uint8_t                 newest_index;
-    float                   dist_m;
-    uint32_t                age_ms;
-    uint32_t                interval_ms;
+    const app_gps_state_t *gps;
+    uint8_t                newest_index;
+    uint32_t               age_ms;
+    int16_t                trail_vario_cms;
 
-    settings = Vario_Settings_Get();
     gps = &s_vario_state.runtime.gps;
 
     if ((gps->fix.valid == false) ||
@@ -1526,34 +1597,30 @@ static void vario_state_update_trail(void)
         return;
     }
 
+    trail_vario_cms = (int16_t)lroundf(vario_state_clampf(s_vario_state.runtime.fast_vario_bar_mps,
+                                                          -9.99f,
+                                                          9.99f) * 100.0f);
+
     if (s_vario_state.runtime.trail_count == 0u)
     {
-        vario_state_push_trail_point(gps->fix.lat, gps->fix.lon, gps->fix.last_update_ms);
+        vario_state_push_trail_point(gps->fix.lat,
+                                     gps->fix.lon,
+                                     gps->fix.last_update_ms,
+                                     trail_vario_cms);
         return;
     }
 
     newest_index = (s_vario_state.runtime.trail_head == 0u) ?
                        (VARIO_TRAIL_MAX_POINTS - 1u) :
                        (uint8_t)(s_vario_state.runtime.trail_head - 1u);
-
-    dist_m = vario_state_distance_between_ll_deg_e7(s_vario_state.runtime.trail_lat_e7[newest_index],
-                                                    s_vario_state.runtime.trail_lon_e7[newest_index],
-                                                    gps->fix.lat,
-                                                    gps->fix.lon);
     age_ms = gps->fix.last_update_ms - s_vario_state.runtime.trail_stamp_ms[newest_index];
-    interval_ms = 5000u;
-    if ((settings != NULL) && (settings->log_interval_seconds != 0u))
-    {
-        interval_ms = (uint32_t)settings->log_interval_seconds * 1000u;
-    }
-    if ((settings != NULL) && (settings->log_enabled == 0u))
-    {
-        interval_ms = 0xFFFFFFFFu;
-    }
 
-    if ((dist_m >= (float)settings->trail_spacing_m) || (age_ms >= interval_ms))
+    if (age_ms >= VARIO_STATE_TRAIL_PERIOD_MS)
     {
-        vario_state_push_trail_point(gps->fix.lat, gps->fix.lon, gps->fix.last_update_ms);
+        vario_state_push_trail_point(gps->fix.lat,
+                                     gps->fix.lon,
+                                     gps->fix.last_update_ms,
+                                     trail_vario_cms);
     }
 }
 
@@ -1894,6 +1961,7 @@ void Vario_State_Task(uint32_t now_ms)
     vario_state_update_display_filter(now_ms);
     vario_state_update_glide_ratio_fast_path();
     vario_state_update_heading(now_ms);
+    vario_state_update_bike_present(now_ms);
     vario_state_update_clock();
     vario_state_update_flight_logic(now_ms);
     vario_state_update_trail();
@@ -1920,6 +1988,42 @@ void Vario_State_TrainerAdjustSpeed(int8_t direction)
                            (((float)direction) * VARIO_STATE_TRAINER_SPEED_STEP_KMH),
                            VARIO_STATE_TRAINER_MIN_SPEED_KMH,
                            VARIO_STATE_TRAINER_MAX_SPEED_KMH);
+}
+
+void Vario_State_TrainerAdjustAltitude(int8_t direction)
+{
+    uint32_t now_ms;
+    float    altitude_step_m;
+    float    command_vario_mps;
+
+    if (direction == 0)
+    {
+        return;
+    }
+
+    if (s_vario_state.trainer.initialized == false)
+    {
+        vario_state_trainer_init(s_vario_state.runtime.last_task_ms);
+    }
+
+    now_ms = s_vario_state.runtime.last_task_ms;
+    if (now_ms == 0u)
+    {
+        now_ms = s_vario_state.trainer.last_update_ms;
+    }
+
+    altitude_step_m = 10.0f;
+    command_vario_mps = (direction > 0) ? 1.8f : -1.8f;
+
+    s_vario_state.trainer.pressure_altitude_m =
+        vario_state_clampf(s_vario_state.trainer.pressure_altitude_m +
+                           (((float)direction) * altitude_step_m),
+                           -100.0f,
+                           4500.0f);
+    s_vario_state.trainer.command_vario_mps = command_vario_mps;
+    s_vario_state.trainer.command_vario_until_ms = now_ms + 1200u;
+    s_vario_state.trainer.vario_mps = command_vario_mps;
+    s_vario_state.redraw_request = 1u;
 }
 
 void Vario_State_TrainerAdjustHeading(int8_t direction)
@@ -2008,16 +2112,16 @@ void Vario_State_SelectPreviousMainScreen(void)
     switch (s_vario_state.previous_main_mode)
     {
         case VARIO_MODE_SCREEN_1:
-            Vario_State_SetMode(VARIO_MODE_SCREEN_3);
+            Vario_State_SetMode(VARIO_MODE_SCREEN_2);
             break;
 
         case VARIO_MODE_SCREEN_2:
-            Vario_State_SetMode(VARIO_MODE_SCREEN_1);
+            Vario_State_SetMode(VARIO_MODE_SCREEN_3);
             break;
 
         case VARIO_MODE_SCREEN_3:
         default:
-            Vario_State_SetMode(VARIO_MODE_SCREEN_2);
+            Vario_State_SetMode(VARIO_MODE_SCREEN_1);
             break;
     }
 }
@@ -2027,14 +2131,14 @@ void Vario_State_SelectNextMainScreen(void)
     switch (s_vario_state.previous_main_mode)
     {
         case VARIO_MODE_SCREEN_1:
-            Vario_State_SetMode(VARIO_MODE_SCREEN_2);
-            break;
-
-        case VARIO_MODE_SCREEN_2:
             Vario_State_SetMode(VARIO_MODE_SCREEN_3);
             break;
 
         case VARIO_MODE_SCREEN_3:
+            Vario_State_SetMode(VARIO_MODE_SCREEN_2);
+            break;
+
+        case VARIO_MODE_SCREEN_2:
         default:
             Vario_State_SetMode(VARIO_MODE_SCREEN_1);
             break;
@@ -2160,6 +2264,7 @@ void Vario_State_ResetFlightMetrics(void)
     memset(s_vario_state.runtime.trail_lat_e7, 0, sizeof(s_vario_state.runtime.trail_lat_e7));
     memset(s_vario_state.runtime.trail_lon_e7, 0, sizeof(s_vario_state.runtime.trail_lon_e7));
     memset(s_vario_state.runtime.trail_stamp_ms, 0, sizeof(s_vario_state.runtime.trail_stamp_ms));
+    memset(s_vario_state.runtime.trail_vario_cms, 0, sizeof(s_vario_state.runtime.trail_vario_cms));
     memset(s_vario_state.runtime.history_altitude_m, 0, sizeof(s_vario_state.runtime.history_altitude_m));
     memset(s_vario_state.runtime.history_vario_mps, 0, sizeof(s_vario_state.runtime.history_vario_mps));
     memset(s_vario_state.runtime.history_speed_kmh, 0, sizeof(s_vario_state.runtime.history_speed_kmh));

@@ -293,6 +293,7 @@ typedef struct
     int32_t  trail_lat_e7[VARIO_TRAIL_MAX_POINTS];
     int32_t  trail_lon_e7[VARIO_TRAIL_MAX_POINTS];
     uint32_t trail_stamp_ms[VARIO_TRAIL_MAX_POINTS];
+    int16_t  trail_vario_cms[VARIO_TRAIL_MAX_POINTS];
 } vario_runtime_t;
 
 void Vario_State_Init(void);
@@ -310,11 +311,12 @@ void Vario_State_SelectNextMainScreen(void);
 /* -------------------------------------------------------------------------- */
 /*  TRAINER synthetic scenario control                                        */
 /*                                                                            */
-/*  main screen 에서 TRAINER=ON 일 때 F1/F2/F5/F6이 이 API를 호출한다.          */
-/*  실제 센서 raw / APP_STATE 저장소를 직접 건드리지 않고,                      */
-/*  Vario_State 내부 synthetic table 값만 조작한다.                           */
+/*  main screen 에서 TRAINER=ON 일 때 speed / altitude / heading 조작만      */
+/*  허용한다. 실제 센서 raw / APP_STATE 저장소를 직접 건드리지 않고,             */
+/*  Vario_State 내부 synthetic table 값만 조작한다.                            */
 /* -------------------------------------------------------------------------- */
 void Vario_State_TrainerAdjustSpeed(int8_t direction);
+void Vario_State_TrainerAdjustAltitude(int8_t direction);
 void Vario_State_TrainerAdjustHeading(int8_t direction);
 
 uint8_t Vario_State_GetSettingsCursor(void);

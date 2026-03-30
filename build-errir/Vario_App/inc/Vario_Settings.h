@@ -140,6 +140,19 @@ typedef enum
 } vario_alt2_mode_t;
 
 /* -------------------------------------------------------------------------- */
+/*  IMU assist mode                                                           */
+/*                                                                            */
+/*  OFF  : vario는 no-IMU 경로 사용                                           */
+/*  AUTO : low-level IMU aid 경로 사용. 신뢰도 낮으면 하위 레이어가 fallback  */
+/* -------------------------------------------------------------------------- */
+typedef enum
+{
+    VARIO_IMU_ASSIST_OFF = 0u,
+    VARIO_IMU_ASSIST_AUTO,
+    VARIO_IMU_ASSIST_COUNT
+} vario_imu_assist_mode_t;
+
+/* -------------------------------------------------------------------------- */
 /*  ALT source                                                                */
 /*                                                                            */
 /*  중요                                                                      */
@@ -262,6 +275,20 @@ typedef struct
     int32_t qnh_hpa_x100;
 
     /* ---------------------------------------------------------------------- */
+    /*  Static / installation pressure correction                              */
+    /*                                                                        */
+    /*  - 단위 : 0.01 hPa                                                      */
+    /*  - 센서 raw pressure에 additive correction으로 먼저 적용된다.            */
+    /*  - QNH를 몰래 바꾸는 항목이 아니라, 기기 자체 bias를 보정하는 항목이다. */
+    /*                                                                        */
+    /*  canonical owner는                                                     */
+    /*    APP_STATE.settings.altitude.pressure_correction_hpa_x100            */
+    /*                                                                        */
+    /*  이 필드 역시 legacy UI / settings pointer 호환용 mirror다.            */
+    /* ---------------------------------------------------------------------- */
+    int32_t pressure_correction_hpa_x100;
+
+    /* ---------------------------------------------------------------------- */
     /*  ALT2 reference altitude                                                */
     /* ---------------------------------------------------------------------- */
     int32_t alt2_reference_cm;
@@ -282,8 +309,9 @@ typedef struct
     /* ---------------------------------------------------------------------- */
     /*  데이터 소스 선택                                                       */
     /* ---------------------------------------------------------------------- */
-    vario_alt_source_t     altitude_source;
-    vario_heading_source_t heading_source;
+    vario_alt_source_t       altitude_source;
+    vario_heading_source_t   heading_source;
+    vario_imu_assist_mode_t  imu_assist_mode;
 
     /* ---------------------------------------------------------------------- */
     /*  오디오 / 사용자 경험                                                   */
@@ -440,6 +468,8 @@ const vario_settings_t *Vario_Settings_Get(void);
 /* -------------------------------------------------------------------------- */
 int32_t Vario_Settings_GetManualQnhHpaX100(void);
 void    Vario_Settings_SetManualQnhHpaX100(int32_t qnh_hpa_x100);
+int32_t Vario_Settings_GetPressureCorrectionHpaX100(void);
+void    Vario_Settings_SetPressureCorrectionHpaX100(int32_t correction_hpa_x100);
 
 void Vario_Settings_AdjustQuickSet(vario_quickset_item_t item, int8_t direction);
 void Vario_Settings_AdjustValue(vario_value_item_t item, int8_t direction);

@@ -283,9 +283,47 @@ static void vario_task_apply_platform_settings(void)
     /* ------------------------------------------------------------------ */
     damping_norm = vario_task_damping_norm_from_settings(settings);
     audio_response_norm = vario_task_audio_response_norm_from_settings(settings);
-    fast_tau_ms = vario_task_lerp_u16(170u, 70u, damping_norm);
-    baro_vario_tau_ms = vario_task_lerp_u16(95u, 38u, damping_norm);
-    baro_vario_noise_cms = vario_task_lerp_u16(72u, 50u, damping_norm);
+
+    /* ------------------------------------------------------------------ */
+    /*  commercial fast-trigger mirror                                      */
+    /*                                                                    */
+    /*  이번 구조에서는 APP_ALTITUDE 내부에서                               */
+    /*  - 빠른 attack tau                                                   */
+    /*  - onset-friendly fast trigger blend                                */
+    /*  - ZUPT hysteresis / dwell                                           */
+    /*  - optional IMU attack assist                                        */
+    /*  를 이미 담당한다.                                                   */
+    /*                                                                    */
+    /*  따라서 여기서 Vario_App damping knob 이 만지는 것은                 */
+    /*  "공격성 그 자체" 보다는                                             */
+    /*  - fast path release tail                                            */
+    /*  - truth backbone smoothing                                          */
+    /*  - baro velocity measurement nominal trust                           */
+    /*  세 축이다.                                                          */
+    /*                                                                    */
+    /*  숫자의 의미                                                         */
+    /*  - fast_tau_ms                                                       */
+    /*      fast output의 release/decay 쪽을 얼마나 길게 둘지               */
+    /*      값을 줄이면 짧게 툭 치고 바로 살아난다.                         */
+    /*      값을 늘리면 좀 더 고급스럽게 매끈하지만 tail이 길어진다.         */
+    /*                                                                    */
+    /*  - baro_vario_tau_ms                                                 */
+    /*      regression slope backbone LPF                                   */
+    /*      값을 줄이면 작은 들림에도 더 빨리 따라가고,                     */
+    /*      늘리면 정지 bench에서 더 조용해진다.                            */
+    /*                                                                    */
+    /*  - baro_vario_noise_cms                                              */
+    /*      KF가 baro velocity observation을 믿는 정도                      */
+    /*      값을 줄이면 즉응성↑ / false trigger risk↑                        */
+    /*      값을 늘리면 보수성↑ / small lift miss risk↑                      */
+    /*                                                                    */
+    /*  중요                                                                 */
+    /*  이 값들은 Vario_App 전용 runtime mirror 다.                         */
+    /*  Motor_App / bike dynamics 쪽 shared driver 설정은 건드리지 않는다.   */
+    /* ------------------------------------------------------------------ */
+    fast_tau_ms = vario_task_lerp_u16(100u, 40u, damping_norm);
+    baro_vario_tau_ms = vario_task_lerp_u16(46u, 16u, damping_norm);
+    baro_vario_noise_cms = vario_task_lerp_u16(36u, 12u, damping_norm);
 
     audio_deadband_cms = (uint16_t)((settings->climb_tone_threshold_cms > 0) ?
                                     settings->climb_tone_threshold_cms :
@@ -325,6 +363,42 @@ static void vario_task_apply_platform_settings(void)
     if (platform_settings.altitude.pressure_correction_hpa_x100 != settings->pressure_correction_hpa_x100)
     {
         platform_settings.altitude.pressure_correction_hpa_x100 = settings->pressure_correction_hpa_x100;
+        platform_settings_dirty = 1u;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  MPU full-scale mirror 보정                                          */
+    /*                                                                    */
+    /*  GY86_IMU driver는 현재 MPU6050를                                   */
+    /*  - gyro  : +/-500 dps                                               */
+    /*  - accel : +/-4 g                                                   */
+    /*  로 init 한다.                                                      */
+    /*                                                                    */
+    /*  그런데 altitude default snapshot 쪽에                              */
+    /*  - 16384 LSB/g   (+/-2g 기준)                                       */
+    /*  - 131   LSB/dps (+/-250dps 기준)                                   */
+    /*  가 남아 있으면, APP_ALTITUDE의 trust / bias learn / rest detect 가  */
+    /*  실제 센서 스케일과 다르게 계산된다.                                */
+    /*                                                                    */
+    /*  특히 accel norm 이 실제 1g여도 소프트웨어는 0.5g 근처로 해석할 수   */
+    /*  있어서 attitude trust 가 무너지고, 그 결과 sensor-fusion fast       */
+    /*  vario와 ZUPT 판단이 함께 흔들린다.                                 */
+    /*                                                                    */
+    /*  그래서 Vario_App runtime mirror 에서는 shared driver와 일치하도록   */
+    /*  스케일을 강제로 맞춘다.                                            */
+    /*                                                                    */
+    /*  참고: gyro는 실제 65.5 LSB/dps 이지만 설정 구조체가 정수형이므로     */
+    /*  가장 가까운 66으로 둔다.                                           */
+    /* ------------------------------------------------------------------ */
+    if (platform_settings.altitude.imu_accel_lsb_per_g != 8192u)
+    {
+        platform_settings.altitude.imu_accel_lsb_per_g = 8192u;
+        platform_settings_dirty = 1u;
+    }
+
+    if (platform_settings.altitude.imu_gyro_lsb_per_dps != 66u)
+    {
+        platform_settings.altitude.imu_gyro_lsb_per_dps = 66u;
         platform_settings_dirty = 1u;
     }
 

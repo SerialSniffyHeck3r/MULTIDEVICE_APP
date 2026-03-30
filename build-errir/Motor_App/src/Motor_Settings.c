@@ -118,6 +118,19 @@ static const char *motor_settings_axis_name(uint8_t axis_raw)
     }
 }
 
+
+static const char *motor_settings_bank_calc_mode_name(uint8_t mode_raw)
+{
+    switch ((app_bike_bank_calc_mode_t)mode_raw)
+    {
+    case APP_BIKE_BANK_CALC_MODE_FUSION:   return "FUSION";
+    case APP_BIKE_BANK_CALC_MODE_OBD:      return "OBD";
+    case APP_BIKE_BANK_CALC_MODE_GNSS:     return "GNSS";
+    case APP_BIKE_BANK_CALC_MODE_IMU_ONLY: return "IMU ONLY";
+    default:                               return "FUSION";
+    }
+}
+
 static const char *motor_settings_onoff_text(uint8_t enabled)
 {
     return (enabled != 0u) ? "ON" : "OFF";
@@ -241,6 +254,7 @@ void Motor_Settings_ResetToDefaults(void)
     s_motor_settings.dynamics.auto_zero_on_boot = 1u;
     s_motor_settings.dynamics.gnss_aid_enabled = 1u;
     s_motor_settings.dynamics.obd_aid_enabled = 1u;
+    s_motor_settings.dynamics.bank_calc_mode = (uint8_t)APP_BIKE_BANK_CALC_MODE_FUSION;
     s_motor_settings.dynamics.mount_forward_axis = (uint8_t)APP_BIKE_AXIS_POS_X;
     s_motor_settings.dynamics.mount_left_axis = (uint8_t)APP_BIKE_AXIS_POS_Y;
     s_motor_settings.dynamics.mount_yaw_trim_deg_x10 = 0;
@@ -348,6 +362,7 @@ void Motor_Settings_Commit(void)
     shared_settings.bike.auto_zero_on_boot = s_motor_settings.dynamics.auto_zero_on_boot;
     shared_settings.bike.gnss_aid_enabled = s_motor_settings.dynamics.gnss_aid_enabled;
     shared_settings.bike.obd_aid_enabled = s_motor_settings.dynamics.obd_aid_enabled;
+    shared_settings.bike.bank_calc_mode = s_motor_settings.dynamics.bank_calc_mode;
     shared_settings.bike.mount_forward_axis = s_motor_settings.dynamics.mount_forward_axis;
     shared_settings.bike.mount_left_axis = s_motor_settings.dynamics.mount_left_axis;
     shared_settings.bike.mount_yaw_trim_deg_x10 = s_motor_settings.dynamics.mount_yaw_trim_deg_x10;
@@ -387,7 +402,7 @@ uint8_t Motor_Settings_GetRowCount(motor_screen_t screen)
     case MOTOR_SCREEN_SETTINGS_GPS:         return 10u;
     case MOTOR_SCREEN_SETTINGS_UNITS:       return 7u;
     case MOTOR_SCREEN_SETTINGS_RECORDING:   return 6u;
-    case MOTOR_SCREEN_SETTINGS_DYNAMICS:    return 27u;
+    case MOTOR_SCREEN_SETTINGS_DYNAMICS:    return 28u;
     case MOTOR_SCREEN_SETTINGS_MAINTENANCE: return 8u;
     case MOTOR_SCREEN_SETTINGS_OBD:         return 5u;
     case MOTOR_SCREEN_SETTINGS_SYSTEM:      return 6u;
@@ -502,29 +517,30 @@ void Motor_Settings_GetRowText(const motor_state_t *state,
         case 1u:  (void)snprintf(out_label, label_size, "AUTO ZERO"); (void)snprintf(out_value, value_size, "%s", motor_settings_onoff_text(state->settings.dynamics.auto_zero_on_boot)); break;
         case 2u:  (void)snprintf(out_label, label_size, "GNSS AID"); (void)snprintf(out_value, value_size, "%s", motor_settings_onoff_text(state->settings.dynamics.gnss_aid_enabled)); break;
         case 3u:  (void)snprintf(out_label, label_size, "OBD AID"); (void)snprintf(out_value, value_size, "%s", motor_settings_onoff_text(state->settings.dynamics.obd_aid_enabled)); break;
-        case 4u:  (void)snprintf(out_label, label_size, "FWD AXIS"); (void)snprintf(out_value, value_size, "%s", motor_settings_axis_name(state->settings.dynamics.mount_forward_axis)); break;
-        case 5u:  (void)snprintf(out_label, label_size, "LEFT AXIS"); (void)snprintf(out_value, value_size, "%s", motor_settings_axis_name(state->settings.dynamics.mount_left_axis)); break;
-        case 6u:  (void)snprintf(out_label, label_size, "YAW TRIM"); (void)snprintf(out_value, value_size, "%+d.%01d", (int)(state->settings.dynamics.mount_yaw_trim_deg_x10 / 10), (int)abs((int)(state->settings.dynamics.mount_yaw_trim_deg_x10 % 10))); break;
-        case 7u:  (void)snprintf(out_label, label_size, "GRAV TAU"); (void)snprintf(out_value, value_size, "%u ms", (unsigned)state->settings.dynamics.imu_gravity_tau_ms); break;
-        case 8u:  (void)snprintf(out_label, label_size, "LIN TAU"); (void)snprintf(out_value, value_size, "%u ms", (unsigned)state->settings.dynamics.imu_linear_tau_ms); break;
-        case 9u:  (void)snprintf(out_label, label_size, "ACC GATE"); (void)snprintf(out_value, value_size, "%u mg", (unsigned)state->settings.dynamics.imu_attitude_accel_gate_mg); break;
-        case 10u: (void)snprintf(out_label, label_size, "JERK GATE"); (void)snprintf(out_value, value_size, "%u", (unsigned)state->settings.dynamics.imu_jerk_gate_mg_per_s); break;
-        case 11u: (void)snprintf(out_label, label_size, "MIN TRUST"); (void)snprintf(out_value, value_size, "%u", (unsigned)state->settings.dynamics.imu_predict_min_trust_permille); break;
-        case 12u: (void)snprintf(out_label, label_size, "IMU STALE"); (void)snprintf(out_value, value_size, "%u ms", (unsigned)state->settings.dynamics.imu_stale_timeout_ms); break;
-        case 13u: (void)snprintf(out_label, label_size, "OUT DB"); (void)snprintf(out_value, value_size, "%u mg", (unsigned)state->settings.dynamics.output_deadband_mg); break;
-        case 14u: (void)snprintf(out_label, label_size, "OUT CLIP"); (void)snprintf(out_value, value_size, "%u mg", (unsigned)state->settings.dynamics.output_clip_mg); break;
-        case 15u: (void)snprintf(out_label, label_size, "LEAN TAU"); (void)snprintf(out_value, value_size, "%u ms", (unsigned)state->settings.dynamics.lean_display_tau_ms); break;
-        case 16u: (void)snprintf(out_label, label_size, "GRADE TAU"); (void)snprintf(out_value, value_size, "%u ms", (unsigned)state->settings.dynamics.grade_display_tau_ms); break;
-        case 17u: (void)snprintf(out_label, label_size, "ACC TAU"); (void)snprintf(out_value, value_size, "%u ms", (unsigned)state->settings.dynamics.accel_display_tau_ms); break;
-        case 18u: (void)snprintf(out_label, label_size, "GNSS MIN SPD"); (void)snprintf(out_value, value_size, "%u.%01u", (unsigned)(state->settings.dynamics.gnss_min_speed_kmh_x10 / 10u), (unsigned)(state->settings.dynamics.gnss_min_speed_kmh_x10 % 10u)); break;
-        case 19u: (void)snprintf(out_label, label_size, "SPD ACC MAX"); (void)snprintf(out_value, value_size, "%u.%01u", (unsigned)(state->settings.dynamics.gnss_max_speed_acc_kmh_x10 / 10u), (unsigned)(state->settings.dynamics.gnss_max_speed_acc_kmh_x10 % 10u)); break;
-        case 20u: (void)snprintf(out_label, label_size, "HEAD ACC MAX"); (void)snprintf(out_value, value_size, "%u.%01u deg", (unsigned)(state->settings.dynamics.gnss_max_head_acc_deg_x10 / 10u), (unsigned)(state->settings.dynamics.gnss_max_head_acc_deg_x10 % 10u)); break;
-        case 21u: (void)snprintf(out_label, label_size, "BIAS TAU"); (void)snprintf(out_value, value_size, "%u ms", (unsigned)state->settings.dynamics.gnss_bias_tau_ms); break;
-        case 22u: (void)snprintf(out_label, label_size, "OUTLIER GATE"); (void)snprintf(out_value, value_size, "%u mg", (unsigned)state->settings.dynamics.gnss_outlier_gate_mg); break;
-        case 23u: (void)snprintf(out_label, label_size, "OBD STALE"); (void)snprintf(out_value, value_size, "%u ms", (unsigned)state->settings.dynamics.obd_stale_timeout_ms); break;
-        case 24u: (void)snprintf(out_label, label_size, "ZERO CAPTURE"); (void)snprintf(out_value, value_size, "EXEC"); break;
-        case 25u: (void)snprintf(out_label, label_size, "HARD REZERO"); (void)snprintf(out_value, value_size, "EXEC"); break;
-        case 26u:
+        case 4u:  (void)snprintf(out_label, label_size, "BANK ANGLE CALC"); (void)snprintf(out_value, value_size, "%s", motor_settings_bank_calc_mode_name(state->settings.dynamics.bank_calc_mode)); break;
+        case 5u:  (void)snprintf(out_label, label_size, "FWD AXIS"); (void)snprintf(out_value, value_size, "%s", motor_settings_axis_name(state->settings.dynamics.mount_forward_axis)); break;
+        case 6u:  (void)snprintf(out_label, label_size, "LEFT AXIS"); (void)snprintf(out_value, value_size, "%s", motor_settings_axis_name(state->settings.dynamics.mount_left_axis)); break;
+        case 7u:  (void)snprintf(out_label, label_size, "YAW TRIM"); (void)snprintf(out_value, value_size, "%+d.%01d", (int)(state->settings.dynamics.mount_yaw_trim_deg_x10 / 10), (int)abs((int)(state->settings.dynamics.mount_yaw_trim_deg_x10 % 10))); break;
+        case 8u:  (void)snprintf(out_label, label_size, "GRAV TAU"); (void)snprintf(out_value, value_size, "%u ms", (unsigned)state->settings.dynamics.imu_gravity_tau_ms); break;
+        case 9u:  (void)snprintf(out_label, label_size, "LIN TAU"); (void)snprintf(out_value, value_size, "%u ms", (unsigned)state->settings.dynamics.imu_linear_tau_ms); break;
+        case 10u: (void)snprintf(out_label, label_size, "ACC GATE"); (void)snprintf(out_value, value_size, "%u mg", (unsigned)state->settings.dynamics.imu_attitude_accel_gate_mg); break;
+        case 11u: (void)snprintf(out_label, label_size, "JERK GATE"); (void)snprintf(out_value, value_size, "%u", (unsigned)state->settings.dynamics.imu_jerk_gate_mg_per_s); break;
+        case 12u: (void)snprintf(out_label, label_size, "MIN TRUST"); (void)snprintf(out_value, value_size, "%u", (unsigned)state->settings.dynamics.imu_predict_min_trust_permille); break;
+        case 13u: (void)snprintf(out_label, label_size, "IMU STALE"); (void)snprintf(out_value, value_size, "%u ms", (unsigned)state->settings.dynamics.imu_stale_timeout_ms); break;
+        case 14u: (void)snprintf(out_label, label_size, "OUT DB"); (void)snprintf(out_value, value_size, "%u mg", (unsigned)state->settings.dynamics.output_deadband_mg); break;
+        case 15u: (void)snprintf(out_label, label_size, "OUT CLIP"); (void)snprintf(out_value, value_size, "%u mg", (unsigned)state->settings.dynamics.output_clip_mg); break;
+        case 16u: (void)snprintf(out_label, label_size, "LEAN TAU"); (void)snprintf(out_value, value_size, "%u ms", (unsigned)state->settings.dynamics.lean_display_tau_ms); break;
+        case 17u: (void)snprintf(out_label, label_size, "GRADE TAU"); (void)snprintf(out_value, value_size, "%u ms", (unsigned)state->settings.dynamics.grade_display_tau_ms); break;
+        case 18u: (void)snprintf(out_label, label_size, "ACC TAU"); (void)snprintf(out_value, value_size, "%u ms", (unsigned)state->settings.dynamics.accel_display_tau_ms); break;
+        case 19u: (void)snprintf(out_label, label_size, "GNSS MIN SPD"); (void)snprintf(out_value, value_size, "%u.%01u", (unsigned)(state->settings.dynamics.gnss_min_speed_kmh_x10 / 10u), (unsigned)(state->settings.dynamics.gnss_min_speed_kmh_x10 % 10u)); break;
+        case 20u: (void)snprintf(out_label, label_size, "SPD ACC MAX"); (void)snprintf(out_value, value_size, "%u.%01u", (unsigned)(state->settings.dynamics.gnss_max_speed_acc_kmh_x10 / 10u), (unsigned)(state->settings.dynamics.gnss_max_speed_acc_kmh_x10 % 10u)); break;
+        case 21u: (void)snprintf(out_label, label_size, "HEAD ACC MAX"); (void)snprintf(out_value, value_size, "%u.%01u deg", (unsigned)(state->settings.dynamics.gnss_max_head_acc_deg_x10 / 10u), (unsigned)(state->settings.dynamics.gnss_max_head_acc_deg_x10 % 10u)); break;
+        case 22u: (void)snprintf(out_label, label_size, "BIAS TAU"); (void)snprintf(out_value, value_size, "%u ms", (unsigned)state->settings.dynamics.gnss_bias_tau_ms); break;
+        case 23u: (void)snprintf(out_label, label_size, "OUTLIER GATE"); (void)snprintf(out_value, value_size, "%u mg", (unsigned)state->settings.dynamics.gnss_outlier_gate_mg); break;
+        case 24u: (void)snprintf(out_label, label_size, "OBD STALE"); (void)snprintf(out_value, value_size, "%u ms", (unsigned)state->settings.dynamics.obd_stale_timeout_ms); break;
+        case 25u: (void)snprintf(out_label, label_size, "ZERO CAPTURE"); (void)snprintf(out_value, value_size, "EXEC"); break;
+        case 26u: (void)snprintf(out_label, label_size, "HARD REZERO"); (void)snprintf(out_value, value_size, "EXEC"); break;
+        case 27u:
             (void)snprintf(out_label, label_size, "GYRO CAL");
             if (state->snapshot.bike.gyro_bias_cal_active != false)
             {

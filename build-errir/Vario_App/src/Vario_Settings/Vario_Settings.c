@@ -275,6 +275,11 @@ static void vario_settings_store_pressure_correction_to_app_state(int32_t correc
         shared_settings.altitude.pressure_correction_hpa_x100 = (int16_t)clamped_correction_hpa_x100;
         APP_STATE_StoreSettingsSnapshot(&shared_settings);
     }
+
+    /* ------------------------------------------------------------------ */
+    /* legacy Vario_Task 호환용 local mirror 동기화                        */
+    /* ------------------------------------------------------------------ */
+    s_vario_settings.pressure_correction_hpa_x100 = clamped_correction_hpa_x100;
 }
 
 static bool vario_settings_read_imu_assist_from_app_state(void)
@@ -298,6 +303,13 @@ static void vario_settings_store_imu_assist_to_app_state(bool enabled)
         shared_settings.altitude.imu_aid_enabled = enabled_u8;
         APP_STATE_StoreSettingsSnapshot(&shared_settings);
     }
+
+    /* ------------------------------------------------------------------ */
+    /* legacy Vario_Task 호환용 local mirror 동기화                        */
+    /* ------------------------------------------------------------------ */
+    s_vario_settings.imu_assist_mode = (enabled != false) ?
+                                           VARIO_IMU_ASSIST_AUTO :
+                                           VARIO_IMU_ASSIST_OFF;
 }
 
 static float vario_settings_get_pressure_correction_display_float(void)
@@ -953,6 +965,7 @@ void Vario_Settings_Init(void)
     /*  맞춰 둔다.                                                             */
     /* ---------------------------------------------------------------------- */
     s_vario_settings.qnh_hpa_x100                  = vario_settings_read_manual_qnh_from_app_state();
+    s_vario_settings.pressure_correction_hpa_x100  = vario_settings_read_pressure_correction_from_app_state();
     s_vario_settings.alt2_reference_cm             = 0;
     s_vario_settings.altitude_unit                 = VARIO_ALT_UNIT_METER;
     s_vario_settings.alt2_unit                     = VARIO_ALT_UNIT_FEET;
@@ -965,12 +978,15 @@ void Vario_Settings_Init(void)
     s_vario_settings.alt2_mode                     = VARIO_ALT2_MODE_RELATIVE;
     s_vario_settings.altitude_source               = VARIO_ALT_SOURCE_DISPLAY;
     s_vario_settings.heading_source                = VARIO_HEADING_SOURCE_AUTO;
+    s_vario_settings.imu_assist_mode               = (vario_settings_read_imu_assist_from_app_state() != false) ?
+                                                         VARIO_IMU_ASSIST_AUTO :
+                                                         VARIO_IMU_ASSIST_OFF;
     s_vario_settings.audio_enabled                 = 1u;
     s_vario_settings.audio_volume_percent          = 75u;
     s_vario_settings.beep_only_when_flying         = 1u;
     s_vario_settings.audio_profile                 = VARIO_AUDIO_PROFILE_SOFT_SPEAKER;
     s_vario_settings.prethermal_mode               = VARIO_PRETHERMAL_MODE_BUZZER;
-    s_vario_settings.audio_response_level          = 7u;
+    s_vario_settings.audio_response_level          = 8u;
     s_vario_settings.audio_up_base_hz              = 700u;
     s_vario_settings.audio_modulation_depth_percent = 100u;
     s_vario_settings.audio_pitch_curve_percent     = 100u;
@@ -981,16 +997,19 @@ void Vario_Settings_Init(void)
     /* ------------------------------------------------------------------ */
     /*  default response / tone thresholds                                  */
     /*                                                                      */
-    /*  - response 7/10 : 구형 둔한 기본값보다 더 즉응적                      */
-    /*  - climb +0.15 m/s : 들어 올리는 순간 바로 살아나는 쪽으로 시작       */
-    /*  - sink start -1.00 m/s : 완전 무풍 잡음까지 울리지 않게 절충         */
+    /*  - response 8/10 : fast-trigger backbone을 살리는 쪽으로 한 단계 업   */
+    /*  - damping  8/10 : fast tail은 짧고, backbone은 아직 제품답게 유지    */
+    /*  - climb +0.12 m/s : 20~30cm급 작은 들림에서 첫 삑을 더 빨리 유도      */
+    /*  - climb off +0.05 m/s : tone hysteresis는 남겨 chatter를 억제        */
+    /*  - prethermal +0.03 m/s : 미세한 살아남음을 조금 더 빨리 알려 줌      */
+    /*  - sink start -1.00 m/s : bench 잡음까지 sink tone이 울리지는 않게     */
     /*  - sink continuous -2.50 m/s : 그 위 대역은 Digifly식 짧은 sink chirp */
     /* ------------------------------------------------------------------ */
-    s_vario_settings.vario_damping_level           = 7u;
+    s_vario_settings.vario_damping_level           = 8u;
     s_vario_settings.digital_vario_average_seconds = 5u;
-    s_vario_settings.climb_tone_threshold_cms      = 15;
-    s_vario_settings.climb_tone_off_threshold_cms  = 7;
-    s_vario_settings.prethermal_threshold_cms      = 5;
+    s_vario_settings.climb_tone_threshold_cms      = 12;
+    s_vario_settings.climb_tone_off_threshold_cms  = 5;
+    s_vario_settings.prethermal_threshold_cms      = 3;
     s_vario_settings.prethermal_off_threshold_cms  = 0;
     s_vario_settings.sink_tone_threshold_cms       = -100;
     s_vario_settings.sink_tone_off_threshold_cms   = -80;
@@ -1030,10 +1049,14 @@ void Vario_Settings_Init(void)
 const vario_settings_t *Vario_Settings_Get(void)
 {
     /* ---------------------------------------------------------------------- */
-    /*  legacy 코드가 settings->qnh_hpa_x100 를 그대로 읽더라도               */
-    /*  stale mirror를 보지 않도록 getter 진입 시점에 동기화해 둔다.          */
+    /*  legacy 코드가 settings pointer의 mirror 멤버를 그대로 읽더라도        */
+    /*  stale 값이 남지 않도록 getter 진입 시점에 동기화한다.                 */
     /* ---------------------------------------------------------------------- */
     s_vario_settings.qnh_hpa_x100 = vario_settings_read_manual_qnh_from_app_state();
+    s_vario_settings.pressure_correction_hpa_x100 = vario_settings_read_pressure_correction_from_app_state();
+    s_vario_settings.imu_assist_mode = (vario_settings_read_imu_assist_from_app_state() != false) ?
+                                           VARIO_IMU_ASSIST_AUTO :
+                                           VARIO_IMU_ASSIST_OFF;
     return &s_vario_settings;
 }
 
@@ -1046,6 +1069,17 @@ int32_t Vario_Settings_GetManualQnhHpaX100(void)
 void Vario_Settings_SetManualQnhHpaX100(int32_t qnh_hpa_x100)
 {
     vario_settings_store_manual_qnh_to_app_state(qnh_hpa_x100);
+}
+
+int32_t Vario_Settings_GetPressureCorrectionHpaX100(void)
+{
+    s_vario_settings.pressure_correction_hpa_x100 = vario_settings_read_pressure_correction_from_app_state();
+    return s_vario_settings.pressure_correction_hpa_x100;
+}
+
+void Vario_Settings_SetPressureCorrectionHpaX100(int32_t correction_hpa_x100)
+{
+    vario_settings_store_pressure_correction_to_app_state(correction_hpa_x100);
 }
 
 void Vario_Settings_AdjustQuickSet(vario_quickset_item_t item, int8_t direction)
@@ -1066,8 +1100,8 @@ void Vario_Settings_AdjustQuickSet(vario_quickset_item_t item, int8_t direction)
             break;
 
         case VARIO_QUICKSET_ITEM_PRESSURE_CORRECTION:
-            vario_settings_store_pressure_correction_to_app_state(vario_settings_read_pressure_correction_from_app_state() +
-                                                                  ((int32_t)direction * pressure_correction_step_x100));
+            Vario_Settings_SetPressureCorrectionHpaX100(Vario_Settings_GetPressureCorrectionHpaX100() +
+                                                        ((int32_t)direction * pressure_correction_step_x100));
             break;
 
         case VARIO_QUICKSET_ITEM_ALT_UNIT:

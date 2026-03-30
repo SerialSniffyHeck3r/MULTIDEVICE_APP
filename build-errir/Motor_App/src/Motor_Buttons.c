@@ -499,104 +499,107 @@ static void motor_buttons_adjust_setting_row(int8_t delta)
             settings->dynamics.obd_aid_enabled = motor_buttons_toggle_u8(settings->dynamics.obd_aid_enabled);
             break;
         case 4u:
-            settings->dynamics.mount_forward_axis = motor_buttons_wrap_u8(settings->dynamics.mount_forward_axis, 6u, delta);
+            settings->dynamics.bank_calc_mode = motor_buttons_wrap_u8(settings->dynamics.bank_calc_mode, 4u, delta);
             break;
         case 5u:
-            settings->dynamics.mount_left_axis = motor_buttons_wrap_u8(settings->dynamics.mount_left_axis, 6u, delta);
+            settings->dynamics.mount_forward_axis = motor_buttons_wrap_u8(settings->dynamics.mount_forward_axis, 6u, delta);
             break;
         case 6u:
+            settings->dynamics.mount_left_axis = motor_buttons_wrap_u8(settings->dynamics.mount_left_axis, 6u, delta);
+            break;
+        case 7u:
             settings->dynamics.mount_yaw_trim_deg_x10 = motor_buttons_clamp_s16((int32_t)settings->dynamics.mount_yaw_trim_deg_x10 + delta,
                                                                                 -300,
                                                                                 300);
             break;
-        case 7u:
+        case 8u:
             settings->dynamics.imu_gravity_tau_ms = motor_buttons_clamp_u16((int32_t)settings->dynamics.imu_gravity_tau_ms + (delta * 10),
                                                                             50u,
                                                                             3000u);
             break;
-        case 8u:
+        case 9u:
             settings->dynamics.imu_linear_tau_ms = motor_buttons_clamp_u16((int32_t)settings->dynamics.imu_linear_tau_ms + (delta * 10),
                                                                            20u,
                                                                            3000u);
             break;
-        case 9u:
+        case 10u:
             settings->dynamics.imu_attitude_accel_gate_mg = motor_buttons_clamp_u16((int32_t)settings->dynamics.imu_attitude_accel_gate_mg + (delta * 5),
                                                                                      40u,
                                                                                      400u);
             break;
-        case 10u:
+        case 11u:
             settings->dynamics.imu_jerk_gate_mg_per_s = motor_buttons_clamp_u32((int64_t)settings->dynamics.imu_jerk_gate_mg_per_s + ((int64_t)delta * 100),
                                                                                 500u,
                                                                                 10000u);
             break;
-        case 11u:
+        case 12u:
             settings->dynamics.imu_predict_min_trust_permille = motor_buttons_clamp_u16((int32_t)settings->dynamics.imu_predict_min_trust_permille + (delta * 25),
                                                                                         0u,
                                                                                         1000u);
             break;
-        case 12u:
+        case 13u:
             settings->dynamics.imu_stale_timeout_ms = motor_buttons_clamp_u16((int32_t)settings->dynamics.imu_stale_timeout_ms + (delta * 10),
                                                                               50u,
                                                                               2000u);
             break;
-        case 13u:
+        case 14u:
             settings->dynamics.output_deadband_mg = motor_buttons_clamp_u16((int32_t)settings->dynamics.output_deadband_mg + (delta * 5),
                                                                             0u,
                                                                             300u);
             break;
-        case 14u:
+        case 15u:
             settings->dynamics.output_clip_mg = motor_buttons_clamp_u16((int32_t)settings->dynamics.output_clip_mg + (delta * 10),
                                                                         300u,
                                                                         3000u);
             break;
-        case 15u:
+        case 16u:
             settings->dynamics.lean_display_tau_ms = motor_buttons_clamp_u16((int32_t)settings->dynamics.lean_display_tau_ms + (delta * 10),
                                                                              20u,
                                                                              2000u);
             break;
-        case 16u:
+        case 17u:
             settings->dynamics.grade_display_tau_ms = motor_buttons_clamp_u16((int32_t)settings->dynamics.grade_display_tau_ms + (delta * 10),
                                                                               20u,
                                                                               2000u);
             break;
-        case 17u:
+        case 18u:
             settings->dynamics.accel_display_tau_ms = motor_buttons_clamp_u16((int32_t)settings->dynamics.accel_display_tau_ms + (delta * 10),
                                                                               20u,
                                                                               2000u);
             break;
-        case 18u:
+        case 19u:
             settings->dynamics.gnss_min_speed_kmh_x10 = motor_buttons_clamp_u16((int32_t)settings->dynamics.gnss_min_speed_kmh_x10 + (delta * 5),
                                                                                 0u,
                                                                                 500u);
             break;
-        case 19u:
+        case 20u:
             settings->dynamics.gnss_max_speed_acc_kmh_x10 = motor_buttons_clamp_u16((int32_t)settings->dynamics.gnss_max_speed_acc_kmh_x10 + (delta * 5),
                                                                                     10u,
                                                                                     300u);
             break;
-        case 20u:
+        case 21u:
             settings->dynamics.gnss_max_head_acc_deg_x10 = motor_buttons_clamp_u16((int32_t)settings->dynamics.gnss_max_head_acc_deg_x10 + (delta * 5),
                                                                                    10u,
                                                                                    450u);
             break;
-        case 21u:
+        case 22u:
             settings->dynamics.gnss_bias_tau_ms = motor_buttons_clamp_u16((int32_t)settings->dynamics.gnss_bias_tau_ms + (delta * 50),
                                                                           100u,
                                                                           5000u);
             break;
-        case 22u:
+        case 23u:
             settings->dynamics.gnss_outlier_gate_mg = motor_buttons_clamp_u16((int32_t)settings->dynamics.gnss_outlier_gate_mg + (delta * 10),
                                                                               50u,
                                                                               1000u);
             break;
-        case 23u:
+        case 24u:
             settings->dynamics.obd_stale_timeout_ms = motor_buttons_clamp_u16((int32_t)settings->dynamics.obd_stale_timeout_ms + (delta * 10),
                                                                               50u,
                                                                               2000u);
             break;
-        case 24u:
         case 25u:
         case 26u:
+        case 27u:
             changed = 0u;
             break;
         default:
@@ -710,15 +713,15 @@ static void motor_buttons_execute_setting_action(void)
     case MOTOR_SCREEN_SETTINGS_DYNAMICS:
         switch (state->ui.selected_index)
         {
-        case 24u:
+        case 25u:
             Motor_Dynamics_RequestZeroCapture();
             Motor_State_ShowToast("ZERO REQ", 1200u);
             break;
-        case 25u:
+        case 26u:
             Motor_Dynamics_RequestHardRezero();
             Motor_State_ShowToast("HARD REZERO", 1200u);
             break;
-        case 26u:
+        case 27u:
             Motor_Dynamics_RequestGyroBiasCalibration();
             Motor_State_ShowToast("GYRO CAL", 1200u);
             break;
