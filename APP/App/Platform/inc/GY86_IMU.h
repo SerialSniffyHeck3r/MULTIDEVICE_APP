@@ -75,6 +75,207 @@ extern "C" {
 #define GY86_IMU_I2C2_SDA_PIN GPIO_PIN_11
 #endif
 
+
+
+/* magnetometer polling enable */
+#ifndef GY86_IMU_ENABLE_MAGNETOMETER
+#define GY86_IMU_ENABLE_MAGNETOMETER 1u
+#endif
+
+/* -------------------------------------------------------------------------- */
+/*  alternate sensor-front-end compile-time switch                             */
+/*                                                                            */
+/*  CHIP_IS_NOT_GY86 = 0                                                      */
+/*  - 현재 리포의 기존 경로를 그대로 사용한다.                                 */
+/*  - 즉 accel/gyro=MPU6050, magnetometer=HMC5883L, baro=MS5611 이다.         */
+/*                                                                            */
+/*  CHIP_IS_NOT_GY86 = 1                                                      */
+/*  - accel/gyro backend 를 LSM6DSOX 로 교체한다.                              */
+/*  - magnetometer 는 기존 HMC5883L 경로를 그대로 유지한다.                   */
+/*  - baro backend 를 BMP581 로 교체한다.                                      */
+/*  - APP_STATE.gy86.* 의 공개 구조는 기존과 동일하게 유지하고,                */
+/*    GY86_IMU.c 내부에서 신규 센서 값을 기존 slice 형식으로 재포장한다.       */
+/* -------------------------------------------------------------------------- */
+#ifndef CHIP_IS_NOT_GY86
+#define CHIP_IS_NOT_GY86 0u
+#endif
+
+/* -------------------------------------------------------------------------- */
+/*  alternate layout selector (CHIP_IS_NOT_GY86 = 1 일 때만 사용)             */
+/*                                                                            */
+/*  GY86_ALT_LAYOUT_ALL_ON_I2C1                                               */
+/*  - LSM6DSOX + HMC5883L + BMP581 를 모두 I2C1 에 단다.                      */
+/*                                                                            */
+/*  GY86_ALT_LAYOUT_SPLIT_BARO_TO_I2C2                                        */
+/*  - LSM6DSOX + HMC5883L 은 I2C1                                              */
+/*  - BMP581 은 I2C2                                                           */
+/*                                                                            */
+/*  bus 자체를 더 세밀하게 바꾸고 싶으면 아래 BUS_ID define 을 각각 override   */
+/*  하면 된다.                                                                 */
+/* -------------------------------------------------------------------------- */
+#define GY86_ALT_LAYOUT_ALL_ON_I2C1        0u
+#define GY86_ALT_LAYOUT_SPLIT_BARO_TO_I2C2 1u
+
+#ifndef GY86_ALT_LAYOUT
+#define GY86_ALT_LAYOUT GY86_ALT_LAYOUT_ALL_ON_I2C1
+#endif
+
+/* -------------------------------------------------------------------------- */
+/*  alternate sensor bus assignment                                            */
+/* -------------------------------------------------------------------------- */
+#ifndef GY86_ALT_LSM6DSOX_BUS_ID
+#define GY86_ALT_LSM6DSOX_BUS_ID 1u
+#endif
+
+#ifndef GY86_ALT_HMC5883L_BUS_ID
+#define GY86_ALT_HMC5883L_BUS_ID 1u
+#endif
+
+#ifndef GY86_ALT_BMP581_BUS_ID
+#if (GY86_ALT_LAYOUT == GY86_ALT_LAYOUT_SPLIT_BARO_TO_I2C2)
+#define GY86_ALT_BMP581_BUS_ID 2u
+#else
+#define GY86_ALT_BMP581_BUS_ID 1u
+#endif
+#endif
+
+/* -------------------------------------------------------------------------- */
+/*  alternate sensor I2C addresses                                             */
+/*                                                                            */
+/*  HAL I2C는 7-bit address 를 left-shift 한 8-bit 형식을 기대한다.            */
+/* -------------------------------------------------------------------------- */
+#ifndef GY86_ALT_LSM6DSOX_ADDR
+#define GY86_ALT_LSM6DSOX_ADDR (0x6Au << 1)
+#endif
+
+#ifndef GY86_ALT_HMC5883L_ADDR
+#define GY86_ALT_HMC5883L_ADDR (0x1Eu << 1)
+#endif
+
+/* HMC5883L register defaults */
+#ifndef GY86_ALT_HMC5883L_CONFIG_A
+#define GY86_ALT_HMC5883L_CONFIG_A 0x78u /* 8-sample avg, 75Hz, normal */
+#endif
+
+#ifndef GY86_ALT_HMC5883L_CONFIG_B
+#define GY86_ALT_HMC5883L_CONFIG_B 0x20u /* gain=1.3Ga */
+#endif
+
+#ifndef GY86_ALT_HMC5883L_MODE
+#define GY86_ALT_HMC5883L_MODE 0x00u     /* continuous */
+#endif
+
+#ifndef GY86_ALT_BMP581_ADDR
+#define GY86_ALT_BMP581_ADDR (0x47u << 1)
+#endif
+
+/* -------------------------------------------------------------------------- */
+/*  alternate LSM6DSOX register-field defaults                                 */
+/*                                                                            */
+/*  accel_fs = 2 -> ±4g                                                        */
+/*  gyro_fs  = 2 -> ±500dps                                                    */
+/*                                                                            */
+/*  이 조합은 기존 MPU6050 설정(±4g / ±500dps)과 가장 잘 맞는다.               */
+/*  따라서 GY86_IMU.c 에서 raw 값을 기존 MPU6050 raw 스케일로 재매핑하기가      */
+/*  쉽고, 상위 코드의 compatibility 가 좋다.                                   */
+/* -------------------------------------------------------------------------- */
+#ifndef GY86_ALT_LSM6DSOX_ACCEL_ODR
+#define GY86_ALT_LSM6DSOX_ACCEL_ODR 4u   /* 104Hz */
+#endif
+
+#ifndef GY86_ALT_LSM6DSOX_GYRO_ODR
+#define GY86_ALT_LSM6DSOX_GYRO_ODR 4u    /* 104Hz */
+#endif
+
+#ifndef GY86_ALT_LSM6DSOX_ACCEL_FS
+#define GY86_ALT_LSM6DSOX_ACCEL_FS 2u    /* ±4g */
+#endif
+
+#ifndef GY86_ALT_LSM6DSOX_GYRO_FS
+#define GY86_ALT_LSM6DSOX_GYRO_FS 2u     /* ±500dps */
+#endif
+
+#ifndef GY86_ALT_LSM6DSOX_ENABLE_LPF2
+#define GY86_ALT_LSM6DSOX_ENABLE_LPF2 1u
+#endif
+
+#ifndef GY86_ALT_LSM6DSOX_ENABLE_BDU
+#define GY86_ALT_LSM6DSOX_ENABLE_BDU 1u
+#endif
+
+#ifndef GY86_ALT_LSM6DSOX_ENABLE_AUTO_INC
+#define GY86_ALT_LSM6DSOX_ENABLE_AUTO_INC 1u
+#endif
+
+#ifndef GY86_ALT_LSM6DSOX_DISABLE_I3C
+#define GY86_ALT_LSM6DSOX_DISABLE_I3C 1u
+#endif
+
+/* -------------------------------------------------------------------------- */
+/*  alternate BMP581 defaults                                                  */
+/*                                                                            */
+/*  권장 시작점                                                                */
+/*  - temp OSR  = 1x                                                           */
+/*  - press OSR = 8x                                                           */
+/*  - ODR       = 약 100Hz                                                     */
+/*  - IIR       = bypass                                                       */
+/*                                                                            */
+/*  이 조합은 "벤치에서 즉응성 있게 바리오를 보되, host 측 필터는 기존         */
+/*  프로젝트가 담당한다" 는 목적에 맞춘 기본값이다.                           */
+/* -------------------------------------------------------------------------- */
+#ifndef GY86_ALT_BMP581_TEMP_OSR
+#define GY86_ALT_BMP581_TEMP_OSR 0u       /* 1x */
+#endif
+
+#ifndef GY86_ALT_BMP581_PRESS_OSR
+#define GY86_ALT_BMP581_PRESS_OSR 3u      /* 8x */
+#endif
+
+#ifndef GY86_ALT_BMP581_ODR
+#define GY86_ALT_BMP581_ODR 0x0Au         /* about 100.2Hz */
+#endif
+
+#ifndef GY86_ALT_BMP581_IIR_TEMP
+#define GY86_ALT_BMP581_IIR_TEMP 0u       /* bypass */
+#endif
+
+#ifndef GY86_ALT_BMP581_IIR_PRESS
+#define GY86_ALT_BMP581_IIR_PRESS 0u      /* bypass */
+#endif
+
+#ifndef GY86_ALT_BMP581_POLL_MS
+#define GY86_ALT_BMP581_POLL_MS 10u
+#endif
+
+#ifndef GY86_ALT_BMP581_ACCEPT_CHIP_ID_0x51
+#define GY86_ALT_BMP581_ACCEPT_CHIP_ID_0x51 0u
+#endif
+
+/* publish plausibility window */
+#ifndef GY86_ALT_BMP581_PUBLISH_MIN_PRESSURE_PA
+#define GY86_ALT_BMP581_PUBLISH_MIN_PRESSURE_PA 30000
+#endif
+
+#ifndef GY86_ALT_BMP581_PUBLISH_MAX_PRESSURE_PA
+#define GY86_ALT_BMP581_PUBLISH_MAX_PRESSURE_PA 125000
+#endif
+
+#ifndef GY86_ALT_BMP581_PUBLISH_MIN_TEMP_CDEG
+#define GY86_ALT_BMP581_PUBLISH_MIN_TEMP_CDEG (-4000)
+#endif
+
+#ifndef GY86_ALT_BMP581_PUBLISH_MAX_TEMP_CDEG
+#define GY86_ALT_BMP581_PUBLISH_MAX_TEMP_CDEG 8500
+#endif
+
+#ifndef GY86_ALT_BMP581_PUBLISH_STEP_FLOOR_PA
+#define GY86_ALT_BMP581_PUBLISH_STEP_FLOOR_PA 60
+#endif
+
+#ifndef GY86_ALT_BMP581_PUBLISH_STEP_RATE_PA_PER_S
+#define GY86_ALT_BMP581_PUBLISH_STEP_RATE_PA_PER_S 500u
+#endif
+
 /* -------------------------------------------------------------------------- */
 /*  dual MS5611 compile-time switch                                            */
 /*                                                                            */

@@ -1,3 +1,1289 @@
+#if CHIP_IS_NOT_GY86
+
+#include "GY86_IMU.h"
+#include "BMP581.h"
+#include "LSM6DSOX.h"
+
+#include <string.h>
+
+/* -------------------------------------------------------------------------- */
+/*  alternate front-end path                                                   */
+/*                                                                            */
+/*  CHIP_IS_NOT_GY86 = 1                                                      */
+/*  - accel/gyro : LSM6DSOX                                                   */
+/*  - mag        : 기존 HMC5883L                                              */
+/*  - baro       : BMP581                                                     */
+/*                                                                            */
+/*  핵심 목표                                                                  */
+/*  1) 상위 APP_STATE 공개 레이아웃은 기존과 동일하게 유지                    */
+/*  2) 다른 모듈(APP_ALTITUDE / UI / logger)은 수정 없이 그대로 사용          */
+/*  3) bus / address / register-field / poll period 는 전부 header define 으로 */
+/*     override 가능하게 유지                                                 */
+/*                                                                            */
+/*  compatibility 메모                                                         */
+/*  - imu->mpu.* raw 는 "기존 MPU6050 설정(±4g / ±500dps)과 유사한 raw" 로    */
+/*    재매핑해서 publish 한다.                                                */
+/*  - imu->baro.pressure_pa / pressure_hpa_x100 / temp_cdeg 는 원래 의미를   */
+/*    그대로 유지한다.                                                        */
+/*  - imu->baro.d1_raw / d2_raw / prom_c[] 는 MS5611 전용 필드이므로,         */
+/*    신규 BMP581 경로에서는 디버그 shadow 로 재사용한다.                    */
+/*    즉 상위 기능 로직은 그대로 유지되고, legacy debug 화면도 값 자체는 볼 수 */
+/*    있으나 의미는 아래와 같이 바뀐다.                                      */
+/*      d1_raw   = BMP581 raw pressure U24                                    */
+/*      d2_raw   = BMP581 raw temperature S24(하위 24bit)                      */
+/*      prom_c1  = chip_id                                                    */
+/*      prom_c2  = rev_id                                                     */
+/*      prom_c3  = osr_config shadow                                          */
+/*      prom_c4  = odr_config shadow                                          */
+/*      prom_c5  = dsp_iir shadow                                             */
+/*      prom_c6  = {status,int_status} packed                                 */
+/* -------------------------------------------------------------------------- */
+
+extern I2C_HandleTypeDef GY86_IMU_I2C_HANDLE;
+#if ((GY86_ALT_LSM6DSOX_BUS_ID == 2u) || \
+     (GY86_ALT_HMC5883L_BUS_ID == 2u) || \
+     (GY86_ALT_BMP581_BUS_ID == 2u))
+extern I2C_HandleTypeDef GY86_IMU_I2C2_HANDLE;
+#endif
+
+/* -------------------------------------------------------------------------- */
+/*  HMC5883L register map                                                      */
+/* -------------------------------------------------------------------------- */
+#define HMC5883L_RA_CONFIG_A         0x00u
+#define HMC5883L_RA_CONFIG_B         0x01u
+#define HMC5883L_RA_MODE             0x02u
+#define HMC5883L_RA_DATA_X_H         0x03u
+#define HMC5883L_RA_ID_A             0x0Au
+
+/* -------------------------------------------------------------------------- */
+/*  내부 backend ID 호환 정책                                                  */
+/*                                                                            */
+/*  APP_STATE enum 자체는 건드리지 않기 위해 debug backend id 는               */
+/*  기존 값(APP_IMU_BACKEND_MPU6050 / MS5611)을 그대로 유지한다.               */
+/*  실제 칩 식별은 debug.mpu_whoami 와 baro shadow(prom/debug)로 확인한다.    */
+/* -------------------------------------------------------------------------- */
+#define GY86_ALT_DEBUG_ACCELGYRO_BACKEND_ID APP_IMU_BACKEND_MPU6050
+#define GY86_ALT_DEBUG_BARO_BACKEND_ID      APP_IMU_BACKEND_MS5611
+
+/* -------------------------------------------------------------------------- */
+/*  backend 공통 함수 포인터 타입                                              */
+/* -------------------------------------------------------------------------- */
+typedef HAL_StatusTypeDef (*gy86_backend_init_fn_t)(app_gy86_state_t *imu);
+typedef HAL_StatusTypeDef (*gy86_backend_poll_fn_t)(uint32_t now_ms,
+                                                    app_gy86_state_t *imu,
+                                                    uint8_t *updated);
+
+typedef struct
+{
+    uint8_t                backend_id;
+    gy86_backend_init_fn_t init;
+    gy86_backend_poll_fn_t poll;
+} gy86_backend_ops_t;
+
+/* -------------------------------------------------------------------------- */
+/*  단순화된 bus descriptor                                                    */
+/* -------------------------------------------------------------------------- */
+typedef struct
+{
+    I2C_HandleTypeDef *handle;
+    uint8_t            bus_id;
+} gy86_i2c_bus_desc_t;
+
+static const gy86_i2c_bus_desc_t s_gy86_i2c_bus1 =
+{
+    &GY86_IMU_I2C_HANDLE,
+    1u
+};
+
+#if ((GY86_ALT_LSM6DSOX_BUS_ID == 2u) || \
+     (GY86_ALT_HMC5883L_BUS_ID == 2u) || \
+     (GY86_ALT_BMP581_BUS_ID == 2u))
+static const gy86_i2c_bus_desc_t s_gy86_i2c_bus2 =
+{
+    &GY86_IMU_I2C2_HANDLE,
+    2u
+};
+#endif
+
+typedef struct
+{
+    uint8_t bus_id;
+} gy86_sensor_i2c_ctx_t;
+
+static const gy86_sensor_i2c_ctx_t s_lsm_i2c_ctx = { GY86_ALT_LSM6DSOX_BUS_ID };
+static const gy86_sensor_i2c_ctx_t s_bmp_i2c_ctx = { GY86_ALT_BMP581_BUS_ID };
+
+/* -------------------------------------------------------------------------- */
+/*  runtime state                                                              */
+/* -------------------------------------------------------------------------- */
+typedef struct
+{
+    uint8_t  mpu_online;
+    uint8_t  mag_online;
+    uint8_t  baro_online;
+
+    uint8_t  mpu_error_streak;
+    uint8_t  mag_error_streak;
+    uint8_t  baro_error_streak;
+
+    uint32_t next_probe_ms;
+    uint32_t next_mpu_ms;
+    uint32_t next_mag_ms;
+    uint32_t next_baro_ms;
+
+    uint16_t mpu_period_ms;
+
+    lsm6dsox_device_t lsm_dev;
+    bmp581_device_t   bmp_dev;
+} gy86_runtime_t;
+
+static gy86_runtime_t s_gy86_rt;
+
+/* -------------------------------------------------------------------------- */
+/*  forward declarations                                                       */
+/* -------------------------------------------------------------------------- */
+static HAL_StatusTypeDef GY86_Lsm6dsox_Init(app_gy86_state_t *imu);
+static HAL_StatusTypeDef GY86_Lsm6dsox_Poll(uint32_t now_ms,
+                                            app_gy86_state_t *imu,
+                                            uint8_t *updated);
+
+static HAL_StatusTypeDef GY86_Hmc5883l_Init(app_gy86_state_t *imu);
+static HAL_StatusTypeDef GY86_Hmc5883l_Poll(uint32_t now_ms,
+                                            app_gy86_state_t *imu,
+                                            uint8_t *updated);
+
+static HAL_StatusTypeDef GY86_Bmp581_Init(app_gy86_state_t *imu);
+static HAL_StatusTypeDef GY86_Bmp581_Poll(uint32_t now_ms,
+                                          app_gy86_state_t *imu,
+                                          uint8_t *updated);
+
+/* -------------------------------------------------------------------------- */
+/*  backend tables                                                             */
+/* -------------------------------------------------------------------------- */
+static const gy86_backend_ops_t s_accelgyro_backend =
+{
+    GY86_ALT_DEBUG_ACCELGYRO_BACKEND_ID,
+    GY86_Lsm6dsox_Init,
+    GY86_Lsm6dsox_Poll
+};
+
+static const gy86_backend_ops_t s_mag_backend =
+{
+    APP_IMU_BACKEND_HMC5883L,
+    GY86_Hmc5883l_Init,
+    GY86_Hmc5883l_Poll
+};
+
+static const gy86_backend_ops_t s_baro_backend =
+{
+    GY86_ALT_DEBUG_BARO_BACKEND_ID,
+    GY86_Bmp581_Init,
+    GY86_Bmp581_Poll
+};
+
+/* -------------------------------------------------------------------------- */
+/*  misc helpers                                                               */
+/* -------------------------------------------------------------------------- */
+static int32_t GY86_Abs32(int32_t value)
+{
+    return (value < 0) ? -value : value;
+}
+
+static int16_t GY86_ClampToS16(int32_t value)
+{
+    if (value > 32767)
+    {
+        return 32767;
+    }
+    if (value < -32768)
+    {
+        return -32768;
+    }
+    return (int16_t)value;
+}
+
+static uint8_t GY86_TimeDue(uint32_t now_ms, uint32_t due_ms)
+{
+    return (((int32_t)(now_ms - due_ms)) >= 0) ? 1u : 0u;
+}
+
+static uint32_t GY86_NextPeriodicDue(uint32_t previous_due_ms,
+                                     uint32_t period_ms,
+                                     uint32_t now_ms)
+{
+    uint32_t next_due;
+
+    if (period_ms == 0u)
+    {
+        return now_ms;
+    }
+
+    next_due = previous_due_ms + period_ms;
+    if (GY86_TimeDue(now_ms, next_due) != 0u)
+    {
+        next_due = now_ms + period_ms;
+    }
+
+    return next_due;
+}
+
+static const gy86_i2c_bus_desc_t *GY86_GetI2cBusById(uint8_t bus_id)
+{
+    if (bus_id == 1u)
+    {
+        return &s_gy86_i2c_bus1;
+    }
+#if ((GY86_ALT_LSM6DSOX_BUS_ID == 2u) || \
+     (GY86_ALT_HMC5883L_BUS_ID == 2u) || \
+     (GY86_ALT_BMP581_BUS_ID == 2u))
+    if (bus_id == 2u)
+    {
+        return &s_gy86_i2c_bus2;
+    }
+#endif
+    return 0;
+}
+
+static void GY86_I2C_ReInitOne(const gy86_i2c_bus_desc_t *bus)
+{
+    if ((bus == 0) || (bus->handle == 0))
+    {
+        return;
+    }
+
+    (void)HAL_I2C_DeInit(bus->handle);
+    (void)HAL_I2C_Init(bus->handle);
+}
+
+static void GY86_I2C_ApplySafeClockIfNeededOne(const gy86_i2c_bus_desc_t *bus)
+{
+#if (GY86_IMU_FORCE_SAFE_STANDARD_MODE_ON_100K != 0u)
+    if ((bus == 0) || (bus->handle == 0))
+    {
+        return;
+    }
+
+    if ((bus->handle->Init.ClockSpeed >= 88000u) &&
+        (bus->handle->Init.ClockSpeed <= 100000u))
+    {
+        (void)HAL_I2C_DeInit(bus->handle);
+        bus->handle->Init.ClockSpeed = GY86_IMU_SAFE_STANDARD_MODE_HZ;
+        (void)HAL_I2C_Init(bus->handle);
+    }
+#else
+    (void)bus;
+#endif
+}
+
+static void GY86_I2C_ApplySafeClockIfNeeded(void)
+{
+    GY86_I2C_ApplySafeClockIfNeededOne(&s_gy86_i2c_bus1);
+#if ((GY86_ALT_LSM6DSOX_BUS_ID == 2u) || \
+     (GY86_ALT_HMC5883L_BUS_ID == 2u) || \
+     (GY86_ALT_BMP581_BUS_ID == 2u))
+    GY86_I2C_ApplySafeClockIfNeededOne(&s_gy86_i2c_bus2);
+#endif
+}
+
+static HAL_StatusTypeDef GY86_I2C_IsReady_Bus(uint8_t bus_id, uint8_t dev_addr)
+{
+    const gy86_i2c_bus_desc_t *bus;
+    HAL_StatusTypeDef st;
+
+    bus = GY86_GetI2cBusById(bus_id);
+    if ((bus == 0) || (bus->handle == 0))
+    {
+        return HAL_ERROR;
+    }
+
+    st = HAL_I2C_IsDeviceReady(bus->handle, dev_addr, 2u, GY86_IMU_I2C_TIMEOUT_MS);
+    if (st != HAL_OK)
+    {
+        GY86_I2C_ReInitOne(bus);
+        GY86_I2C_ApplySafeClockIfNeededOne(bus);
+        st = HAL_I2C_IsDeviceReady(bus->handle, dev_addr, 2u, GY86_IMU_I2C_TIMEOUT_MS);
+    }
+
+    return st;
+}
+
+static HAL_StatusTypeDef GY86_I2C_Read_Bus(uint8_t bus_id,
+                                           uint8_t dev_addr,
+                                           uint8_t reg_addr,
+                                           uint8_t *data,
+                                           uint16_t len)
+{
+    const gy86_i2c_bus_desc_t *bus;
+    HAL_StatusTypeDef st;
+
+    bus = GY86_GetI2cBusById(bus_id);
+    if ((bus == 0) || (bus->handle == 0) || (data == 0) || (len == 0u))
+    {
+        return HAL_ERROR;
+    }
+
+    st = HAL_I2C_Mem_Read(bus->handle,
+                          dev_addr,
+                          reg_addr,
+                          I2C_MEMADD_SIZE_8BIT,
+                          data,
+                          len,
+                          GY86_IMU_I2C_TIMEOUT_MS);
+    if (st != HAL_OK)
+    {
+        GY86_I2C_ReInitOne(bus);
+        GY86_I2C_ApplySafeClockIfNeededOne(bus);
+        st = HAL_I2C_Mem_Read(bus->handle,
+                              dev_addr,
+                              reg_addr,
+                              I2C_MEMADD_SIZE_8BIT,
+                              data,
+                              len,
+                              GY86_IMU_I2C_TIMEOUT_MS);
+    }
+
+    return st;
+}
+
+static HAL_StatusTypeDef GY86_I2C_Write_Bus(uint8_t bus_id,
+                                            uint8_t dev_addr,
+                                            uint8_t reg_addr,
+                                            const uint8_t *data,
+                                            uint16_t len)
+{
+    const gy86_i2c_bus_desc_t *bus;
+    HAL_StatusTypeDef st;
+
+    bus = GY86_GetI2cBusById(bus_id);
+    if ((bus == 0) || (bus->handle == 0) || (data == 0) || (len == 0u))
+    {
+        return HAL_ERROR;
+    }
+
+    st = HAL_I2C_Mem_Write(bus->handle,
+                           dev_addr,
+                           reg_addr,
+                           I2C_MEMADD_SIZE_8BIT,
+                           (uint8_t *)data,
+                           len,
+                           GY86_IMU_I2C_TIMEOUT_MS);
+    if (st != HAL_OK)
+    {
+        GY86_I2C_ReInitOne(bus);
+        GY86_I2C_ApplySafeClockIfNeededOne(bus);
+        st = HAL_I2C_Mem_Write(bus->handle,
+                               dev_addr,
+                               reg_addr,
+                               I2C_MEMADD_SIZE_8BIT,
+                               (uint8_t *)data,
+                               len,
+                               GY86_IMU_I2C_TIMEOUT_MS);
+    }
+
+    return st;
+}
+
+static HAL_StatusTypeDef GY86_I2C_WriteU8_Bus(uint8_t bus_id,
+                                              uint8_t dev_addr,
+                                              uint8_t reg_addr,
+                                              uint8_t value)
+{
+    return GY86_I2C_Write_Bus(bus_id, dev_addr, reg_addr, &value, 1u);
+}
+
+/* -------------------------------------------------------------------------- */
+/*  callback shims for thin wrappers                                            */
+/* -------------------------------------------------------------------------- */
+static int32_t GY86_CommonReadCb(void *ctx,
+                                 uint8_t dev_addr,
+                                 uint8_t reg_addr,
+                                 uint8_t *data,
+                                 uint16_t len)
+{
+    const gy86_sensor_i2c_ctx_t *bus_ctx = (const gy86_sensor_i2c_ctx_t *)ctx;
+    if ((bus_ctx == 0) || (GY86_I2C_Read_Bus(bus_ctx->bus_id,
+                                             dev_addr,
+                                             reg_addr,
+                                             data,
+                                             len) != HAL_OK))
+    {
+        return -1;
+    }
+    return 0;
+}
+
+static int32_t GY86_CommonWriteCb(void *ctx,
+                                  uint8_t dev_addr,
+                                  uint8_t reg_addr,
+                                  const uint8_t *data,
+                                  uint16_t len)
+{
+    const gy86_sensor_i2c_ctx_t *bus_ctx = (const gy86_sensor_i2c_ctx_t *)ctx;
+    if ((bus_ctx == 0) || (GY86_I2C_Write_Bus(bus_ctx->bus_id,
+                                              dev_addr,
+                                              reg_addr,
+                                              data,
+                                              len) != HAL_OK))
+    {
+        return -1;
+    }
+    return 0;
+}
+
+static void GY86_CommonDelayMsCb(void *ctx, uint32_t delay_ms)
+{
+    (void)ctx;
+    HAL_Delay(delay_ms);
+}
+
+/* -------------------------------------------------------------------------- */
+/*  scaling helpers: LSM6DSOX -> MPU6050-compatible raw                        */
+/* -------------------------------------------------------------------------- */
+static int32_t GY86_LsmAccelUgPerLsb(uint8_t accel_fs)
+{
+    switch (accel_fs & 0x03u)
+    {
+    case LSM6DSOX_ACCEL_FS_2G:  return 61;
+    case LSM6DSOX_ACCEL_FS_4G:  return 122;
+    case LSM6DSOX_ACCEL_FS_8G:  return 244;
+    case LSM6DSOX_ACCEL_FS_16G: return 488;
+    default:                    return 122;
+    }
+}
+
+static int32_t GY86_LsmGyroUdpsPerLsb(uint8_t gyro_fs)
+{
+    switch (gyro_fs & 0x07u)
+    {
+    case LSM6DSOX_GYRO_FS_125DPS:  return 4375;
+    case LSM6DSOX_GYRO_FS_250DPS:  return 8750;
+    case LSM6DSOX_GYRO_FS_500DPS:  return 17500;
+    case LSM6DSOX_GYRO_FS_1000DPS: return 35000;
+    case LSM6DSOX_GYRO_FS_2000DPS: return 70000;
+    default:                      return 17500;
+    }
+}
+
+static int16_t GY86_LsmAccelRawToMpuRaw(int16_t raw_lsm)
+{
+    int64_t scaled;
+    int32_t ug_per_lsb = GY86_LsmAccelUgPerLsb(GY86_ALT_LSM6DSOX_ACCEL_FS);
+
+    /* MPU6050 legacy path는 ±4g = 8192 LSB/g 기준 raw 를 publish 한다. */
+    scaled = (int64_t)raw_lsm * (int64_t)ug_per_lsb * 8192LL;
+    if (scaled >= 0)
+    {
+        scaled += 500000LL;
+    }
+    else
+    {
+        scaled -= 500000LL;
+    }
+
+    return GY86_ClampToS16((int32_t)(scaled / 1000000LL));
+}
+
+static int16_t GY86_LsmGyroRawToMpuRaw(int16_t raw_lsm)
+{
+    int64_t scaled;
+    int32_t udps_per_lsb = GY86_LsmGyroUdpsPerLsb(GY86_ALT_LSM6DSOX_GYRO_FS);
+
+    /* MPU6050 legacy path는 ±500dps = 65.5 LSB/dps 기준 raw publish. */
+    scaled = (int64_t)raw_lsm * (int64_t)udps_per_lsb * 131LL;
+    if (scaled >= 0)
+    {
+        scaled += 1000000LL;
+    }
+    else
+    {
+        scaled -= 1000000LL;
+    }
+
+    return GY86_ClampToS16((int32_t)(scaled / 2000000LL));
+}
+
+static int16_t GY86_TempCdegToMpuTempRaw(int32_t temp_cdeg)
+{
+    int32_t raw;
+
+    /* MPU6050: temp_degC = raw / 340 + 36.53 */
+    raw = ((temp_cdeg - 3653) * 340) / 100;
+    return GY86_ClampToS16(raw);
+}
+
+/* -------------------------------------------------------------------------- */
+/*  app-state / diagnostics helpers                                            */
+/* -------------------------------------------------------------------------- */
+static void GY86_ClearBaroSensorDiagnostics(app_gy86_state_t *imu)
+{
+    if (imu == 0)
+    {
+        return;
+    }
+
+    memset(imu->baro_sensor, 0, sizeof(imu->baro_sensor));
+
+    imu->baro_sensor[0].configured = 1u;
+    imu->baro_sensor[0].online     = s_gy86_rt.baro_online;
+    imu->baro_sensor[0].bus_id     = GY86_ALT_BMP581_BUS_ID;
+    imu->baro_sensor[0].addr_7bit  = (uint8_t)(GY86_ALT_BMP581_ADDR >> 1);
+    imu->baro_sensor[0].error_streak = s_gy86_rt.baro_error_streak;
+
+    imu->debug.baro_device_slots        = APP_GY86_BARO_SENSOR_SLOTS;
+    imu->debug.baro_fused_sensor_count  = 0u;
+    imu->debug.baro_primary_sensor_index = 0xFFu;
+    imu->debug.baro_fusion_flags        = 0u;
+    imu->debug.baro_sensor_delta_pa_raw = 0;
+    imu->debug.baro_sensor_delta_pa_aligned = 0;
+}
+
+static void GY86_ResetAppStateSlice(app_gy86_state_t *imu)
+{
+    if (imu == 0)
+    {
+        return;
+    }
+
+    memset(imu, 0, sizeof(*imu));
+
+    imu->initialized = false;
+    imu->status_flags = 0u;
+    imu->last_update_ms = 0u;
+
+    imu->debug.accelgyro_backend_id = APP_IMU_BACKEND_NONE;
+    imu->debug.mag_backend_id       = APP_IMU_BACKEND_NONE;
+    imu->debug.baro_backend_id      = APP_IMU_BACKEND_NONE;
+
+    imu->debug.mpu_poll_period_ms = s_gy86_rt.mpu_period_ms;
+#if GY86_IMU_ENABLE_MAGNETOMETER
+    imu->debug.mag_poll_period_ms = GY86_IMU_MAG_PERIOD_MS;
+#else
+    imu->debug.mag_poll_period_ms = 0u;
+#endif
+    imu->debug.baro_poll_period_ms = GY86_ALT_BMP581_POLL_MS;
+
+    GY86_ClearBaroSensorDiagnostics(imu);
+}
+
+static void GY86_UpdateInitializedFlag(app_gy86_state_t *imu)
+{
+    if (imu == 0)
+    {
+        return;
+    }
+
+    imu->initialized =
+        ((s_gy86_rt.mpu_online  != 0u) ||
+         (s_gy86_rt.mag_online  != 0u) ||
+         (s_gy86_rt.baro_online != 0u)) ? true : false;
+}
+
+static void GY86_MarkBackendOffline(uint8_t device_mask,
+                                    uint8_t *online_flag,
+                                    uint8_t *error_streak,
+                                    uint32_t now_ms,
+                                    app_gy86_state_t *imu)
+{
+    if ((online_flag == 0) || (error_streak == 0) || (imu == 0))
+    {
+        return;
+    }
+
+    *online_flag  = 0u;
+    *error_streak = 0u;
+
+    if (device_mask == APP_GY86_DEVICE_MPU)
+    {
+        imu->status_flags &= (uint8_t)~APP_GY86_STATUS_MPU_VALID;
+    }
+    else if (device_mask == APP_GY86_DEVICE_MAG)
+    {
+        imu->status_flags &= (uint8_t)~APP_GY86_STATUS_MAG_VALID;
+    }
+    else if (device_mask == APP_GY86_DEVICE_BARO)
+    {
+        imu->status_flags &= (uint8_t)~APP_GY86_STATUS_BARO_VALID;
+        GY86_ClearBaroSensorDiagnostics(imu);
+    }
+
+    s_gy86_rt.next_probe_ms = now_ms + GY86_IMU_REPROBE_AFTER_RUNTIME_FAIL_MS;
+    GY86_UpdateInitializedFlag(imu);
+}
+
+static void GY86_RecordRuntimeErrorAndMaybeOffline(uint8_t device_mask,
+                                                   uint8_t *online_flag,
+                                                   uint8_t *error_streak,
+                                                   uint32_t now_ms,
+                                                   app_gy86_state_t *imu)
+{
+    if ((error_streak == 0) || (imu == 0))
+    {
+        return;
+    }
+
+    if (*error_streak < 255u)
+    {
+        (*error_streak)++;
+    }
+
+    if (*error_streak >= GY86_IMU_I2C_MAX_CONSECUTIVE_ERRORS)
+    {
+        GY86_MarkBackendOffline(device_mask,
+                                online_flag,
+                                error_streak,
+                                now_ms,
+                                imu);
+    }
+    else
+    {
+        GY86_UpdateInitializedFlag(imu);
+    }
+}
+
+static uint16_t GY86_SelectMpuPeriodMs(void)
+{
+    uint32_t clock_hz = GY86_IMU_I2C_HANDLE.Init.ClockSpeed;
+
+    if (clock_hz >= 350000u)
+    {
+        return GY86_IMU_MPU_PERIOD_MS_AT_400K;
+    }
+    if (clock_hz >= 150000u)
+    {
+        return GY86_IMU_MPU_PERIOD_MS_AT_200K;
+    }
+    return GY86_IMU_MPU_PERIOD_MS_AT_100K;
+}
+
+static uint8_t GY86_Bmp581SampleAccepted(const app_gy86_state_t *imu,
+                                         const bmp581_sample_t *sample,
+                                         uint32_t now_ms)
+{
+    int32_t delta_pa;
+    uint32_t dt_ms;
+    uint32_t max_step_pa;
+
+    if ((imu == 0) || (sample == 0))
+    {
+        return 0u;
+    }
+
+    if ((sample->pressure_pa < GY86_ALT_BMP581_PUBLISH_MIN_PRESSURE_PA) ||
+        (sample->pressure_pa > GY86_ALT_BMP581_PUBLISH_MAX_PRESSURE_PA))
+    {
+        return 0u;
+    }
+
+    if ((sample->temp_cdeg < GY86_ALT_BMP581_PUBLISH_MIN_TEMP_CDEG) ||
+        (sample->temp_cdeg > GY86_ALT_BMP581_PUBLISH_MAX_TEMP_CDEG))
+    {
+        return 0u;
+    }
+
+    if (((imu->status_flags & APP_GY86_STATUS_BARO_VALID) == 0u) ||
+        (imu->baro.sample_count == 0u))
+    {
+        return 1u;
+    }
+
+    dt_ms = now_ms - imu->baro.timestamp_ms;
+    max_step_pa = GY86_ALT_BMP581_PUBLISH_STEP_FLOOR_PA +
+                  ((uint32_t)GY86_ALT_BMP581_PUBLISH_STEP_RATE_PA_PER_S * dt_ms) / 1000u;
+
+    delta_pa = sample->pressure_pa - imu->baro.pressure_pa;
+    if ((uint32_t)GY86_Abs32(delta_pa) > max_step_pa)
+    {
+        return 0u;
+    }
+
+    return 1u;
+}
+
+static void GY86_StoreBmp581IntoAppState(app_gy86_state_t *imu,
+                                         const bmp581_sample_t *sample,
+                                         uint32_t now_ms)
+{
+    if ((imu == 0) || (sample == 0))
+    {
+        return;
+    }
+
+    imu->baro.timestamp_ms = now_ms;
+    imu->baro.sample_count++;
+
+    imu->baro.d1_raw = sample->raw_pressure_u24;
+    imu->baro.d2_raw = (uint32_t)(sample->raw_temperature_s24 & 0x00FFFFFFL);
+
+    imu->baro.prom_c[0] = 0u;
+    imu->baro.prom_c[1] = (uint16_t)sample->chip_id;
+    imu->baro.prom_c[2] = (uint16_t)sample->rev_id;
+    imu->baro.prom_c[3] = (uint16_t)sample->osr_config_shadow;
+    imu->baro.prom_c[4] = (uint16_t)sample->odr_config_shadow;
+    imu->baro.prom_c[5] = (uint16_t)sample->dsp_iir_shadow;
+    imu->baro.prom_c[6] = (uint16_t)(((uint16_t)sample->last_status << 8) |
+                                     (uint16_t)sample->last_int_status);
+
+    imu->baro.temp_cdeg         = sample->temp_cdeg;
+    imu->baro.pressure_hpa_x100 = sample->pressure_hpa_x100;
+    imu->baro.pressure_pa       = sample->pressure_pa;
+
+    imu->debug.last_hal_status_baro = (uint8_t)HAL_OK;
+    imu->debug.baro_backend_id      = GY86_ALT_DEBUG_BARO_BACKEND_ID;
+    imu->debug.ms5611_state         = sample->last_status;
+    imu->debug.baro_last_ok_ms      = now_ms;
+
+    imu->status_flags |= APP_GY86_STATUS_BARO_VALID;
+    imu->last_update_ms = now_ms;
+}
+
+static void GY86_UpdateBmp581Diagnostics(app_gy86_state_t *imu,
+                                         const bmp581_sample_t *sample,
+                                         uint32_t now_ms,
+                                         uint8_t selected,
+                                         uint8_t rejected)
+{
+    app_gy86_baro_sensor_state_t *slot;
+
+    if (imu == 0)
+    {
+        return;
+    }
+
+    slot = &imu->baro_sensor[0];
+    slot->configured   = 1u;
+    slot->online       = s_gy86_rt.baro_online;
+    slot->bus_id       = GY86_ALT_BMP581_BUS_ID;
+    slot->addr_7bit    = (uint8_t)(GY86_ALT_BMP581_ADDR >> 1);
+    slot->error_streak = s_gy86_rt.baro_error_streak;
+    slot->fresh        = (sample != 0) ? 1u : 0u;
+    slot->selected     = selected;
+    slot->rejected     = rejected;
+    slot->weight_permille = (selected != 0u) ? 1000u : 0u;
+
+    if (sample != 0)
+    {
+        slot->valid             = 1u;
+        slot->timestamp_ms      = now_ms;
+        slot->sample_count++;
+        slot->temp_cdeg         = sample->temp_cdeg;
+        slot->pressure_hpa_x100 = sample->pressure_hpa_x100;
+        slot->pressure_pa       = sample->pressure_pa;
+        slot->aligned_pressure_pa = sample->pressure_pa;
+        slot->bias_pa           = 0;
+        slot->residual_pa       = 0;
+    }
+
+    imu->debug.baro_device_slots         = APP_GY86_BARO_SENSOR_SLOTS;
+    imu->debug.baro_primary_sensor_index = (s_gy86_rt.baro_online != 0u) ? 0u : 0xFFu;
+    imu->debug.baro_fusion_flags         = (s_gy86_rt.baro_online != 0u)
+                                           ? APP_GY86_BARO_FUSION_FLAG_SINGLE_SENSOR
+                                           : 0u;
+    imu->debug.baro_fused_sensor_count   = (selected != 0u) ? 1u : 0u;
+    imu->debug.baro_sensor_delta_pa_raw     = 0;
+    imu->debug.baro_sensor_delta_pa_aligned = 0;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  LSM6DSOX backend                                                           */
+/* -------------------------------------------------------------------------- */
+static HAL_StatusTypeDef GY86_Lsm6dsox_Init(app_gy86_state_t *imu)
+{
+    HAL_StatusTypeDef st;
+
+    if (imu == 0)
+    {
+        return HAL_ERROR;
+    }
+
+    st = GY86_I2C_IsReady_Bus(GY86_ALT_LSM6DSOX_BUS_ID, GY86_ALT_LSM6DSOX_ADDR);
+    imu->debug.last_hal_status_mpu = (uint8_t)st;
+    if (st != HAL_OK)
+    {
+        return st;
+    }
+
+    memset(&s_gy86_rt.lsm_dev, 0, sizeof(s_gy86_rt.lsm_dev));
+    s_gy86_rt.lsm_dev.io.read     = GY86_CommonReadCb;
+    s_gy86_rt.lsm_dev.io.write    = GY86_CommonWriteCb;
+    s_gy86_rt.lsm_dev.io.delay_ms = GY86_CommonDelayMsCb;
+    s_gy86_rt.lsm_dev.io.ctx      = (void *)&s_lsm_i2c_ctx;
+
+    s_gy86_rt.lsm_dev.cfg.i2c_addr               = GY86_ALT_LSM6DSOX_ADDR;
+    s_gy86_rt.lsm_dev.cfg.accel_odr              = GY86_ALT_LSM6DSOX_ACCEL_ODR;
+    s_gy86_rt.lsm_dev.cfg.accel_fs               = GY86_ALT_LSM6DSOX_ACCEL_FS;
+    s_gy86_rt.lsm_dev.cfg.gyro_odr               = GY86_ALT_LSM6DSOX_GYRO_ODR;
+    s_gy86_rt.lsm_dev.cfg.gyro_fs                = GY86_ALT_LSM6DSOX_GYRO_FS;
+    s_gy86_rt.lsm_dev.cfg.enable_block_data_update = GY86_ALT_LSM6DSOX_ENABLE_BDU;
+    s_gy86_rt.lsm_dev.cfg.enable_auto_increment  = GY86_ALT_LSM6DSOX_ENABLE_AUTO_INC;
+    s_gy86_rt.lsm_dev.cfg.disable_i3c            = GY86_ALT_LSM6DSOX_DISABLE_I3C;
+    s_gy86_rt.lsm_dev.cfg.enable_accel_lpf2      = GY86_ALT_LSM6DSOX_ENABLE_LPF2;
+
+    if (LSM6DSOX_Init(&s_gy86_rt.lsm_dev) != 0)
+    {
+        imu->debug.last_hal_status_mpu = (uint8_t)HAL_ERROR;
+        return HAL_ERROR;
+    }
+
+    imu->debug.mpu_whoami          = s_gy86_rt.lsm_dev.who_am_i;
+    imu->debug.accelgyro_backend_id = GY86_ALT_DEBUG_ACCELGYRO_BACKEND_ID;
+    imu->debug.detected_mask      |= APP_GY86_DEVICE_MPU;
+    imu->debug.init_ok_mask       |= APP_GY86_DEVICE_MPU;
+    imu->debug.last_hal_status_mpu = (uint8_t)HAL_OK;
+
+    return HAL_OK;
+}
+
+static HAL_StatusTypeDef GY86_Lsm6dsox_Poll(uint32_t now_ms,
+                                            app_gy86_state_t *imu,
+                                            uint8_t *updated)
+{
+    lsm6dsox_sample_t sample;
+    uint8_t new_sample;
+
+    if (updated != 0)
+    {
+        *updated = 0u;
+    }
+
+    if (imu == 0)
+    {
+        return HAL_ERROR;
+    }
+
+    memset(&sample, 0, sizeof(sample));
+    if (LSM6DSOX_ReadSample(&s_gy86_rt.lsm_dev, &sample, &new_sample) != 0)
+    {
+        imu->debug.last_hal_status_mpu = (uint8_t)HAL_ERROR;
+        imu->debug.mpu_error_count++;
+        imu->status_flags &= (uint8_t)~APP_GY86_STATUS_MPU_VALID;
+
+        GY86_RecordRuntimeErrorAndMaybeOffline(APP_GY86_DEVICE_MPU,
+                                               &s_gy86_rt.mpu_online,
+                                               &s_gy86_rt.mpu_error_streak,
+                                               now_ms,
+                                               imu);
+        return HAL_ERROR;
+    }
+
+    imu->debug.last_hal_status_mpu = (uint8_t)HAL_OK;
+    s_gy86_rt.mpu_error_streak = 0u;
+
+    if (new_sample == 0u)
+    {
+        return HAL_OK;
+    }
+
+    imu->mpu.timestamp_ms = now_ms;
+    imu->mpu.sample_count++;
+    imu->mpu.accel_x_raw = GY86_LsmAccelRawToMpuRaw(sample.raw_accel_x);
+    imu->mpu.accel_y_raw = GY86_LsmAccelRawToMpuRaw(sample.raw_accel_y);
+    imu->mpu.accel_z_raw = GY86_LsmAccelRawToMpuRaw(sample.raw_accel_z);
+    imu->mpu.gyro_x_raw  = GY86_LsmGyroRawToMpuRaw(sample.raw_gyro_x);
+    imu->mpu.gyro_y_raw  = GY86_LsmGyroRawToMpuRaw(sample.raw_gyro_y);
+    imu->mpu.gyro_z_raw  = GY86_LsmGyroRawToMpuRaw(sample.raw_gyro_z);
+    imu->mpu.temp_cdeg   = (int16_t)sample.temp_cdeg;
+    imu->mpu.temp_raw    = GY86_TempCdegToMpuTempRaw(sample.temp_cdeg);
+
+    imu->debug.mpu_whoami           = sample.who_am_i;
+    imu->debug.accelgyro_backend_id = GY86_ALT_DEBUG_ACCELGYRO_BACKEND_ID;
+    imu->debug.mpu_last_ok_ms       = now_ms;
+    imu->status_flags              |= APP_GY86_STATUS_MPU_VALID;
+    imu->last_update_ms             = now_ms;
+
+    GY86_UpdateInitializedFlag(imu);
+
+    if (updated != 0)
+    {
+        *updated = 1u;
+    }
+
+    return HAL_OK;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  HMC5883L backend                                                           */
+/* -------------------------------------------------------------------------- */
+static HAL_StatusTypeDef GY86_Hmc5883l_Init(app_gy86_state_t *imu)
+{
+    HAL_StatusTypeDef st;
+    uint8_t id_bytes[3];
+
+    if (imu == 0)
+    {
+        return HAL_ERROR;
+    }
+
+    st = GY86_I2C_Read_Bus(GY86_ALT_HMC5883L_BUS_ID,
+                           GY86_ALT_HMC5883L_ADDR,
+                           HMC5883L_RA_ID_A,
+                           id_bytes,
+                           sizeof(id_bytes));
+    imu->debug.last_hal_status_mag = (uint8_t)st;
+    if (st != HAL_OK)
+    {
+        return st;
+    }
+
+    imu->debug.mag_id_a = id_bytes[0];
+    imu->debug.mag_id_b = id_bytes[1];
+    imu->debug.mag_id_c = id_bytes[2];
+    imu->debug.detected_mask |= APP_GY86_DEVICE_MAG;
+
+    if ((id_bytes[0] != 0x48u) || (id_bytes[1] != 0x34u) || (id_bytes[2] != 0x33u))
+    {
+        return HAL_ERROR;
+    }
+
+    st = GY86_I2C_WriteU8_Bus(GY86_ALT_HMC5883L_BUS_ID,
+                              GY86_ALT_HMC5883L_ADDR,
+                              HMC5883L_RA_CONFIG_A,
+                              GY86_ALT_HMC5883L_CONFIG_A);
+    if (st != HAL_OK) { imu->debug.last_hal_status_mag = (uint8_t)st; return st; }
+
+    st = GY86_I2C_WriteU8_Bus(GY86_ALT_HMC5883L_BUS_ID,
+                              GY86_ALT_HMC5883L_ADDR,
+                              HMC5883L_RA_CONFIG_B,
+                              GY86_ALT_HMC5883L_CONFIG_B);
+    if (st != HAL_OK) { imu->debug.last_hal_status_mag = (uint8_t)st; return st; }
+
+    st = GY86_I2C_WriteU8_Bus(GY86_ALT_HMC5883L_BUS_ID,
+                              GY86_ALT_HMC5883L_ADDR,
+                              HMC5883L_RA_MODE,
+                              GY86_ALT_HMC5883L_MODE);
+    if (st != HAL_OK) { imu->debug.last_hal_status_mag = (uint8_t)st; return st; }
+
+    imu->debug.mag_backend_id    = APP_IMU_BACKEND_HMC5883L;
+    imu->debug.init_ok_mask     |= APP_GY86_DEVICE_MAG;
+    imu->debug.last_hal_status_mag = (uint8_t)HAL_OK;
+
+    return HAL_OK;
+}
+
+static HAL_StatusTypeDef GY86_Hmc5883l_Poll(uint32_t now_ms,
+                                            app_gy86_state_t *imu,
+                                            uint8_t *updated)
+{
+    HAL_StatusTypeDef st;
+    uint8_t buffer[6];
+
+    if (updated != 0)
+    {
+        *updated = 0u;
+    }
+
+    if (imu == 0)
+    {
+        return HAL_ERROR;
+    }
+
+    st = GY86_I2C_Read_Bus(GY86_ALT_HMC5883L_BUS_ID,
+                           GY86_ALT_HMC5883L_ADDR,
+                           HMC5883L_RA_DATA_X_H,
+                           buffer,
+                           sizeof(buffer));
+    imu->debug.last_hal_status_mag = (uint8_t)st;
+    if (st != HAL_OK)
+    {
+        imu->debug.mag_error_count++;
+        imu->status_flags &= (uint8_t)~APP_GY86_STATUS_MAG_VALID;
+
+        GY86_RecordRuntimeErrorAndMaybeOffline(APP_GY86_DEVICE_MAG,
+                                               &s_gy86_rt.mag_online,
+                                               &s_gy86_rt.mag_error_streak,
+                                               now_ms,
+                                               imu);
+        return st;
+    }
+
+    s_gy86_rt.mag_error_streak = 0u;
+
+    /* HMC5883L 출력 순서: X, Z, Y */
+    imu->mag.timestamp_ms = now_ms;
+    imu->mag.sample_count++;
+    imu->mag.mag_x_raw = (int16_t)((buffer[0] << 8) | buffer[1]);
+    imu->mag.mag_z_raw = (int16_t)((buffer[2] << 8) | buffer[3]);
+    imu->mag.mag_y_raw = (int16_t)((buffer[4] << 8) | buffer[5]);
+
+    imu->debug.mag_last_ok_ms = now_ms;
+    imu->status_flags        |= APP_GY86_STATUS_MAG_VALID;
+    imu->last_update_ms       = now_ms;
+
+    GY86_UpdateInitializedFlag(imu);
+
+    if (updated != 0)
+    {
+        *updated = 1u;
+    }
+
+    return HAL_OK;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  BMP581 backend                                                             */
+/* -------------------------------------------------------------------------- */
+static HAL_StatusTypeDef GY86_Bmp581_Init(app_gy86_state_t *imu)
+{
+    HAL_StatusTypeDef st;
+
+    if (imu == 0)
+    {
+        return HAL_ERROR;
+    }
+
+    st = GY86_I2C_IsReady_Bus(GY86_ALT_BMP581_BUS_ID, GY86_ALT_BMP581_ADDR);
+    imu->debug.last_hal_status_baro = (uint8_t)st;
+    if (st != HAL_OK)
+    {
+        return st;
+    }
+
+    memset(&s_gy86_rt.bmp_dev, 0, sizeof(s_gy86_rt.bmp_dev));
+    s_gy86_rt.bmp_dev.io.read     = GY86_CommonReadCb;
+    s_gy86_rt.bmp_dev.io.write    = GY86_CommonWriteCb;
+    s_gy86_rt.bmp_dev.io.delay_ms = GY86_CommonDelayMsCb;
+    s_gy86_rt.bmp_dev.io.ctx      = (void *)&s_bmp_i2c_ctx;
+
+    s_gy86_rt.bmp_dev.cfg.i2c_addr            = GY86_ALT_BMP581_ADDR;
+    s_gy86_rt.bmp_dev.cfg.osr_temp            = GY86_ALT_BMP581_TEMP_OSR;
+    s_gy86_rt.bmp_dev.cfg.osr_press           = GY86_ALT_BMP581_PRESS_OSR;
+    s_gy86_rt.bmp_dev.cfg.odr                 = GY86_ALT_BMP581_ODR;
+    s_gy86_rt.bmp_dev.cfg.iir_temp            = GY86_ALT_BMP581_IIR_TEMP;
+    s_gy86_rt.bmp_dev.cfg.iir_press           = GY86_ALT_BMP581_IIR_PRESS;
+    s_gy86_rt.bmp_dev.cfg.accept_chip_id_0x51 = GY86_ALT_BMP581_ACCEPT_CHIP_ID_0x51;
+
+    if (BMP581_Init(&s_gy86_rt.bmp_dev) != 0)
+    {
+        imu->debug.last_hal_status_baro = (uint8_t)HAL_ERROR;
+        return HAL_ERROR;
+    }
+
+    imu->debug.detected_mask      |= APP_GY86_DEVICE_BARO;
+    imu->debug.init_ok_mask       |= APP_GY86_DEVICE_BARO;
+    imu->debug.baro_backend_id      = GY86_ALT_DEBUG_BARO_BACKEND_ID;
+    imu->debug.last_hal_status_baro = (uint8_t)HAL_OK;
+    imu->debug.ms5611_state         = s_gy86_rt.bmp_dev.last_status;
+
+    GY86_ClearBaroSensorDiagnostics(imu);
+    imu->baro_sensor[0].online = 1u;
+
+    return HAL_OK;
+}
+
+static HAL_StatusTypeDef GY86_Bmp581_Poll(uint32_t now_ms,
+                                          app_gy86_state_t *imu,
+                                          uint8_t *updated)
+{
+    bmp581_sample_t sample;
+    uint8_t new_sample;
+    uint8_t accepted;
+
+    if (updated != 0)
+    {
+        *updated = 0u;
+    }
+
+    if (imu == 0)
+    {
+        return HAL_ERROR;
+    }
+
+    memset(&sample, 0, sizeof(sample));
+    if (BMP581_ReadSample(&s_gy86_rt.bmp_dev, &sample, &new_sample) != 0)
+    {
+        imu->debug.last_hal_status_baro = (uint8_t)HAL_ERROR;
+        imu->debug.baro_error_count++;
+        imu->baro_sensor[0].error_streak = (uint8_t)(s_gy86_rt.baro_error_streak + 1u);
+
+        GY86_RecordRuntimeErrorAndMaybeOffline(APP_GY86_DEVICE_BARO,
+                                               &s_gy86_rt.baro_online,
+                                               &s_gy86_rt.baro_error_streak,
+                                               now_ms,
+                                               imu);
+        return HAL_ERROR;
+    }
+
+    imu->debug.last_hal_status_baro = (uint8_t)HAL_OK;
+    s_gy86_rt.baro_error_streak = 0u;
+    imu->baro_sensor[0].error_streak = 0u;
+    imu->baro_sensor[0].online = s_gy86_rt.baro_online;
+
+    if (new_sample == 0u)
+    {
+        return HAL_OK;
+    }
+
+    accepted = GY86_Bmp581SampleAccepted(imu, &sample, now_ms);
+    GY86_UpdateBmp581Diagnostics(imu,
+                                 &sample,
+                                 now_ms,
+                                 accepted,
+                                 (accepted == 0u) ? 1u : 0u);
+
+    /* 실제 통신은 성공했으므로 "backend health" 관점 last_ok 는 갱신한다. */
+    imu->debug.baro_last_ok_ms = now_ms;
+    imu->debug.ms5611_state    = sample.last_status;
+
+    if (accepted != 0u)
+    {
+        GY86_StoreBmp581IntoAppState(imu, &sample, now_ms);
+        GY86_UpdateInitializedFlag(imu);
+
+        if (updated != 0)
+        {
+            *updated = 1u;
+        }
+    }
+
+    return HAL_OK;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  probe helper                                                               */
+/* -------------------------------------------------------------------------- */
+static void GY86_ProbeMissingBackends(uint32_t now_ms, app_gy86_state_t *imu)
+{
+    HAL_StatusTypeDef st;
+
+    if (imu == 0)
+    {
+        return;
+    }
+
+    imu->debug.init_attempt_count++;
+    imu->debug.last_init_attempt_ms = now_ms;
+
+    if (s_gy86_rt.mpu_online == 0u)
+    {
+        st = s_accelgyro_backend.init(imu);
+        if (st == HAL_OK)
+        {
+            s_gy86_rt.mpu_online = 1u;
+            s_gy86_rt.next_mpu_ms = now_ms;
+            s_gy86_rt.mpu_error_streak = 0u;
+        }
+        else
+        {
+            imu->debug.mpu_error_count++;
+        }
+    }
+
+#if GY86_IMU_ENABLE_MAGNETOMETER
+    if (s_gy86_rt.mag_online == 0u)
+    {
+        st = s_mag_backend.init(imu);
+        if (st == HAL_OK)
+        {
+            s_gy86_rt.mag_online = 1u;
+            s_gy86_rt.next_mag_ms = now_ms;
+            s_gy86_rt.mag_error_streak = 0u;
+        }
+        else
+        {
+            imu->debug.mag_error_count++;
+        }
+    }
+#else
+    s_gy86_rt.mag_online = 0u;
+    s_gy86_rt.next_mag_ms = 0u;
+#endif
+
+    if (s_gy86_rt.baro_online == 0u)
+    {
+        st = s_baro_backend.init(imu);
+        if (st == HAL_OK)
+        {
+            s_gy86_rt.baro_online = 1u;
+            s_gy86_rt.next_baro_ms = now_ms;
+            s_gy86_rt.baro_error_streak = 0u;
+            imu->baro_sensor[0].online = 1u;
+        }
+        else
+        {
+            imu->debug.baro_error_count++;
+        }
+    }
+
+    GY86_UpdateInitializedFlag(imu);
+    s_gy86_rt.next_probe_ms = now_ms + GY86_IMU_RETRY_MS;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  public API                                                                 */
+/* -------------------------------------------------------------------------- */
+void GY86_IMU_Init(void)
+{
+    app_gy86_state_t *imu;
+
+    imu = (app_gy86_state_t *)&g_app_state.gy86;
+
+    memset(&s_gy86_rt, 0, sizeof(s_gy86_rt));
+    GY86_I2C_ApplySafeClockIfNeeded();
+
+    s_gy86_rt.mpu_period_ms = GY86_SelectMpuPeriodMs();
+    s_gy86_rt.next_probe_ms = HAL_GetTick();
+
+    GY86_ResetAppStateSlice(imu);
+
+    HAL_Delay(50u);
+
+    GY86_ProbeMissingBackends(HAL_GetTick(), imu);
+}
+
+void GY86_IMU_Task(uint32_t now_ms)
+{
+    app_gy86_state_t *imu;
+    uint8_t updated;
+
+    imu = (app_gy86_state_t *)&g_app_state.gy86;
+
+#if GY86_IMU_ENABLE_MAGNETOMETER
+    if (((s_gy86_rt.mpu_online == 0u) ||
+         (s_gy86_rt.mag_online == 0u) ||
+         (s_gy86_rt.baro_online == 0u)) &&
+        (GY86_TimeDue(now_ms, s_gy86_rt.next_probe_ms) != 0u))
+#else
+    if (((s_gy86_rt.mpu_online == 0u) ||
+         (s_gy86_rt.baro_online == 0u)) &&
+        (GY86_TimeDue(now_ms, s_gy86_rt.next_probe_ms) != 0u))
+#endif
+    {
+        GY86_ProbeMissingBackends(now_ms, imu);
+    }
+
+    if ((s_gy86_rt.mpu_online != 0u) &&
+        (GY86_TimeDue(now_ms, s_gy86_rt.next_mpu_ms) != 0u))
+    {
+        updated = 0u;
+        (void)s_accelgyro_backend.poll(now_ms, imu, &updated);
+        s_gy86_rt.next_mpu_ms = GY86_NextPeriodicDue(s_gy86_rt.next_mpu_ms,
+                                                     s_gy86_rt.mpu_period_ms,
+                                                     now_ms);
+    }
+
+#if GY86_IMU_ENABLE_MAGNETOMETER
+    if ((s_gy86_rt.mag_online != 0u) &&
+        (GY86_TimeDue(now_ms, s_gy86_rt.next_mag_ms) != 0u))
+    {
+        updated = 0u;
+        (void)s_mag_backend.poll(now_ms, imu, &updated);
+        s_gy86_rt.next_mag_ms = GY86_NextPeriodicDue(s_gy86_rt.next_mag_ms,
+                                                     GY86_IMU_MAG_PERIOD_MS,
+                                                     now_ms);
+    }
+#endif
+
+    if ((s_gy86_rt.baro_online != 0u) &&
+        (GY86_TimeDue(now_ms, s_gy86_rt.next_baro_ms) != 0u))
+    {
+        updated = 0u;
+        (void)s_baro_backend.poll(now_ms, imu, &updated);
+        s_gy86_rt.next_baro_ms = GY86_NextPeriodicDue(s_gy86_rt.next_baro_ms,
+                                                      GY86_ALT_BMP581_POLL_MS,
+                                                      now_ms);
+    }
+}
+
+#else
 #include "GY86_IMU.h"
 
 #include <string.h>
@@ -2591,3 +3877,5 @@ void GY86_IMU_Task(uint32_t now_ms)
         (void)s_baro_backend.poll(now_ms, imu, &updated);
     }
 }
+
+#endif
