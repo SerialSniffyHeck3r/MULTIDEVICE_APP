@@ -2245,11 +2245,33 @@ void Vario_Navigation_RenderSettingPage(u8g2_t *u8g2)
 
     if (s_nav.open_page == VARIO_NAV_PAGE_SITE_NAME)
     {
+        if (UI_Confirm_IsVisible() != false)
+        {
+            Vario_Display_DrawPageTitle(u8g2, v, title, subtitle);
+            return;
+        }
+
         vario_nav_draw_site_name_editor(u8g2, v);
         return;
     }
 
     Vario_Display_DrawPageTitle(u8g2, v, title, subtitle);
+
+    /* ------------------------------------------------------------------ */
+    /* NAV 계열 페이지 위에 confirm overlay 가 뜰 때,                       */
+    /* 아래쪽 리스트까지 계속 그리면 글자가 중앙 confirm box 주변에        */
+    /* 겹쳐 보여 시각적으로 지저분해진다.                                   */
+    /*                                                                    */
+    /* confirm 이 active 인 동안에는 NAV page 의 title/subtitle 만 남기고, */
+    /* 본문 row 는 그리지 않는다.                                          */
+    /*                                                                    */
+    /* 이렇게 하면 confirm box 는 그대로 UI_ENGINE overlay 로 그려지고,    */
+    /* NAV page 는 상단 문맥만 유지한 채 본문 겹침이 제거된다.              */
+    /* ------------------------------------------------------------------ */
+    if (UI_Confirm_IsVisible() != false)
+    {
+        return;
+    }
 
     count = vario_nav_page_item_count(s_nav.open_page);
     vario_nav_get_list_window(count, s_nav.cursor, &start, &rows);

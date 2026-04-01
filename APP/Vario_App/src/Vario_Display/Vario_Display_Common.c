@@ -2586,6 +2586,7 @@ static void vario_display_draw_top_left_glide_ratio_gauge(u8g2_t *u8g2,
     int16_t avg_mark_x;
     int16_t avg_mark_top_y;
     float   tick_ratio;
+    float   extra_minor_ratio;
 
     if ((u8g2 == NULL) || (v == NULL) || (rt == NULL))
     {
@@ -2642,6 +2643,43 @@ static void vario_display_draw_top_left_glide_ratio_gauge(u8g2_t *u8g2,
         }
 
         u8g2_DrawVLine(u8g2, tick_x, gauge_top_y, tick_h);
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* 사용자가 요청한 대로, 기존 major / minor tick 은 그대로 둔다.       */
+    /*                                                                    */
+    /* 기존 tick 배치는 0 / 5 / 10 / 15 / 20 이고, 이 상태에서는           */
+    /* major 사이에 작은 눈금이 1개만 존재한다.                            */
+    /*                                                                    */
+    /* 여기서는 기존 눈금을 변경하지 않고, 그 "사이" 에만 동일한 minor    */
+    /* tick 을 하나 더 추가해서                                            */
+    /*   major - minor - minor - minor - major                            */
+    /* 패턴이 되도록 만든다.                                               */
+    /*                                                                    */
+    /* 즉 0..20 스케일 기준으로 2.5 / 7.5 / 12.5 / 17.5 위치에             */
+    /* 기존 minor 와 동일한 높이의 tick 을 추가한다.                      */
+    /* ------------------------------------------------------------------ */
+    for (extra_minor_ratio = (VARIO_UI_TOP_GLD_GAUGE_MINOR_STEP * 0.5f);
+         extra_minor_ratio < VARIO_UI_TOP_GLD_GAUGE_MAX_RATIO;
+         extra_minor_ratio += VARIO_UI_TOP_GLD_GAUGE_MINOR_STEP)
+    {
+        int16_t tick_x;
+
+        tick_x = (int16_t)(gauge_left_x +
+                           lroundf((extra_minor_ratio / VARIO_UI_TOP_GLD_GAUGE_MAX_RATIO) * (float)(gauge_w - 1)));
+        if (tick_x < gauge_left_x)
+        {
+            tick_x = gauge_left_x;
+        }
+        if (tick_x > (int16_t)(gauge_left_x + gauge_w - 1))
+        {
+            tick_x = (int16_t)(gauge_left_x + gauge_w - 1);
+        }
+
+        u8g2_DrawVLine(u8g2,
+                       tick_x,
+                       gauge_top_y,
+                       VARIO_UI_TOP_GLD_GAUGE_MINOR_TICK_H);
     }
 
     if (rt->glide_ratio_instant_valid != false)
@@ -3863,7 +3901,25 @@ static void vario_display_draw_speed_value_block(u8g2_t *u8g2,
     }
 
     value_box_x = (int16_t)(v->x + v->w - VARIO_UI_SIDE_BAR_W - VARIO_UI_BOTTOM_GS_X_PAD - VARIO_UI_BOTTOM_BOX_W);
-    value_box_y = (int16_t)(v->y + v->h - VARIO_UI_BOTTOM_BOX_BOTTOM_PAD - value_box_h);
+
+    /* ------------------------------------------------------------------ */
+    /* 사용자가 지정한 4개 요소를 하나의 speed block 으로 같이 4px 내린다. */
+    /*                                                                    */
+    /* 이동 대상                                                            */
+    /* - "MC" 라벨                                                         */
+    /* - MC 값                                                             */
+    /* - 최대 속도                                                         */
+    /* - 현재 속도 본값/소수값                                              */
+    /*                                                                    */
+    /* 구현 방침                                                            */
+    /* - 별도 shift 상수나 런타임 보정 로직을 추가하지 않는다.             */
+    /* - 이 speed block 의 기준 절대 좌표식 자체를 교체한다.              */
+    /*                                                                    */
+    /* 기존 식은 bottom pad(4px)를 빼고 있어서, 화면 하단에서 4px 떠 있었다.*/
+    /* 그 -4 성격의 보정을 제거해서 기준 y 를 그대로 아래로 4px 내린다.   */
+    /* max / MC 는 value_box_y 를 기준으로 위쪽에 붙어 있으므로 함께 이동한다.*/
+    /* ------------------------------------------------------------------ */
+    value_box_y = (int16_t)(v->y + v->h - value_box_h);
 
     vario_display_format_speed_value(value_text,
                                      sizeof(value_text),

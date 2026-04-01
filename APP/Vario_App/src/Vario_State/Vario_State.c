@@ -521,10 +521,6 @@ static void vario_state_trainer_step(uint32_t now_ms)
     float                   airspeed_mps;
     float                   air_n_mps;
     float                   air_e_mps;
-    float                   wind_to_deg;
-    float                   wind_rad;
-    float                   wind_n_mps;
-    float                   wind_e_mps;
     float                   ground_n_mps;
     float                   ground_e_mps;
     float                   ground_speed_kmh;
@@ -563,13 +559,31 @@ static void vario_state_trainer_step(uint32_t now_ms)
     air_n_mps = cosf(heading_rad) * airspeed_mps;
     air_e_mps = sinf(heading_rad) * airspeed_mps;
 
-    wind_to_deg = vario_state_wrap_360(VARIO_STATE_TRAINER_TRUE_WIND_FROM_DEG + 180.0f);
-    wind_rad = vario_state_deg_to_rad(wind_to_deg);
-    wind_n_mps = cosf(wind_rad) * (VARIO_STATE_TRAINER_TRUE_WIND_SPEED_KMH / 3.6f);
-    wind_e_mps = sinf(wind_rad) * (VARIO_STATE_TRAINER_TRUE_WIND_SPEED_KMH / 3.6f);
-
-    ground_n_mps = air_n_mps + wind_n_mps;
-    ground_e_mps = air_e_mps + wind_e_mps;
+    /* ------------------------------------------------------------------ */
+    /* trainer 모드는 실제 비행 재현기라기보다,                             */
+    /* UI / 항법 / 자세 화면을 반복적으로 검증하기 위한 synthetic source 다. */
+    /*                                                                    */
+    /* 기존 구현은 trainer 에 true wind drift 를 더해 GPS 위치를 진행시켰다. */
+    /* 이 경우 north-up trail page 에서는                                  */
+    /*   - 기체 화살표는 trainer heading 을 보고                            */
+    /*   - 배경 breadcrumb 는 wind 가 섞인 ground track 으로 움직여         */
+    /* 두 요소가 서로 다른 기준을 보게 된다.                                */
+    /*                                                                    */
+    /* 특히 남쪽 계열 heading 에서 사용자가 지적한                           */
+    /* "포인터는 남쪽을 보는데 배경이 기대한 방향으로 충분히 내려가지 않는" */
+    /* 현상의 근본 원인이 바로 이 기준 불일치였다.                            */
+    /*                                                                    */
+    /* 수정 방침                                                            */
+    /* - trainer 의 synthetic GPS 진행 방향을 trainer heading 과 일치시킨다. */
+    /* - 즉 breadcrumb 배경 이동도 조종한 heading 과 같은 기준을 사용한다.  */
+    /* - 실풍 drift 재현보다, 화면 검증용 일관성을 우선한다.                */
+    /*                                                                    */
+    /* 추후 풍 drift 를 다시 보고 싶다면                                   */
+    /* - trainer 전용 option 을 추가해                                     */
+    /*   heading-locked / wind-drifted 를 선택하도록 확장할 수 있다.        */
+    /* ------------------------------------------------------------------ */
+    ground_n_mps = air_n_mps;
+    ground_e_mps = air_e_mps;
     ground_speed_kmh = sqrtf((ground_n_mps * ground_n_mps) + (ground_e_mps * ground_e_mps)) * 3.6f;
 
     lat_deg = ((float)s_vario_state.trainer.lat_e7) * 1.0e-7f;
