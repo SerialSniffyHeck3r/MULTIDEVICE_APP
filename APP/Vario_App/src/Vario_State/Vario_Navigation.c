@@ -1,6 +1,7 @@
 #include "Vario_Navigation.h"
 
 #include "Vario_Display_Common.h"
+#include "Vario_Persistence.h"
 #include "Vario_Settings.h"
 #include "ui_confirm.h"
 #include "ui_toast.h"
@@ -11,15 +12,15 @@
 #include <string.h>
 
 #ifndef VARIO_NAV_MAX_LANDABLES
-#define VARIO_NAV_MAX_LANDABLES 8u
+#define VARIO_NAV_MAX_LANDABLES VARIO_PERSISTENCE_MAX_FIELDS
 #endif
 
 #ifndef VARIO_NAV_MAX_USER_WAYPOINTS
-#define VARIO_NAV_MAX_USER_WAYPOINTS 12u
+#define VARIO_NAV_MAX_USER_WAYPOINTS VARIO_PERSISTENCE_MAX_WAYPOINTS
 #endif
 
 #ifndef VARIO_NAV_MAX_MARKS
-#define VARIO_NAV_MAX_MARKS 8u
+#define VARIO_NAV_MAX_MARKS 4u
 #endif
 
 #ifndef VARIO_NAV_LIST_VISIBLE_ROWS
@@ -46,11 +47,23 @@
 #define VARIO_NAV_PI 3.14159265358979323846f
 #endif
 
+#ifndef VARIO_NAV_NAME_EDITOR_MAX_CHARS
+#define VARIO_NAV_NAME_EDITOR_MAX_CHARS 10u
+#endif
+
 typedef struct
 {
     bool valid;
     vario_nav_page_t open_page;
     uint8_t cursor;
+
+    uint8_t active_site_index;
+    uint8_t detail_site_index;
+
+    bool name_edit_active;
+    uint8_t name_edit_pos;
+    char name_edit_buffer[VARIO_NAV_NAME_MAX];
+
     uint32_t next_id;
     uint8_t next_wp_index;
     uint8_t next_field_index;
@@ -67,6 +80,8 @@ typedef struct
     vario_nav_point_t landables[VARIO_NAV_MAX_LANDABLES];
     vario_nav_point_t waypoints[VARIO_NAV_MAX_USER_WAYPOINTS];
     vario_nav_point_t marks[VARIO_NAV_MAX_MARKS];
+
+    vario_persist_site_summary_t site_summaries[VARIO_PERSISTENCE_MAX_SITES];
 } vario_navigation_state_t;
 
 static vario_navigation_state_t s_nav;
@@ -109,6 +124,8 @@ static float vario_nav_vector_bearing_deg(float north_m, float east_m)
 
 static void vario_nav_copy_name(char *dst, size_t dst_size, const char *src)
 {
+    size_t i;
+
     if ((dst == NULL) || (dst_size == 0u))
     {
         return;
@@ -120,8 +137,31 @@ static void vario_nav_copy_name(char *dst, size_t dst_size, const char *src)
         return;
     }
 
-    strncpy(dst, src, dst_size - 1u);
-    dst[dst_size - 1u] = '\0';
+    for (i = 0u; (i + 1u) < dst_size; ++i)
+    {
+        char c;
+        c = src[i];
+        if (c == '\0')
+        {
+            break;
+        }
+        if ((c < 32) || (c > 126))
+        {
+            c = ' ';
+        }
+        dst[i] = c;
+    }
+    dst[i] = '\0';
+
+    while (i > 0u)
+    {
+        if (dst[i - 1u] != ' ')
+        {
+            break;
+        }
+        dst[i - 1u] = '\0';
+        --i;
+    }
 }
 
 static void vario_nav_make_name(char *dst, size_t dst_size, const char *prefix, uint8_t index)
@@ -304,6 +344,202 @@ static void vario_nav_fill_runtime_target(vario_nav_active_target_t *out_target,
     vario_nav_copy_name(out_target->name, sizeof(out_target->name), point->name);
 }
 
+static void vario_nav_copy_from_persist(vario_nav_point_t *dst,
+                                        const vario_persist_point_t *src)
+{
+    if ((dst == NULL) || (src == NULL))
+    {
+        return;
+    }
+
+    memset(dst, 0, sizeof(*dst));
+    dst->valid = src->valid;
+    dst->has_elevation = src->has_elevation;
+    dst->id = src->id;
+    dst->kind = (vario_nav_target_kind_t)src->kind;
+    dst->lat_e7 = src->lat_e7;
+    dst->lon_e7 = src->lon_e7;
+    dst->altitude_m = src->altitude_m;
+    vario_nav_copy_name(dst->name, sizeof(dst->name), src->name);
+}
+
+static void vario_nav_copy_to_persist(vario_persist_point_t *dst,
+                                      const vario_nav_point_t *src)
+{
+    if ((dst == NULL) || (src == NULL))
+    {
+        return;
+    }
+
+    memset(dst, 0, sizeof(*dst));
+    dst->valid = src->valid;
+    dst->has_elevation = src->has_elevation;
+    dst->id = src->id;
+    dst->kind = (uint8_t)src->kind;
+    dst->lat_e7 = src->lat_e7;
+    dst->lon_e7 = src->lon_e7;
+    dst->altitude_m = src->altitude_m;
+    vario_nav_copy_name(dst->name, sizeof(dst->name), src->name);
+}
+
+static void vario_nav_refresh_site_summaries(void)
+{
+    uint8_t i;
+
+    for (i = 0u; i < Vario_Persistence_GetSiteCount(); ++i)
+    {
+        if (Vario_Persistence_GetSiteSummary(i, &s_nav.site_summaries[i]) == false)
+        {
+            memset(&s_nav.site_summaries[i], 0, sizeof(s_nav.site_summaries[i]));
+            snprintf(s_nav.site_summaries[i].site_name,
+                     sizeof(s_nav.site_summaries[i].site_name),
+                     "SITE %02u",
+                     (unsigned)(i + 1u));
+        }
+    }
+}
+
+static void vario_nav_export_active_site(vario_persist_site_t *out_site)
+{
+    uint8_t i;
+
+    if (out_site == NULL)
+    {
+        return;
+    }
+
+    memset(out_site, 0, sizeof(*out_site));
+    out_site->stored = true;
+    vario_nav_copy_name(out_site->site_name,
+                        sizeof(out_site->site_name),
+                        s_nav.site_summaries[s_nav.active_site_index].site_name);
+    out_site->next_id = (s_nav.next_id != 0u) ? s_nav.next_id : 1u;
+    out_site->next_field_serial = (s_nav.next_field_index != 0u) ? s_nav.next_field_index : 1u;
+    out_site->next_waypoint_serial = (s_nav.next_wp_index != 0u) ? s_nav.next_wp_index : 1u;
+    vario_nav_copy_to_persist(&out_site->home, &s_nav.home);
+    for (i = 0u; i < VARIO_NAV_MAX_LANDABLES; ++i)
+    {
+        vario_nav_copy_to_persist(&out_site->landings[i], &s_nav.landables[i]);
+    }
+    for (i = 0u; i < VARIO_NAV_MAX_USER_WAYPOINTS; ++i)
+    {
+        vario_nav_copy_to_persist(&out_site->waypoints[i], &s_nav.waypoints[i]);
+    }
+}
+
+static void vario_nav_apply_loaded_site(const vario_persist_site_t *site)
+{
+    uint8_t i;
+
+    memset(&s_nav.home, 0, sizeof(s_nav.home));
+    memset(s_nav.landables, 0, sizeof(s_nav.landables));
+    memset(s_nav.waypoints, 0, sizeof(s_nav.waypoints));
+
+    if (site == NULL)
+    {
+        s_nav.next_id = 1u;
+        s_nav.next_field_index = 1u;
+        s_nav.next_wp_index = 1u;
+        return;
+    }
+
+    vario_nav_copy_from_persist(&s_nav.home, &site->home);
+    for (i = 0u; i < VARIO_NAV_MAX_LANDABLES; ++i)
+    {
+        vario_nav_copy_from_persist(&s_nav.landables[i], &site->landings[i]);
+    }
+    for (i = 0u; i < VARIO_NAV_MAX_USER_WAYPOINTS; ++i)
+    {
+        vario_nav_copy_from_persist(&s_nav.waypoints[i], &site->waypoints[i]);
+    }
+
+    s_nav.next_id = (site->next_id != 0u) ? site->next_id : 1u;
+    s_nav.next_field_index = (site->next_field_serial != 0u) ? site->next_field_serial : 1u;
+    s_nav.next_wp_index = (site->next_waypoint_serial != 0u) ? site->next_waypoint_serial : 1u;
+}
+
+static bool vario_nav_save_active_site(void)
+{
+    vario_persist_site_t site;
+
+    if (Vario_Persistence_IsReady() == false)
+    {
+        return false;
+    }
+
+    vario_nav_export_active_site(&site);
+    if (Vario_Persistence_SaveSite(s_nav.active_site_index, &site) == false)
+    {
+        return false;
+    }
+    vario_nav_refresh_site_summaries();
+    return true;
+}
+
+static bool vario_nav_load_site_to_nav(uint8_t site_index)
+{
+    vario_persist_site_t site;
+
+    s_nav.active_site_index = site_index;
+    if (Vario_Persistence_LoadSite(site_index, &site) != false)
+    {
+        vario_nav_apply_loaded_site(&site);
+    }
+    else
+    {
+        vario_nav_apply_loaded_site(&site);
+    }
+
+    return true;
+}
+
+static void vario_nav_sync_active_indexes(void)
+{
+    if ((s_nav.active_landable_index >= VARIO_NAV_MAX_LANDABLES) ||
+        (s_nav.landables[s_nav.active_landable_index].valid == false))
+    {
+        int16_t idx = vario_nav_first_valid_index(s_nav.landables, VARIO_NAV_MAX_LANDABLES);
+        s_nav.active_landable_index = (idx >= 0) ? (uint8_t)idx : 0u;
+    }
+
+    if ((s_nav.active_waypoint_index >= VARIO_NAV_MAX_USER_WAYPOINTS) ||
+        (s_nav.waypoints[s_nav.active_waypoint_index].valid == false))
+    {
+        int16_t idx = vario_nav_first_valid_index(s_nav.waypoints, VARIO_NAV_MAX_USER_WAYPOINTS);
+        s_nav.active_waypoint_index = (idx >= 0) ? (uint8_t)idx : 0u;
+    }
+
+    if ((s_nav.active_mark_index >= VARIO_NAV_MAX_MARKS) ||
+        (s_nav.marks[s_nav.active_mark_index].valid == false))
+    {
+        int16_t idx = vario_nav_first_valid_index(s_nav.marks, VARIO_NAV_MAX_MARKS);
+        s_nav.active_mark_index = (idx >= 0) ? (uint8_t)idx : 0u;
+    }
+
+    if ((s_nav.active_source == VARIO_NAV_SOURCE_HOME) && (s_nav.home.valid == false))
+    {
+        s_nav.active_source = VARIO_NAV_SOURCE_NONE;
+    }
+    if ((s_nav.active_source == VARIO_NAV_SOURCE_LANDABLE) &&
+        ((s_nav.active_landable_index >= VARIO_NAV_MAX_LANDABLES) ||
+         (s_nav.landables[s_nav.active_landable_index].valid == false)))
+    {
+        s_nav.active_source = VARIO_NAV_SOURCE_NONE;
+    }
+    if ((s_nav.active_source == VARIO_NAV_SOURCE_USER_WP) &&
+        ((s_nav.active_waypoint_index >= VARIO_NAV_MAX_USER_WAYPOINTS) ||
+         (s_nav.waypoints[s_nav.active_waypoint_index].valid == false)))
+    {
+        s_nav.active_source = VARIO_NAV_SOURCE_NONE;
+    }
+    if ((s_nav.active_source == VARIO_NAV_SOURCE_MARK) &&
+        ((s_nav.active_mark_index >= VARIO_NAV_MAX_MARKS) ||
+         (s_nav.marks[s_nav.active_mark_index].valid == false)))
+    {
+        s_nav.active_source = VARIO_NAV_SOURCE_NONE;
+    }
+}
+
 static const vario_nav_point_t *vario_nav_get_point_for_source(vario_nav_target_source_t source)
 {
     if (source == VARIO_NAV_SOURCE_HOME)
@@ -354,30 +590,6 @@ static bool vario_nav_source_has_valid_target(vario_nav_target_source_t source)
     return (vario_nav_get_point_for_source(source) != NULL) ? true : false;
 }
 
-static void vario_nav_sync_active_indexes(void)
-{
-    if ((s_nav.active_landable_index >= VARIO_NAV_MAX_LANDABLES) ||
-        (s_nav.landables[s_nav.active_landable_index].valid == false))
-    {
-        int16_t idx = vario_nav_first_valid_index(s_nav.landables, VARIO_NAV_MAX_LANDABLES);
-        s_nav.active_landable_index = (idx >= 0) ? (uint8_t)idx : 0u;
-    }
-
-    if ((s_nav.active_waypoint_index >= VARIO_NAV_MAX_USER_WAYPOINTS) ||
-        (s_nav.waypoints[s_nav.active_waypoint_index].valid == false))
-    {
-        int16_t idx = vario_nav_first_valid_index(s_nav.waypoints, VARIO_NAV_MAX_USER_WAYPOINTS);
-        s_nav.active_waypoint_index = (idx >= 0) ? (uint8_t)idx : 0u;
-    }
-
-    if ((s_nav.active_mark_index >= VARIO_NAV_MAX_MARKS) ||
-        (s_nav.marks[s_nav.active_mark_index].valid == false))
-    {
-        int16_t idx = vario_nav_first_valid_index(s_nav.marks, VARIO_NAV_MAX_MARKS);
-        s_nav.active_mark_index = (idx >= 0) ? (uint8_t)idx : 0u;
-    }
-}
-
 static float vario_nav_polar_sink_mps(const vario_settings_t *settings, float airspeed_mps)
 {
     float v1_mps;
@@ -404,16 +616,10 @@ static float vario_nav_polar_sink_mps(const vario_settings_t *settings, float ai
         return 1.0f;
     }
 
-    if (airspeed_mps <= v1_mps)
-    {
-        return s1_mps + ((airspeed_mps - v1_mps) * (s2_mps - s1_mps) / (v2_mps - v1_mps));
-    }
-
     if (airspeed_mps <= v2_mps)
     {
         return s1_mps + ((airspeed_mps - v1_mps) * (s2_mps - s1_mps) / (v2_mps - v1_mps));
     }
-
     if (airspeed_mps <= v3_mps)
     {
         return s2_mps + ((airspeed_mps - v2_mps) * (s3_mps - s2_mps) / (v3_mps - v2_mps));
@@ -501,258 +707,15 @@ static const char *vario_nav_source_name(vario_nav_target_source_t source)
         case VARIO_NAV_SOURCE_LAUNCH:
             return "LAUNCH";
         case VARIO_NAV_SOURCE_LANDABLE:
-            return "LANDABLE";
+            return "FIELD";
         case VARIO_NAV_SOURCE_USER_WP:
-            return "WAYPOINT";
+            return "POINT";
         case VARIO_NAV_SOURCE_MARK:
             return "MARK";
         case VARIO_NAV_SOURCE_NONE:
         default:
             return "OFF";
     }
-}
-
-static uint8_t vario_nav_page_item_count(vario_nav_page_t page)
-{
-    switch (page)
-    {
-        case VARIO_NAV_PAGE_HOME:
-            return 4u;
-        case VARIO_NAV_PAGE_LAUNCH:
-            return 3u;
-        case VARIO_NAV_PAGE_MARK_HERE:
-            return 4u;
-        case VARIO_NAV_PAGE_CLEAR_TARGET:
-            return 1u;
-        case VARIO_NAV_PAGE_NEARBY_LANDABLE:
-            return vario_nav_count_valid_points(s_nav.landables, VARIO_NAV_MAX_LANDABLES);
-        case VARIO_NAV_PAGE_USER_WAYPOINTS:
-            return (uint8_t)(vario_nav_count_valid_points(s_nav.waypoints, VARIO_NAV_MAX_USER_WAYPOINTS) +
-                             vario_nav_count_valid_points(s_nav.marks, VARIO_NAV_MAX_MARKS));
-        case VARIO_NAV_PAGE_NONE:
-        default:
-            return 0u;
-    }
-}
-
-static void vario_nav_clamp_cursor_to_page(void)
-{
-    uint8_t count;
-
-    count = vario_nav_page_item_count(s_nav.open_page);
-    if (count == 0u)
-    {
-        s_nav.cursor = 0u;
-    }
-    else if (s_nav.cursor >= count)
-    {
-        s_nav.cursor = (uint8_t)(count - 1u);
-    }
-}
-
-static bool vario_nav_get_list_point_by_page(vario_nav_page_t page,
-                                             uint8_t row,
-                                             vario_nav_point_t *out_point,
-                                             uint8_t *out_backing_index,
-                                             vario_nav_target_source_t *out_source)
-{
-    uint8_t i;
-    uint8_t seen;
-
-    if ((out_point == NULL) || (row >= vario_nav_page_item_count(page)))
-    {
-        return false;
-    }
-
-    memset(out_point, 0, sizeof(*out_point));
-    if (out_backing_index != NULL)
-    {
-        *out_backing_index = 0u;
-    }
-    if (out_source != NULL)
-    {
-        *out_source = VARIO_NAV_SOURCE_NONE;
-    }
-
-    seen = 0u;
-
-    if (page == VARIO_NAV_PAGE_NEARBY_LANDABLE)
-    {
-        for (i = 0u; i < VARIO_NAV_MAX_LANDABLES; ++i)
-        {
-            if (s_nav.landables[i].valid == false)
-            {
-                continue;
-            }
-            if (seen == row)
-            {
-                *out_point = s_nav.landables[i];
-                if (out_backing_index != NULL)
-                {
-                    *out_backing_index = i;
-                }
-                if (out_source != NULL)
-                {
-                    *out_source = VARIO_NAV_SOURCE_LANDABLE;
-                }
-                return true;
-            }
-            ++seen;
-        }
-    }
-    else if (page == VARIO_NAV_PAGE_USER_WAYPOINTS)
-    {
-        for (i = 0u; i < VARIO_NAV_MAX_USER_WAYPOINTS; ++i)
-        {
-            if (s_nav.waypoints[i].valid == false)
-            {
-                continue;
-            }
-            if (seen == row)
-            {
-                *out_point = s_nav.waypoints[i];
-                if (out_backing_index != NULL)
-                {
-                    *out_backing_index = i;
-                }
-                if (out_source != NULL)
-                {
-                    *out_source = VARIO_NAV_SOURCE_USER_WP;
-                }
-                return true;
-            }
-            ++seen;
-        }
-        for (i = 0u; i < VARIO_NAV_MAX_MARKS; ++i)
-        {
-            if (s_nav.marks[i].valid == false)
-            {
-                continue;
-            }
-            if (seen == row)
-            {
-                *out_point = s_nav.marks[i];
-                if (out_backing_index != NULL)
-                {
-                    *out_backing_index = i;
-                }
-                if (out_source != NULL)
-                {
-                    *out_source = VARIO_NAV_SOURCE_MARK;
-                }
-                return true;
-            }
-            ++seen;
-        }
-    }
-
-    return false;
-}
-
-static void vario_nav_sort_landable_rows(const vario_runtime_t *rt, uint8_t *order, uint8_t *out_count)
-{
-    uint8_t count;
-    uint8_t i;
-    uint8_t j;
-
-    count = 0u;
-    for (i = 0u; i < VARIO_NAV_MAX_LANDABLES; ++i)
-    {
-        if (s_nav.landables[i].valid != false)
-        {
-            order[count++] = i;
-        }
-    }
-
-    for (i = 0u; i < count; ++i)
-    {
-        for (j = (uint8_t)(i + 1u); j < count; ++j)
-        {
-            vario_nav_active_target_t target_a;
-            vario_nav_active_target_t target_b;
-            vario_nav_solution_t sol_a;
-            vario_nav_solution_t sol_b;
-            bool swap;
-
-            vario_nav_fill_runtime_target(&target_a, &s_nav.landables[order[i]]);
-            vario_nav_fill_runtime_target(&target_b, &s_nav.landables[order[j]]);
-            memset(&sol_a, 0, sizeof(sol_a));
-            memset(&sol_b, 0, sizeof(sol_b));
-            Vario_Navigation_ComputeSolutionForTarget(rt, &target_a, &sol_a);
-            Vario_Navigation_ComputeSolutionForTarget(rt, &target_b, &sol_b);
-
-            swap = false;
-            if ((sol_b.final_glide_valid != false) && (sol_a.final_glide_valid == false))
-            {
-                swap = true;
-            }
-            else if ((sol_b.final_glide_valid == sol_a.final_glide_valid) &&
-                     (sol_b.final_glide_valid != false) &&
-                     (sol_b.arrival_height_m > sol_a.arrival_height_m))
-            {
-                swap = true;
-            }
-            else if ((sol_b.final_glide_valid == sol_a.final_glide_valid) &&
-                     (fabsf(sol_b.arrival_height_m - sol_a.arrival_height_m) < 1.0f) &&
-                     (sol_b.distance_m < sol_a.distance_m))
-            {
-                swap = true;
-            }
-            else if ((sol_b.final_glide_valid == sol_a.final_glide_valid) &&
-                     (sol_b.valid != false) && (sol_a.valid != false) &&
-                     (sol_b.distance_m + 5.0f < sol_a.distance_m))
-            {
-                swap = true;
-            }
-
-            if (swap != false)
-            {
-                uint8_t tmp;
-                tmp = order[i];
-                order[i] = order[j];
-                order[j] = tmp;
-            }
-        }
-    }
-
-    if (out_count != NULL)
-    {
-        *out_count = count;
-    }
-}
-
-static bool vario_nav_get_page_row_point(vario_nav_page_t page,
-                                         const vario_runtime_t *rt,
-                                         uint8_t row,
-                                         vario_nav_point_t *out_point,
-                                         uint8_t *out_backing_index,
-                                         vario_nav_target_source_t *out_source)
-{
-    uint8_t order[VARIO_NAV_MAX_LANDABLES];
-    uint8_t count;
-
-    if (page == VARIO_NAV_PAGE_NEARBY_LANDABLE)
-    {
-        uint8_t sorted_index;
-        vario_nav_sort_landable_rows(rt, order, &count);
-        if ((row >= count) || (out_point == NULL))
-        {
-            return false;
-        }
-        sorted_index = order[row];
-        *out_point = s_nav.landables[sorted_index];
-        if (out_backing_index != NULL)
-        {
-            *out_backing_index = sorted_index;
-        }
-        if (out_source != NULL)
-        {
-            *out_source = VARIO_NAV_SOURCE_LANDABLE;
-        }
-        return true;
-    }
-
-    return vario_nav_get_list_point_by_page(page, row, out_point, out_backing_index, out_source);
 }
 
 bool Vario_Navigation_ComputeSolutionForTarget(const vario_runtime_t *rt,
@@ -877,6 +840,395 @@ bool Vario_Navigation_ComputeSolutionForTarget(const vario_runtime_t *rt,
     return true;
 }
 
+static void vario_nav_show_simple_toast(const char *text, uint32_t now_ms)
+{
+    UI_Toast_Show(text, NULL, 0u, 0u, now_ms, 1200u);
+}
+
+static void vario_nav_activate_point_source(vario_nav_target_source_t source,
+                                            uint8_t backing_index,
+                                            uint32_t now_ms)
+{
+    char toast[48];
+    const vario_nav_point_t *point;
+
+    if (source == VARIO_NAV_SOURCE_LANDABLE)
+    {
+        s_nav.active_landable_index = backing_index;
+    }
+    else if (source == VARIO_NAV_SOURCE_USER_WP)
+    {
+        s_nav.active_waypoint_index = backing_index;
+    }
+    else if (source == VARIO_NAV_SOURCE_MARK)
+    {
+        s_nav.active_mark_index = backing_index;
+    }
+
+    s_nav.active_source = source;
+    point = vario_nav_get_point_for_source(source);
+    if ((point != NULL) && (point->name[0] != '\0'))
+    {
+        snprintf(toast, sizeof(toast), "Target: %s", point->name);
+    }
+    else
+    {
+        snprintf(toast, sizeof(toast), "Target: %s", vario_nav_source_name(source));
+    }
+    vario_nav_show_simple_toast(toast, now_ms);
+}
+
+static void vario_nav_set_home_from_point(const vario_nav_point_t *point, uint32_t now_ms, bool persist_active_site)
+{
+    if ((point == NULL) || (point->valid == false))
+    {
+        return;
+    }
+
+    s_nav.home = *point;
+    s_nav.home.kind = VARIO_NAV_TARGET_KIND_HOME;
+    s_nav.home.has_elevation = true;
+    s_nav.home.id = s_nav.next_id++;
+    vario_nav_copy_name(s_nav.home.name, sizeof(s_nav.home.name), "HOME");
+    if (persist_active_site != false)
+    {
+        (void)vario_nav_save_active_site();
+    }
+    vario_nav_show_simple_toast("Home updated", now_ms);
+}
+
+static void vario_nav_save_last_landing_as_field(uint32_t now_ms)
+{
+    vario_nav_point_t point;
+
+    if (s_nav.last_landing.valid == false)
+    {
+        return;
+    }
+
+    point = s_nav.last_landing;
+    point.kind = VARIO_NAV_TARGET_KIND_LANDABLE;
+    point.has_elevation = true;
+    point.id = s_nav.next_id++;
+    vario_nav_make_name(point.name, sizeof(point.name), "FIELD", s_nav.next_field_index++);
+    vario_nav_store_point(s_nav.landables, VARIO_NAV_MAX_LANDABLES, &point, &s_nav.active_landable_index);
+    (void)vario_nav_save_active_site();
+    vario_nav_show_simple_toast("Saved as field", now_ms);
+}
+
+static void vario_nav_save_current_here(uint8_t action_row, uint32_t now_ms)
+{
+    const vario_runtime_t *rt;
+    vario_nav_point_t point;
+
+    rt = Vario_State_GetRuntime();
+    if (rt == NULL)
+    {
+        return;
+    }
+
+    if (action_row == 0u)
+    {
+        vario_nav_make_name(point.name, sizeof(point.name), "PT", s_nav.next_wp_index);
+        if (vario_nav_capture_runtime_point(rt,
+                                            &point,
+                                            VARIO_NAV_TARGET_KIND_USER_WP,
+                                            true,
+                                            point.name) != false)
+        {
+            ++s_nav.next_wp_index;
+            vario_nav_store_point(s_nav.waypoints,
+                                  VARIO_NAV_MAX_USER_WAYPOINTS,
+                                  &point,
+                                  &s_nav.active_waypoint_index);
+            (void)vario_nav_save_active_site();
+            vario_nav_activate_point_source(VARIO_NAV_SOURCE_USER_WP,
+                                            s_nav.active_waypoint_index,
+                                            now_ms);
+        }
+    }
+    else if (action_row == 1u)
+    {
+        vario_nav_make_name(point.name, sizeof(point.name), "FIELD", s_nav.next_field_index);
+        if (vario_nav_capture_runtime_point(rt,
+                                            &point,
+                                            VARIO_NAV_TARGET_KIND_LANDABLE,
+                                            true,
+                                            point.name) != false)
+        {
+            ++s_nav.next_field_index;
+            vario_nav_store_point(s_nav.landables,
+                                  VARIO_NAV_MAX_LANDABLES,
+                                  &point,
+                                  &s_nav.active_landable_index);
+            (void)vario_nav_save_active_site();
+            vario_nav_activate_point_source(VARIO_NAV_SOURCE_LANDABLE,
+                                            s_nav.active_landable_index,
+                                            now_ms);
+        }
+    }
+    else if (action_row == 2u)
+    {
+        if (vario_nav_capture_runtime_point(rt,
+                                            &point,
+                                            VARIO_NAV_TARGET_KIND_HOME,
+                                            true,
+                                            "HOME") != false)
+        {
+            vario_nav_set_home_from_point(&point, now_ms, true);
+            s_nav.active_source = VARIO_NAV_SOURCE_HOME;
+        }
+    }
+    else if (action_row == 3u)
+    {
+        vario_nav_make_name(point.name, sizeof(point.name), "MARK", s_nav.next_mark_index);
+        if (vario_nav_capture_runtime_point(rt,
+                                            &point,
+                                            VARIO_NAV_TARGET_KIND_MARK,
+                                            false,
+                                            point.name) != false)
+        {
+            ++s_nav.next_mark_index;
+            vario_nav_store_point(s_nav.marks,
+                                  VARIO_NAV_MAX_MARKS,
+                                  &point,
+                                  &s_nav.active_mark_index);
+            vario_nav_activate_point_source(VARIO_NAV_SOURCE_MARK,
+                                            s_nav.active_mark_index,
+                                            now_ms);
+        }
+    }
+}
+
+static void vario_nav_use_selected_site(uint8_t site_index, uint32_t now_ms)
+{
+    s_nav.active_site_index = site_index;
+    (void)Vario_Persistence_SetActiveSiteIndex(site_index);
+    (void)vario_nav_load_site_to_nav(site_index);
+    vario_nav_sync_active_indexes();
+    vario_nav_refresh_site_summaries();
+
+    {
+        char toast[48];
+        snprintf(toast,
+                 sizeof(toast),
+                 "Site: %s",
+                 s_nav.site_summaries[site_index].site_name);
+        vario_nav_show_simple_toast(toast, now_ms);
+    }
+}
+
+static void vario_nav_prepare_name_editor(uint8_t site_index)
+{
+    const char *src;
+    uint8_t i;
+
+    src = s_nav.site_summaries[site_index].site_name;
+    memset(s_nav.name_edit_buffer, ' ', VARIO_NAV_NAME_EDITOR_MAX_CHARS);
+    s_nav.name_edit_buffer[VARIO_NAV_NAME_EDITOR_MAX_CHARS] = '\0';
+    for (i = 0u; (i < VARIO_NAV_NAME_EDITOR_MAX_CHARS) && (src[i] != '\0'); ++i)
+    {
+        s_nav.name_edit_buffer[i] = src[i];
+    }
+    s_nav.name_edit_active = true;
+    s_nav.name_edit_pos = 0u;
+    s_nav.open_page = VARIO_NAV_PAGE_SITE_NAME;
+}
+
+static const char *vario_nav_name_charset(void)
+{
+    return " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_";
+}
+
+static uint8_t vario_nav_page_item_count(vario_nav_page_t page)
+{
+    switch (page)
+    {
+        case VARIO_NAV_PAGE_HOME:
+            return 4u;
+        case VARIO_NAV_PAGE_LAUNCH:
+            return 3u;
+        case VARIO_NAV_PAGE_MARK_HERE:
+            return 4u;
+        case VARIO_NAV_PAGE_CLEAR_TARGET:
+            return 1u;
+        case VARIO_NAV_PAGE_SITE_DETAIL:
+            return 4u;
+        case VARIO_NAV_PAGE_SITE_SETS:
+            return Vario_Persistence_GetSiteCount();
+        case VARIO_NAV_PAGE_NEARBY_LANDABLE:
+            return vario_nav_count_valid_points(s_nav.landables, VARIO_NAV_MAX_LANDABLES);
+        case VARIO_NAV_PAGE_USER_WAYPOINTS:
+            return vario_nav_count_valid_points(s_nav.waypoints, VARIO_NAV_MAX_USER_WAYPOINTS);
+        case VARIO_NAV_PAGE_SITE_NAME:
+        case VARIO_NAV_PAGE_NONE:
+        default:
+            return 0u;
+    }
+}
+
+static void vario_nav_clamp_cursor_to_page(void)
+{
+    uint8_t count;
+
+    count = vario_nav_page_item_count(s_nav.open_page);
+    if (count == 0u)
+    {
+        s_nav.cursor = 0u;
+    }
+    else if (s_nav.cursor >= count)
+    {
+        s_nav.cursor = (uint8_t)(count - 1u);
+    }
+}
+
+static void vario_nav_sort_landable_rows(const vario_runtime_t *rt, uint8_t *order, uint8_t *out_count)
+{
+    uint8_t count;
+    uint8_t i;
+    uint8_t j;
+
+    count = 0u;
+    for (i = 0u; i < VARIO_NAV_MAX_LANDABLES; ++i)
+    {
+        if (s_nav.landables[i].valid != false)
+        {
+            order[count++] = i;
+        }
+    }
+
+    for (i = 0u; i < count; ++i)
+    {
+        for (j = (uint8_t)(i + 1u); j < count; ++j)
+        {
+            vario_nav_active_target_t target_a;
+            vario_nav_active_target_t target_b;
+            vario_nav_solution_t sol_a;
+            vario_nav_solution_t sol_b;
+            bool swap;
+
+            vario_nav_fill_runtime_target(&target_a, &s_nav.landables[order[i]]);
+            vario_nav_fill_runtime_target(&target_b, &s_nav.landables[order[j]]);
+            memset(&sol_a, 0, sizeof(sol_a));
+            memset(&sol_b, 0, sizeof(sol_b));
+            Vario_Navigation_ComputeSolutionForTarget(rt, &target_a, &sol_a);
+            Vario_Navigation_ComputeSolutionForTarget(rt, &target_b, &sol_b);
+
+            swap = false;
+            if ((sol_b.final_glide_valid != false) && (sol_a.final_glide_valid == false))
+            {
+                swap = true;
+            }
+            else if ((sol_b.final_glide_valid == sol_a.final_glide_valid) &&
+                     (sol_b.final_glide_valid != false) &&
+                     (sol_b.arrival_height_m > sol_a.arrival_height_m))
+            {
+                swap = true;
+            }
+            else if ((sol_b.final_glide_valid == sol_a.final_glide_valid) &&
+                     (fabsf(sol_b.arrival_height_m - sol_a.arrival_height_m) < 1.0f) &&
+                     (sol_b.distance_m < sol_a.distance_m))
+            {
+                swap = true;
+            }
+            else if ((sol_b.final_glide_valid == sol_a.final_glide_valid) &&
+                     (sol_b.valid != false) && (sol_a.valid != false) &&
+                     (sol_b.distance_m + 5.0f < sol_a.distance_m))
+            {
+                swap = true;
+            }
+
+            if (swap != false)
+            {
+                uint8_t tmp;
+                tmp = order[i];
+                order[i] = order[j];
+                order[j] = tmp;
+            }
+        }
+    }
+
+    if (out_count != NULL)
+    {
+        *out_count = count;
+    }
+}
+
+static bool vario_nav_get_page_row_point(vario_nav_page_t page,
+                                         const vario_runtime_t *rt,
+                                         uint8_t row,
+                                         vario_nav_point_t *out_point,
+                                         uint8_t *out_backing_index,
+                                         vario_nav_target_source_t *out_source)
+{
+    uint8_t i;
+    uint8_t seen;
+    uint8_t order[VARIO_NAV_MAX_LANDABLES];
+    uint8_t count;
+
+    if ((out_point == NULL) || (row >= vario_nav_page_item_count(page)))
+    {
+        return false;
+    }
+
+    memset(out_point, 0, sizeof(*out_point));
+    if (out_backing_index != NULL)
+    {
+        *out_backing_index = 0u;
+    }
+    if (out_source != NULL)
+    {
+        *out_source = VARIO_NAV_SOURCE_NONE;
+    }
+
+    if (page == VARIO_NAV_PAGE_NEARBY_LANDABLE)
+    {
+        vario_nav_sort_landable_rows(rt, order, &count);
+        if (row >= count)
+        {
+            return false;
+        }
+        *out_point = s_nav.landables[order[row]];
+        if (out_backing_index != NULL)
+        {
+            *out_backing_index = order[row];
+        }
+        if (out_source != NULL)
+        {
+            *out_source = VARIO_NAV_SOURCE_LANDABLE;
+        }
+        return true;
+    }
+
+    if (page == VARIO_NAV_PAGE_USER_WAYPOINTS)
+    {
+        seen = 0u;
+        for (i = 0u; i < VARIO_NAV_MAX_USER_WAYPOINTS; ++i)
+        {
+            if (s_nav.waypoints[i].valid == false)
+            {
+                continue;
+            }
+            if (seen == row)
+            {
+                *out_point = s_nav.waypoints[i];
+                if (out_backing_index != NULL)
+                {
+                    *out_backing_index = i;
+                }
+                if (out_source != NULL)
+                {
+                    *out_source = VARIO_NAV_SOURCE_USER_WP;
+                }
+                return true;
+            }
+            ++seen;
+        }
+    }
+
+    return false;
+}
+
 void Vario_Navigation_Init(void)
 {
     memset(&s_nav, 0, sizeof(s_nav));
@@ -886,16 +1238,28 @@ void Vario_Navigation_Init(void)
     s_nav.next_field_index = 1u;
     s_nav.next_mark_index = 1u;
     s_nav.active_source = VARIO_NAV_SOURCE_NONE;
+    s_nav.active_site_index = 0u;
+    s_nav.detail_site_index = 0u;
+
+    (void)Vario_Persistence_Init();
+    s_nav.active_site_index = Vario_Persistence_GetActiveSiteIndex();
+    vario_nav_refresh_site_summaries();
+    (void)vario_nav_load_site_to_nav(s_nav.active_site_index);
+    vario_nav_sync_active_indexes();
 }
 
 void Vario_Navigation_ResetFlightRam(void)
 {
-    s_nav.launch.valid = false;
-    s_nav.last_landing.valid = false;
+    memset(&s_nav.launch, 0, sizeof(s_nav.launch));
+    memset(&s_nav.last_landing, 0, sizeof(s_nav.last_landing));
+    memset(s_nav.marks, 0, sizeof(s_nav.marks));
     s_nav.open_page = VARIO_NAV_PAGE_NONE;
     s_nav.cursor = 0u;
+    s_nav.name_edit_active = false;
+    s_nav.name_edit_pos = 0u;
 
-    if (s_nav.active_source == VARIO_NAV_SOURCE_LAUNCH)
+    if ((s_nav.active_source == VARIO_NAV_SOURCE_LAUNCH) ||
+        (s_nav.active_source == VARIO_NAV_SOURCE_MARK))
     {
         s_nav.active_source = VARIO_NAV_SOURCE_NONE;
     }
@@ -1005,25 +1369,63 @@ void Vario_Navigation_ClearTarget(void)
 
 void Vario_Navigation_FormatActiveSourceToast(char *out_text, size_t out_size)
 {
+    const vario_nav_point_t *point;
+
     if ((out_text == NULL) || (out_size == 0u))
     {
         return;
     }
 
-    snprintf(out_text, out_size, "Target: %s", vario_nav_source_name(s_nav.active_source));
+    point = vario_nav_get_point_for_source(s_nav.active_source);
+    if ((point != NULL) && (point->name[0] != '\0'))
+    {
+        snprintf(out_text, out_size, "Target: %s", point->name);
+    }
+    else
+    {
+        snprintf(out_text, out_size, "Target: %s", vario_nav_source_name(s_nav.active_source));
+    }
 }
 
 void Vario_Navigation_OpenPage(vario_nav_page_t page)
 {
     s_nav.open_page = page;
     s_nav.cursor = 0u;
+    s_nav.name_edit_active = false;
+
+    if (page == VARIO_NAV_PAGE_SITE_SETS)
+    {
+        vario_nav_refresh_site_summaries();
+        s_nav.cursor = s_nav.active_site_index;
+    }
+    else if (page == VARIO_NAV_PAGE_SITE_DETAIL)
+    {
+        s_nav.cursor = 0u;
+    }
+
     vario_nav_clamp_cursor_to_page();
 }
 
 void Vario_Navigation_ClosePage(void)
 {
+    if (s_nav.open_page == VARIO_NAV_PAGE_SITE_NAME)
+    {
+        s_nav.name_edit_active = false;
+        s_nav.open_page = VARIO_NAV_PAGE_SITE_DETAIL;
+        s_nav.cursor = 1u;
+        return;
+    }
+
+    if (s_nav.open_page == VARIO_NAV_PAGE_SITE_DETAIL)
+    {
+        s_nav.open_page = VARIO_NAV_PAGE_SITE_SETS;
+        s_nav.cursor = s_nav.detail_site_index;
+        return;
+    }
+
     s_nav.open_page = VARIO_NAV_PAGE_NONE;
     s_nav.cursor = 0u;
+    s_nav.name_edit_active = false;
 }
 
 bool Vario_Navigation_IsPageOpen(void)
@@ -1040,6 +1442,11 @@ void Vario_Navigation_MoveCursor(int8_t direction)
 {
     uint8_t count;
     int16_t next;
+
+    if (s_nav.name_edit_active != false)
+    {
+        return;
+    }
 
     count = vario_nav_page_item_count(s_nav.open_page);
     if (count == 0u)
@@ -1059,159 +1466,6 @@ void Vario_Navigation_MoveCursor(int8_t direction)
     }
 
     s_nav.cursor = (uint8_t)next;
-}
-
-static void vario_nav_show_simple_toast(const char *text, uint32_t now_ms)
-{
-    UI_Toast_Show(text, NULL, 0u, 0u, now_ms, 1200u);
-}
-
-static void vario_nav_activate_point_source(vario_nav_target_source_t source,
-                                            uint8_t backing_index,
-                                            uint32_t now_ms)
-{
-    char toast[40];
-    const vario_nav_point_t *point;
-
-    if (source == VARIO_NAV_SOURCE_LANDABLE)
-    {
-        s_nav.active_landable_index = backing_index;
-    }
-    else if (source == VARIO_NAV_SOURCE_USER_WP)
-    {
-        s_nav.active_waypoint_index = backing_index;
-    }
-    else if (source == VARIO_NAV_SOURCE_MARK)
-    {
-        s_nav.active_mark_index = backing_index;
-    }
-
-    s_nav.active_source = source;
-    point = vario_nav_get_point_for_source(source);
-    if ((point != NULL) && (point->name[0] != '\0'))
-    {
-        snprintf(toast, sizeof(toast), "Target: %s", point->name);
-    }
-    else
-    {
-        snprintf(toast, sizeof(toast), "Target: %s", vario_nav_source_name(source));
-    }
-    vario_nav_show_simple_toast(toast, now_ms);
-}
-
-static void vario_nav_save_last_landing_as_field(uint32_t now_ms)
-{
-    vario_nav_point_t point;
-
-    if (s_nav.last_landing.valid == false)
-    {
-        return;
-    }
-
-    point = s_nav.last_landing;
-    point.kind = VARIO_NAV_TARGET_KIND_LANDABLE;
-    point.has_elevation = true;
-    point.id = s_nav.next_id++;
-    vario_nav_make_name(point.name, sizeof(point.name), "FIELD", s_nav.next_field_index++);
-    vario_nav_store_point(s_nav.landables, VARIO_NAV_MAX_LANDABLES, &point, &s_nav.active_landable_index);
-    vario_nav_show_simple_toast("Saved as field", now_ms);
-}
-
-static void vario_nav_set_home_from_point(const vario_nav_point_t *point, uint32_t now_ms)
-{
-    if ((point == NULL) || (point->valid == false))
-    {
-        return;
-    }
-
-    s_nav.home = *point;
-    s_nav.home.kind = VARIO_NAV_TARGET_KIND_HOME;
-    s_nav.home.has_elevation = true;
-    s_nav.home.id = s_nav.next_id++;
-    vario_nav_copy_name(s_nav.home.name, sizeof(s_nav.home.name), "HOME");
-    vario_nav_show_simple_toast("Home updated", now_ms);
-}
-
-static void vario_nav_save_current_here(uint8_t action_row, uint32_t now_ms)
-{
-    const vario_runtime_t *rt;
-    vario_nav_point_t point;
-
-    rt = Vario_State_GetRuntime();
-    if (rt == NULL)
-    {
-        return;
-    }
-
-    if (action_row == 0u)
-    {
-        vario_nav_make_name(point.name, sizeof(point.name), "WP", s_nav.next_wp_index);
-        if (vario_nav_capture_runtime_point(rt,
-                                            &point,
-                                            VARIO_NAV_TARGET_KIND_USER_WP,
-                                            true,
-                                            point.name) != false)
-        {
-            ++s_nav.next_wp_index;
-            vario_nav_store_point(s_nav.waypoints,
-                                  VARIO_NAV_MAX_USER_WAYPOINTS,
-                                  &point,
-                                  &s_nav.active_waypoint_index);
-            vario_nav_activate_point_source(VARIO_NAV_SOURCE_USER_WP,
-                                            s_nav.active_waypoint_index,
-                                            now_ms);
-        }
-    }
-    else if (action_row == 1u)
-    {
-        vario_nav_make_name(point.name, sizeof(point.name), "FIELD", s_nav.next_field_index);
-        if (vario_nav_capture_runtime_point(rt,
-                                            &point,
-                                            VARIO_NAV_TARGET_KIND_LANDABLE,
-                                            true,
-                                            point.name) != false)
-        {
-            ++s_nav.next_field_index;
-            vario_nav_store_point(s_nav.landables,
-                                  VARIO_NAV_MAX_LANDABLES,
-                                  &point,
-                                  &s_nav.active_landable_index);
-            vario_nav_activate_point_source(VARIO_NAV_SOURCE_LANDABLE,
-                                            s_nav.active_landable_index,
-                                            now_ms);
-        }
-    }
-    else if (action_row == 2u)
-    {
-        if (vario_nav_capture_runtime_point(rt,
-                                            &point,
-                                            VARIO_NAV_TARGET_KIND_HOME,
-                                            true,
-                                            "HOME") != false)
-        {
-            vario_nav_set_home_from_point(&point, now_ms);
-            s_nav.active_source = VARIO_NAV_SOURCE_HOME;
-        }
-    }
-    else if (action_row == 3u)
-    {
-        vario_nav_make_name(point.name, sizeof(point.name), "MARK", s_nav.next_mark_index);
-        if (vario_nav_capture_runtime_point(rt,
-                                            &point,
-                                            VARIO_NAV_TARGET_KIND_MARK,
-                                            false,
-                                            point.name) != false)
-        {
-            ++s_nav.next_mark_index;
-            vario_nav_store_point(s_nav.marks,
-                                  VARIO_NAV_MAX_MARKS,
-                                  &point,
-                                  &s_nav.active_mark_index);
-            vario_nav_activate_point_source(VARIO_NAV_SOURCE_MARK,
-                                            s_nav.active_mark_index,
-                                            now_ms);
-        }
-    }
 }
 
 void Vario_Navigation_ActivateSelected(uint32_t now_ms)
@@ -1247,7 +1501,7 @@ void Vario_Navigation_ActivateSelected(uint32_t now_ms)
             {
                 if (s_nav.launch.valid != false)
                 {
-                    vario_nav_set_home_from_point(&s_nav.launch, now_ms);
+                    vario_nav_set_home_from_point(&s_nav.launch, now_ms, true);
                 }
             }
             else if (s_nav.cursor == 3u)
@@ -1257,6 +1511,7 @@ void Vario_Navigation_ActivateSelected(uint32_t now_ms)
                 {
                     s_nav.active_source = VARIO_NAV_SOURCE_NONE;
                 }
+                (void)vario_nav_save_active_site();
                 vario_nav_show_simple_toast("Home cleared", now_ms);
             }
             break;
@@ -1285,6 +1540,7 @@ void Vario_Navigation_ActivateSelected(uint32_t now_ms)
                                           VARIO_NAV_MAX_LANDABLES,
                                           &point,
                                           &s_nav.active_landable_index);
+                    (void)vario_nav_save_active_site();
                     vario_nav_show_simple_toast("Launch saved as field", now_ms);
                 }
             }
@@ -1292,7 +1548,7 @@ void Vario_Navigation_ActivateSelected(uint32_t now_ms)
             {
                 if (s_nav.launch.valid != false)
                 {
-                    vario_nav_set_home_from_point(&s_nav.launch, now_ms);
+                    vario_nav_set_home_from_point(&s_nav.launch, now_ms, true);
                 }
             }
             break;
@@ -1325,6 +1581,64 @@ void Vario_Navigation_ActivateSelected(uint32_t now_ms)
             Vario_State_ReturnToMain();
             break;
 
+        case VARIO_NAV_PAGE_SITE_SETS:
+            s_nav.detail_site_index = s_nav.cursor;
+            s_nav.open_page = VARIO_NAV_PAGE_SITE_DETAIL;
+            s_nav.cursor = 0u;
+            break;
+
+        case VARIO_NAV_PAGE_SITE_DETAIL:
+            if (s_nav.cursor == 0u)
+            {
+                vario_nav_use_selected_site(s_nav.detail_site_index, now_ms);
+                Vario_Navigation_ClosePage();
+                Vario_Navigation_ClosePage();
+                Vario_State_ReturnToMain();
+            }
+            else if (s_nav.cursor == 1u)
+            {
+                vario_nav_prepare_name_editor(s_nav.detail_site_index);
+            }
+            else if (s_nav.cursor == 2u)
+            {
+                vario_persist_site_t site;
+                if ((rt != NULL) && (vario_nav_runtime_has_valid_gps(rt) != false))
+                {
+                    vario_nav_point_t home_point;
+                    if (Vario_Persistence_LoadSite(s_nav.detail_site_index, &site) == false)
+                    {
+                        memset(&site, 0, sizeof(site));
+                    }
+                    if (vario_nav_capture_runtime_point(rt, &home_point, VARIO_NAV_TARGET_KIND_HOME, true, "HOME") != false)
+                    {
+                        vario_nav_copy_to_persist(&site.home, &home_point);
+                        site.home.kind = VARIO_NAV_TARGET_KIND_HOME;
+                        site.home.has_elevation = true;
+                        if (s_nav.detail_site_index == s_nav.active_site_index)
+                        {
+                            vario_nav_set_home_from_point(&home_point, now_ms, true);
+                        }
+                        else if (Vario_Persistence_SaveSite(s_nav.detail_site_index, &site) != false)
+                        {
+                            vario_nav_refresh_site_summaries();
+                            vario_nav_show_simple_toast("Home updated", now_ms);
+                        }
+                    }
+                }
+            }
+            else if (s_nav.cursor == 3u)
+            {
+                UI_Confirm_Show("CLEAR SITE?",
+                                "DELETE HOME, FIELDS AND POINTS",
+                                "F1 = BACK",
+                                "F2 = CLEAR",
+                                "F3 = CANCEL",
+                                (uint16_t)VARIO_NAV_CONFIRM_CLEAR_SITE,
+                                now_ms);
+            }
+            break;
+
+        case VARIO_NAV_PAGE_SITE_NAME:
         case VARIO_NAV_PAGE_NONE:
         default:
             break;
@@ -1367,6 +1681,11 @@ void Vario_Navigation_HandleMenuAction(uint16_t action_id, uint32_t now_ms)
             Vario_State_EnterSettings();
             break;
 
+        case VARIO_NAV_MENU_ACTION_SITE_SETS:
+            Vario_Navigation_OpenPage(VARIO_NAV_PAGE_SITE_SETS);
+            Vario_State_EnterSettings();
+            break;
+
         case VARIO_NAV_MENU_ACTION_NONE:
         default:
             break;
@@ -1375,32 +1694,142 @@ void Vario_Navigation_HandleMenuAction(uint16_t action_id, uint32_t now_ms)
 
 bool Vario_Navigation_HasConfirmHandler(uint16_t context_id)
 {
-    return (context_id == (uint16_t)VARIO_NAV_CONFIRM_LANDING_SAVE) ? true : false;
+    return ((context_id == (uint16_t)VARIO_NAV_CONFIRM_LANDING_SAVE) ||
+            (context_id == (uint16_t)VARIO_NAV_CONFIRM_CLEAR_SITE)) ? true : false;
 }
 
 void Vario_Navigation_HandleConfirmChoice(uint16_t context_id, uint8_t button_id, uint32_t now_ms)
 {
-    if (context_id != (uint16_t)VARIO_NAV_CONFIRM_LANDING_SAVE)
+    if (context_id == (uint16_t)VARIO_NAV_CONFIRM_LANDING_SAVE)
+    {
+        if (button_id == 1u)
+        {
+            vario_nav_show_simple_toast("Landing noted", now_ms);
+        }
+        else if (button_id == 2u)
+        {
+            vario_nav_save_last_landing_as_field(now_ms);
+        }
+        else if (button_id == 3u)
+        {
+            if (s_nav.last_landing.valid != false)
+            {
+                vario_nav_set_home_from_point(&s_nav.last_landing, now_ms, true);
+                s_nav.active_source = VARIO_NAV_SOURCE_HOME;
+            }
+        }
+        return;
+    }
+
+    if (context_id == (uint16_t)VARIO_NAV_CONFIRM_CLEAR_SITE)
+    {
+        if (button_id == 2u)
+        {
+            (void)Vario_Persistence_ClearSite(s_nav.detail_site_index, true);
+            vario_nav_refresh_site_summaries();
+            if (s_nav.detail_site_index == s_nav.active_site_index)
+            {
+                (void)vario_nav_load_site_to_nav(s_nav.active_site_index);
+                vario_nav_sync_active_indexes();
+            }
+            vario_nav_show_simple_toast("Site cleared", now_ms);
+        }
+        return;
+    }
+}
+
+bool Vario_Navigation_IsNameEditActive(void)
+{
+    return s_nav.name_edit_active;
+}
+
+void Vario_Navigation_NameEdit_AdjustChar(int8_t direction)
+{
+    const char *charset;
+    const char *found;
+    char current;
+    size_t len;
+    int32_t index;
+
+    if ((s_nav.name_edit_active == false) || (s_nav.name_edit_pos >= VARIO_NAV_NAME_EDITOR_MAX_CHARS))
     {
         return;
     }
 
-    if (button_id == 1u)
+    charset = vario_nav_name_charset();
+    len = strlen(charset);
+    current = s_nav.name_edit_buffer[s_nav.name_edit_pos];
+    found = strchr(charset, current);
+    index = (found != NULL) ? (int32_t)(found - charset) : 0;
+    index += (direction >= 0) ? 1 : -1;
+    if (index < 0)
     {
-        vario_nav_show_simple_toast("Landing noted", now_ms);
+        index = (int32_t)len - 1;
     }
-    else if (button_id == 2u)
+    else if (index >= (int32_t)len)
     {
-        vario_nav_save_last_landing_as_field(now_ms);
+        index = 0;
     }
-    else if (button_id == 3u)
+    s_nav.name_edit_buffer[s_nav.name_edit_pos] = charset[index];
+}
+
+void Vario_Navigation_NameEdit_MoveCursor(int8_t direction)
+{
+    int16_t next;
+
+    if (s_nav.name_edit_active == false)
     {
-        if (s_nav.last_landing.valid != false)
-        {
-            vario_nav_set_home_from_point(&s_nav.last_landing, now_ms);
-            s_nav.active_source = VARIO_NAV_SOURCE_HOME;
-        }
+        return;
     }
+
+    next = (int16_t)s_nav.name_edit_pos + ((direction >= 0) ? 1 : -1);
+    if (next < 0)
+    {
+        next = VARIO_NAV_NAME_EDITOR_MAX_CHARS - 1;
+    }
+    else if (next >= (int16_t)VARIO_NAV_NAME_EDITOR_MAX_CHARS)
+    {
+        next = 0;
+    }
+    s_nav.name_edit_pos = (uint8_t)next;
+}
+
+void Vario_Navigation_NameEdit_Save(uint32_t now_ms)
+{
+    char trimmed[VARIO_NAV_NAME_MAX];
+    size_t len;
+
+    if (s_nav.name_edit_active == false)
+    {
+        return;
+    }
+
+    memset(trimmed, 0, sizeof(trimmed));
+    vario_nav_copy_name(trimmed, sizeof(trimmed), s_nav.name_edit_buffer);
+    len = strlen(trimmed);
+    while ((len > 0u) && (trimmed[len - 1u] == ' '))
+    {
+        trimmed[len - 1u] = '\0';
+        --len;
+    }
+    if (trimmed[0] == '\0')
+    {
+        snprintf(trimmed, sizeof(trimmed), "SITE %02u", (unsigned)(s_nav.detail_site_index + 1u));
+    }
+
+    if (Vario_Persistence_RenameSite(s_nav.detail_site_index, trimmed) != false)
+    {
+        vario_nav_refresh_site_summaries();
+        vario_nav_show_simple_toast("Site renamed", now_ms);
+    }
+    else
+    {
+        vario_nav_show_simple_toast("Name not saved", now_ms);
+    }
+
+    s_nav.name_edit_active = false;
+    s_nav.open_page = VARIO_NAV_PAGE_SITE_DETAIL;
+    s_nav.cursor = 1u;
 }
 
 static void vario_nav_format_solution_subtitle(char *buf,
@@ -1641,11 +2070,83 @@ static void vario_nav_get_page_title(char *title, size_t title_size)
         case VARIO_NAV_PAGE_CLEAR_TARGET:
             snprintf(title, title_size, "CLEAR TARGET");
             break;
+        case VARIO_NAV_PAGE_SITE_SETS:
+            snprintf(title, title_size, "SITE SETS");
+            break;
+        case VARIO_NAV_PAGE_SITE_DETAIL:
+            snprintf(title, title_size, "%s", s_nav.site_summaries[s_nav.detail_site_index].site_name);
+            break;
+        case VARIO_NAV_PAGE_SITE_NAME:
+            snprintf(title, title_size, "SITE NAME");
+            break;
         case VARIO_NAV_PAGE_NONE:
         default:
             snprintf(title, title_size, "NAV");
             break;
     }
+}
+
+static void vario_nav_format_site_counts(uint8_t site_index, char *out_text, size_t out_size)
+{
+    const vario_persist_site_summary_t *sum;
+
+    if ((out_text == NULL) || (out_size == 0u))
+    {
+        return;
+    }
+
+    sum = &s_nav.site_summaries[site_index];
+    snprintf(out_text,
+             out_size,
+             "H%u L%u P%u",
+             (sum->home_valid != false) ? 1u : 0u,
+             (unsigned)sum->landing_count,
+             (unsigned)sum->waypoint_count);
+}
+
+static void vario_nav_draw_site_name_editor(u8g2_t *u8g2, const vario_viewport_t *v)
+{
+    int16_t box_x;
+    int16_t box_y;
+    int16_t box_w;
+    int16_t box_h;
+    int16_t cx;
+    uint8_t i;
+    char subtitle[24];
+    char one[2];
+
+    snprintf(subtitle, sizeof(subtitle), "SITE %02u", (unsigned)(s_nav.detail_site_index + 1u));
+    Vario_Display_DrawPageTitle(u8g2, v, "SITE NAME", subtitle);
+
+    box_w = (int16_t)(v->w - 12);
+    box_h = 34;
+    box_x = (int16_t)(v->x + 6);
+    box_y = (int16_t)(v->y + 28);
+    cx = (int16_t)(box_x + (box_w / 2));
+
+    u8g2_DrawFrame(u8g2, (u8g2_uint_t)box_x, (u8g2_uint_t)box_y, (u8g2_uint_t)box_w, (u8g2_uint_t)box_h);
+    Vario_Display_DrawTextCentered(u8g2, cx, (int16_t)(box_y + 10), "F2/F3 CHAR   F4/F5 MOVE");
+
+    one[1] = '\0';
+    for (i = 0u; i < VARIO_NAV_NAME_EDITOR_MAX_CHARS; ++i)
+    {
+        int16_t cell_x;
+        cell_x = (int16_t)(box_x + 8 + ((int16_t)i * 19));
+        if (i == s_nav.name_edit_pos)
+        {
+            u8g2_DrawBox(u8g2, (u8g2_uint_t)cell_x, (u8g2_uint_t)(box_y + 14), (u8g2_uint_t)16, (u8g2_uint_t)12);
+            u8g2_SetDrawColor(u8g2, 0);
+        }
+        else
+        {
+            u8g2_DrawFrame(u8g2, (u8g2_uint_t)cell_x, (u8g2_uint_t)(box_y + 14), (u8g2_uint_t)16, (u8g2_uint_t)12);
+        }
+        one[0] = s_nav.name_edit_buffer[i];
+        Vario_Display_DrawTextCentered(u8g2, (int16_t)(cell_x + 8), (int16_t)(box_y + 23), one);
+        u8g2_SetDrawColor(u8g2, 1);
+    }
+
+    Vario_Display_DrawTextCentered(u8g2, cx, (int16_t)(box_y + 48), "PRESS F6 TO SAVE");
 }
 
 void Vario_Navigation_RenderSettingPage(u8g2_t *u8g2)
@@ -1725,6 +2226,28 @@ void Vario_Navigation_RenderSettingPage(u8g2_t *u8g2)
     {
         snprintf(subtitle, sizeof(subtitle), "%s", vario_nav_source_name(s_nav.active_source));
     }
+    else if (s_nav.open_page == VARIO_NAV_PAGE_SITE_SETS)
+    {
+        snprintf(subtitle,
+                 sizeof(subtitle),
+                 "ACTIVE %02u %s",
+                 (unsigned)(s_nav.active_site_index + 1u),
+                 s_nav.site_summaries[s_nav.active_site_index].site_name);
+    }
+    else if (s_nav.open_page == VARIO_NAV_PAGE_SITE_DETAIL)
+    {
+        vario_nav_format_site_counts(s_nav.detail_site_index, subtitle, sizeof(subtitle));
+    }
+    else if (s_nav.open_page == VARIO_NAV_PAGE_SITE_NAME)
+    {
+        snprintf(subtitle, sizeof(subtitle), "EDIT NAME");
+    }
+
+    if (s_nav.open_page == VARIO_NAV_PAGE_SITE_NAME)
+    {
+        vario_nav_draw_site_name_editor(u8g2, v);
+        return;
+    }
 
     Vario_Display_DrawPageTitle(u8g2, v, title, subtitle);
 
@@ -1750,7 +2273,7 @@ void Vario_Navigation_RenderSettingPage(u8g2_t *u8g2)
 
     if (s_nav.open_page == VARIO_NAV_PAGE_MARK_HERE)
     {
-        Vario_Display_DrawMenuRow(u8g2, v, vario_nav_get_row_baseline(v, 0u), (s_nav.cursor == 0u), "Save as WP", "SAVE");
+        Vario_Display_DrawMenuRow(u8g2, v, vario_nav_get_row_baseline(v, 0u), (s_nav.cursor == 0u), "Save as Point", "SAVE");
         Vario_Display_DrawMenuRow(u8g2, v, vario_nav_get_row_baseline(v, 1u), (s_nav.cursor == 1u), "Save as Field", "SAVE");
         Vario_Display_DrawMenuRow(u8g2, v, vario_nav_get_row_baseline(v, 2u), (s_nav.cursor == 2u), "Set Home Here", "HOME");
         Vario_Display_DrawMenuRow(u8g2, v, vario_nav_get_row_baseline(v, 3u), (s_nav.cursor == 3u), "Use as Target", "MARK");
@@ -1760,6 +2283,33 @@ void Vario_Navigation_RenderSettingPage(u8g2_t *u8g2)
     if (s_nav.open_page == VARIO_NAV_PAGE_CLEAR_TARGET)
     {
         Vario_Display_DrawMenuRow(u8g2, v, vario_nav_get_row_baseline(v, 0u), true, "Clear Active Target", "CLEAR");
+        return;
+    }
+
+    if (s_nav.open_page == VARIO_NAV_PAGE_SITE_DETAIL)
+    {
+        Vario_Display_DrawMenuRow(u8g2, v, vario_nav_get_row_baseline(v, 0u), (s_nav.cursor == 0u), "Use This Site", "OPEN");
+        Vario_Display_DrawMenuRow(u8g2, v, vario_nav_get_row_baseline(v, 1u), (s_nav.cursor == 1u), "Rename Site", "EDIT");
+        Vario_Display_DrawMenuRow(u8g2, v, vario_nav_get_row_baseline(v, 2u), (s_nav.cursor == 2u), "Set Home Here", "GPS");
+        Vario_Display_DrawMenuRow(u8g2, v, vario_nav_get_row_baseline(v, 3u), (s_nav.cursor == 3u), "Clear Site", "CLEAR");
+        return;
+    }
+
+    if (s_nav.open_page == VARIO_NAV_PAGE_SITE_SETS)
+    {
+        for (row = 0u; row < rows; ++row)
+        {
+            uint8_t site_index;
+            char counts[20];
+            site_index = (uint8_t)(start + row);
+            vario_nav_format_site_counts(site_index, counts, sizeof(counts));
+            Vario_Display_DrawMenuRow(u8g2,
+                                      v,
+                                      vario_nav_get_row_baseline(v, row),
+                                      (site_index == s_nav.cursor),
+                                      s_nav.site_summaries[site_index].site_name,
+                                      counts);
+        }
         return;
     }
 

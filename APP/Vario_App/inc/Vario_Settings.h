@@ -456,6 +456,8 @@ typedef struct
 } vario_settings_t;
 
 void Vario_Settings_Init(void);
+void Vario_Settings_Task(uint32_t now_ms);
+void Vario_Settings_SaveNow(void);
 const vario_settings_t *Vario_Settings_Get(void);
 
 /* -------------------------------------------------------------------------- */

@@ -1973,6 +1973,7 @@ void Vario_State_Task(uint32_t now_ms)
     vario_state_update_trail();
     vario_state_publish_5hz(now_ms);
     Vario_GlideComputer_Update(&s_vario_state.runtime, Vario_Settings_Get(), now_ms);
+    Vario_Settings_Task(now_ms);
 
     s_vario_state.runtime.last_task_ms = now_ms;
 }

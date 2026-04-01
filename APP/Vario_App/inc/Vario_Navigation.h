@@ -49,7 +49,10 @@ typedef enum
     VARIO_NAV_PAGE_NEARBY_LANDABLE,
     VARIO_NAV_PAGE_USER_WAYPOINTS,
     VARIO_NAV_PAGE_MARK_HERE,
-    VARIO_NAV_PAGE_CLEAR_TARGET
+    VARIO_NAV_PAGE_CLEAR_TARGET,
+    VARIO_NAV_PAGE_SITE_SETS,
+    VARIO_NAV_PAGE_SITE_DETAIL,
+    VARIO_NAV_PAGE_SITE_NAME
 } vario_nav_page_t;
 
 typedef enum
@@ -60,13 +63,15 @@ typedef enum
     VARIO_NAV_MENU_ACTION_NEARBY_LANDABLE,
     VARIO_NAV_MENU_ACTION_USER_WAYPOINTS,
     VARIO_NAV_MENU_ACTION_MARK_HERE,
-    VARIO_NAV_MENU_ACTION_CLEAR_TARGET
+    VARIO_NAV_MENU_ACTION_CLEAR_TARGET,
+    VARIO_NAV_MENU_ACTION_SITE_SETS
 } vario_nav_menu_action_t;
 
 typedef enum
 {
     VARIO_NAV_CONFIRM_NONE = 0u,
-    VARIO_NAV_CONFIRM_LANDING_SAVE = 1u
+    VARIO_NAV_CONFIRM_LANDING_SAVE = 1u,
+    VARIO_NAV_CONFIRM_CLEAR_SITE = 2u
 } vario_nav_confirm_context_t;
 
 typedef struct
@@ -133,6 +138,11 @@ void Vario_Navigation_HandleMenuAction(uint16_t action_id, uint32_t now_ms);
 
 bool Vario_Navigation_HasConfirmHandler(uint16_t context_id);
 void Vario_Navigation_HandleConfirmChoice(uint16_t context_id, uint8_t button_id, uint32_t now_ms);
+
+bool Vario_Navigation_IsNameEditActive(void);
+void Vario_Navigation_NameEdit_AdjustChar(int8_t direction);
+void Vario_Navigation_NameEdit_MoveCursor(int8_t direction);
+void Vario_Navigation_NameEdit_Save(uint32_t now_ms);
 
 #ifdef __cplusplus
 }

@@ -3,12 +3,20 @@
 #include "../../inc/Vario_State.h"
 
 #include "APP_STATE.h"
+#include "Vario_Persistence.h"
+#include "main.h"
 
 #include <math.h>
 #include <stddef.h>
 #include <stdio.h>
 
 static vario_settings_t s_vario_settings;
+static bool s_vario_settings_dirty;
+static uint32_t s_vario_settings_dirty_since_ms;
+
+#ifndef VARIO_SETTINGS_SAVE_DEBOUNCE_MS
+#define VARIO_SETTINGS_SAVE_DEBOUNCE_MS 1500u
+#endif
 
 /* -------------------------------------------------------------------------- */
 /*  Manual QNH compatibility / ownership policy                               */
@@ -176,6 +184,10 @@ static const vario_menu_item_t s_vario_category_bluetooth_items[] = {
     VARIO_MENU_ITEM_BT_AUTOPING,
 };
 
+static void vario_settings_store_manual_qnh_to_app_state(int32_t qnh_hpa_x100);
+static void vario_settings_store_pressure_correction_to_app_state(int32_t correction_hpa_x100);
+static void vario_settings_store_imu_assist_to_app_state(bool enabled);
+
 static int32_t vario_settings_clamp_s32(int32_t value, int32_t min_v, int32_t max_v)
 {
     if (value < min_v)
@@ -196,6 +208,25 @@ static int32_t vario_settings_clamp_manual_qnh_x100(int32_t qnh_hpa_x100)
     return vario_settings_clamp_s32(qnh_hpa_x100,
                                     VARIO_SETTINGS_QNH_RUNTIME_MIN_HPA_X100,
                                     VARIO_SETTINGS_QNH_RUNTIME_MAX_HPA_X100);
+}
+
+static void vario_settings_mark_dirty(void)
+{
+    s_vario_settings_dirty = true;
+    s_vario_settings_dirty_since_ms = HAL_GetTick();
+}
+
+static void vario_settings_apply_loaded_persistent_mirrors(void)
+{
+    /* ------------------------------------------------------------------ */
+    /*  settings blob 안에는 QNH / pressure correction / IMU assist도      */
+    /*  함께 저장된다. 다만 이 세 값의 canonical owner는 APP_STATE 쪽이라    */
+    /*  load 직후 다시 APP_STATE snapshot으로 밀어 넣어 source-of-truth를    */
+    /*  일치시킨다.                                                         */
+    /* ------------------------------------------------------------------ */
+    vario_settings_store_manual_qnh_to_app_state(s_vario_settings.qnh_hpa_x100);
+    vario_settings_store_pressure_correction_to_app_state(s_vario_settings.pressure_correction_hpa_x100);
+    vario_settings_store_imu_assist_to_app_state((s_vario_settings.imu_assist_mode != VARIO_IMU_ASSIST_OFF) ? true : false);
 }
 
 static int32_t vario_settings_read_manual_qnh_from_app_state(void)
@@ -1044,6 +1075,62 @@ void Vario_Settings_Init(void)
 
     vario_settings_sanitize_audio_thresholds();
     vario_settings_sanitize_glide_computer();
+
+    /* ------------------------------------------------------------------ */
+    /*  persistent override load                                            */
+    /*  - flash가 준비되어 있으면 마지막 정상 저장본을 읽어 defaults 위에      */
+    /*    덮어쓴다.                                                         */
+    /*  - blob load가 실패하면 현재 default 값을 그대로 사용한다.            */
+    /* ------------------------------------------------------------------ */
+    (void)Vario_Persistence_Init();
+    if (Vario_Persistence_LoadSettings(&s_vario_settings) != false)
+    {
+        vario_settings_sanitize_audio_thresholds();
+        vario_settings_sanitize_glide_computer();
+    }
+
+    vario_settings_apply_loaded_persistent_mirrors();
+    s_vario_settings_dirty = false;
+    s_vario_settings_dirty_since_ms = 0u;
+}
+
+void Vario_Settings_Task(uint32_t now_ms)
+{
+    if (s_vario_settings_dirty == false)
+    {
+        return;
+    }
+
+    if ((uint32_t)(now_ms - s_vario_settings_dirty_since_ms) < VARIO_SETTINGS_SAVE_DEBOUNCE_MS)
+    {
+        return;
+    }
+
+    if (Vario_Persistence_SaveSettings(&s_vario_settings) != false)
+    {
+        s_vario_settings_dirty = false;
+    }
+    else
+    {
+        /* -------------------------------------------------------------- */
+        /*  flash가 일시적으로 준비되지 않았더라도 dirty flag를 유지해서      */
+        /*  다음 주기에서 다시 저장을 시도한다.                              */
+        /* -------------------------------------------------------------- */
+        s_vario_settings_dirty_since_ms = now_ms;
+    }
+}
+
+void Vario_Settings_SaveNow(void)
+{
+    if (Vario_Persistence_SaveSettings(&s_vario_settings) != false)
+    {
+        s_vario_settings_dirty = false;
+    }
+    else
+    {
+        s_vario_settings_dirty = true;
+        s_vario_settings_dirty_since_ms = HAL_GetTick();
+    }
 }
 
 const vario_settings_t *Vario_Settings_Get(void)
@@ -1069,6 +1156,8 @@ int32_t Vario_Settings_GetManualQnhHpaX100(void)
 void Vario_Settings_SetManualQnhHpaX100(int32_t qnh_hpa_x100)
 {
     vario_settings_store_manual_qnh_to_app_state(qnh_hpa_x100);
+    s_vario_settings.qnh_hpa_x100 = vario_settings_read_manual_qnh_from_app_state();
+    vario_settings_mark_dirty();
 }
 
 int32_t Vario_Settings_GetPressureCorrectionHpaX100(void)
@@ -1080,6 +1169,8 @@ int32_t Vario_Settings_GetPressureCorrectionHpaX100(void)
 void Vario_Settings_SetPressureCorrectionHpaX100(int32_t correction_hpa_x100)
 {
     vario_settings_store_pressure_correction_to_app_state(correction_hpa_x100);
+    s_vario_settings.pressure_correction_hpa_x100 = vario_settings_read_pressure_correction_from_app_state();
+    vario_settings_mark_dirty();
 }
 
 void Vario_Settings_AdjustQuickSet(vario_quickset_item_t item, int8_t direction)
@@ -1383,6 +1474,20 @@ void Vario_Settings_AdjustQuickSet(vario_quickset_item_t item, int8_t direction)
         default:
             break;
     }
+
+    switch (item)
+    {
+        case VARIO_QUICKSET_ITEM_ALT2_CAPTURE:
+        case VARIO_QUICKSET_ITEM_ALT3_RESET:
+        case VARIO_QUICKSET_ITEM_ATTITUDE_RESET:
+        case VARIO_QUICKSET_ITEM_FLIGHT_RESET:
+            break;
+
+        case VARIO_QUICKSET_ITEM_COUNT:
+        default:
+            vario_settings_mark_dirty();
+            break;
+    }
 }
 
 void Vario_Settings_AdjustValue(vario_value_item_t item, int8_t direction)
@@ -1503,6 +1608,8 @@ void Vario_Settings_AdjustValue(vario_value_item_t item, int8_t direction)
         default:
             break;
     }
+
+    vario_settings_mark_dirty();
 }
 
 float Vario_Settings_PressureHpaToDisplayFloat(float pressure_hpa)

@@ -25,7 +25,8 @@ static const ui_menu_item_t s_nav_menu_items[] = {
     { "NEARBY LANDABLE",  (uint16_t)VARIO_NAV_MENU_ACTION_NEARBY_LANDABLE },
     { "USER WAYPOINTS",   (uint16_t)VARIO_NAV_MENU_ACTION_USER_WAYPOINTS },
     { "MARK HERE",        (uint16_t)VARIO_NAV_MENU_ACTION_MARK_HERE },
-    { "CLEAR TARGET",     (uint16_t)VARIO_NAV_MENU_ACTION_CLEAR_TARGET }
+    { "CLEAR TARGET",     (uint16_t)VARIO_NAV_MENU_ACTION_CLEAR_TARGET },
+    { "SITE SETS",        (uint16_t)VARIO_NAV_MENU_ACTION_SITE_SETS }
 };
 
 static void vario_button_show_qnh_toast(uint32_t now_ms)
@@ -232,10 +233,52 @@ static void vario_button_handle_menu_overlay(const button_event_t *event, uint32
 
 static void vario_button_handle_nav_page(const button_event_t *event, uint32_t now_ms)
 {
-    (void)now_ms;
-
     if ((event == NULL) || (event->type != BUTTON_EVENT_SHORT_PRESS))
     {
+        return;
+    }
+
+    if (Vario_Navigation_IsNameEditActive() != false)
+    {
+        switch (event->id)
+        {
+            case BUTTON_ID_1:
+                Vario_Navigation_ClosePage();
+                if (Vario_Navigation_IsPageOpen() == false)
+                {
+                    Vario_State_ReturnToMain();
+                }
+                Vario_State_RequestRedraw();
+                break;
+
+            case BUTTON_ID_2:
+                Vario_Navigation_NameEdit_AdjustChar(-1);
+                Vario_State_RequestRedraw();
+                break;
+
+            case BUTTON_ID_3:
+                Vario_Navigation_NameEdit_AdjustChar(+1);
+                Vario_State_RequestRedraw();
+                break;
+
+            case BUTTON_ID_4:
+                Vario_Navigation_NameEdit_MoveCursor(-1);
+                Vario_State_RequestRedraw();
+                break;
+
+            case BUTTON_ID_5:
+                Vario_Navigation_NameEdit_MoveCursor(+1);
+                Vario_State_RequestRedraw();
+                break;
+
+            case BUTTON_ID_6:
+                Vario_Navigation_NameEdit_Save(now_ms);
+                Vario_State_RequestRedraw();
+                break;
+
+            default:
+                break;
+        }
         return;
     }
 
@@ -243,7 +286,10 @@ static void vario_button_handle_nav_page(const button_event_t *event, uint32_t n
     {
         case BUTTON_ID_1:
             Vario_Navigation_ClosePage();
-            Vario_State_ReturnToMain();
+            if (Vario_Navigation_IsPageOpen() == false)
+            {
+                Vario_State_ReturnToMain();
+            }
             Vario_State_RequestRedraw();
             break;
 
@@ -681,12 +727,36 @@ void Vario_Button_GetButtonBar(vario_mode_t mode, vario_buttonbar_t *out_bar)
 
     if (UI_Confirm_IsVisible() != false)
     {
-        out_bar->f1 = "NO";
-        out_bar->f2 = "FIELD";
-        out_bar->f3 = "HOME";
-        out_bar->f4 = "-";
-        out_bar->f5 = "-";
-        out_bar->f6 = "HOLD";
+        switch ((vario_nav_confirm_context_t)UI_Confirm_GetContextId())
+        {
+            case VARIO_NAV_CONFIRM_LANDING_SAVE:
+                out_bar->f1 = "NO";
+                out_bar->f2 = "FIELD";
+                out_bar->f3 = "HOME";
+                out_bar->f4 = "-";
+                out_bar->f5 = "-";
+                out_bar->f6 = "HOLD";
+                break;
+
+            case VARIO_NAV_CONFIRM_CLEAR_SITE:
+                out_bar->f1 = "BACK";
+                out_bar->f2 = "CLEAR";
+                out_bar->f3 = "CANCEL";
+                out_bar->f4 = "-";
+                out_bar->f5 = "-";
+                out_bar->f6 = "HOLD";
+                break;
+
+            case VARIO_NAV_CONFIRM_NONE:
+            default:
+                out_bar->f1 = "OPT1";
+                out_bar->f2 = "OPT2";
+                out_bar->f3 = "OPT3";
+                out_bar->f4 = "-";
+                out_bar->f5 = "-";
+                out_bar->f6 = "HOLD";
+                break;
+        }
         return;
     }
 
@@ -703,12 +773,24 @@ void Vario_Button_GetButtonBar(vario_mode_t mode, vario_buttonbar_t *out_bar)
 
     if ((mode == VARIO_MODE_SETTING) && (Vario_Navigation_IsPageOpen() != false))
     {
-        out_bar->f1 = "BACK";
-        out_bar->f2 = "UP";
-        out_bar->f3 = "DN";
-        out_bar->f4 = "-";
-        out_bar->f5 = "-";
-        out_bar->f6 = "ENTER";
+        if (Vario_Navigation_IsNameEditActive() != false)
+        {
+            out_bar->f1 = "BACK";
+            out_bar->f2 = "CH-";
+            out_bar->f3 = "CH+";
+            out_bar->f4 = "LEFT";
+            out_bar->f5 = "RIGHT";
+            out_bar->f6 = "SAVE";
+        }
+        else
+        {
+            out_bar->f1 = "BACK";
+            out_bar->f2 = "UP";
+            out_bar->f3 = "DN";
+            out_bar->f4 = "-";
+            out_bar->f5 = "-";
+            out_bar->f6 = "ENTER";
+        }
         return;
     }
 
