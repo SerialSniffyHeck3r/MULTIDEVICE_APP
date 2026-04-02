@@ -154,6 +154,26 @@
 #define VARIO_STATE_BIKE_PRESENT_PERIOD_MS 50u
 #endif
 
+#ifndef VARIO_STATE_GPS_FIX_MIN_FIX_TYPE
+#define VARIO_STATE_GPS_FIX_MIN_FIX_TYPE 3u
+#endif
+
+#ifndef VARIO_STATE_GPS_FIX_MAX_AGE_MS
+#define VARIO_STATE_GPS_FIX_MAX_AGE_MS 2500u
+#endif
+
+#ifndef VARIO_STATE_GPS_FIX_MAX_PDOP_X100
+#define VARIO_STATE_GPS_FIX_MAX_PDOP_X100 400u
+#endif
+
+#ifndef VARIO_STATE_GPS_FIX_MAX_ABS_LAT_E7
+#define VARIO_STATE_GPS_FIX_MAX_ABS_LAT_E7 900000000
+#endif
+
+#ifndef VARIO_STATE_GPS_FIX_MAX_ABS_LON_E7
+#define VARIO_STATE_GPS_FIX_MAX_ABS_LON_E7 1800000000
+#endif
+
 static float vario_state_distance_between_ll_deg_e7(int32_t lat1_e7,
                                                     int32_t lon1_e7,
                                                     int32_t lat2_e7,
@@ -161,6 +181,8 @@ static float vario_state_distance_between_ll_deg_e7(int32_t lat1_e7,
 static float vario_state_wrap_360(float deg);
 static float vario_state_deg_to_rad(float deg);
 static float vario_state_rad_to_deg(float rad);
+static bool  vario_state_has_plausible_gps_ll(int32_t lat_e7, int32_t lon_e7);
+static bool  vario_state_has_usable_gps_fix(const app_gps_state_t *gps, uint32_t now_ms);
 
 /* -------------------------------------------------------------------------- */
 /*  TRAINER synthetic scenario tables                                          */
@@ -449,6 +471,10 @@ static void vario_state_trainer_handle_toggle(bool enabled, uint32_t now_ms)
     s_vario_state.altitude_source_tracking_valid = false;
     s_vario_state.runtime.heading_valid = false;
     s_vario_state.runtime.last_gps_host_time_ms = 0u;
+    s_vario_state.runtime.gs_bar_speed_kmh = 0.0f;
+    s_vario_state.runtime.filtered_ground_speed_kmh = 0.0f;
+    s_vario_state.runtime.ground_speed_kmh = 0.0f;
+    s_vario_state.runtime.last_published_ground_speed_kmh = 0.0f;
     s_vario_state.last_fast_present_ms = 0u;
     s_vario_state.last_slow_present_ms = 0u;
 
@@ -762,6 +788,101 @@ static float vario_state_rad_to_deg(float rad)
     return rad * (180.0f / VARIO_STATE_PI);
 }
 
+static bool vario_state_has_plausible_gps_ll(int32_t lat_e7, int32_t lon_e7)
+{
+    /* ------------------------------------------------------------------ */
+    /* GPS 위치가 "항법용으로 말이 되는 값인지" 확인한다.                 */
+    /*                                                                    */
+    /* 이 함수는 low-level GPS 드라이버를 바꾸지 않고,                    */
+    /* Vario_State 상위 계층에서 사용할 공통 게이트 역할을 맡는다.       */
+    /*                                                                    */
+    /* 현재 기준                                                            */
+    /* - 위도는 [-90, +90] deg 범위여야 한다.                             */
+    /* - 경도는 [-180, +180] deg 범위여야 한다.                           */
+    /* - (0,0) 은 실제 비행장 좌표로 보기 매우 부자연스러우므로           */
+    /*   fix 초기화 잔상 / 미수신 기본값을 막기 위해 거부한다.             */
+    /*                                                                    */
+    /* 추후 low-level 이 DOP / accuracy / satellite count 를 노출하면,     */
+    /* "GPS usable" 정책은 이 helper 하나에만 추가하면 된다.            */
+    /* ------------------------------------------------------------------ */
+    if ((lat_e7 > VARIO_STATE_GPS_FIX_MAX_ABS_LAT_E7) ||
+        (lat_e7 < -VARIO_STATE_GPS_FIX_MAX_ABS_LAT_E7))
+    {
+        return false;
+    }
+
+    if ((lon_e7 > VARIO_STATE_GPS_FIX_MAX_ABS_LON_E7) ||
+        (lon_e7 < -VARIO_STATE_GPS_FIX_MAX_ABS_LON_E7))
+    {
+        return false;
+    }
+
+    if ((lat_e7 == 0) && (lon_e7 == 0))
+    {
+        return false;
+    }
+
+    return true;
+}
+
+static bool vario_state_has_usable_gps_fix(const app_gps_state_t *gps, uint32_t now_ms)
+{
+    /* ------------------------------------------------------------------ */
+    /* 바리오 전체에서 공통으로 쓰는 "usable GPS fix" 정의다.            */
+    /*                                                                    */
+    /* 사용자의 최신 요구사항                                              */
+    /* - GPS connected / disconnected 예외 처리를 강하게 분리한다.         */
+    /* - 말이 되는 위경도와 fix quality 가 확보된 경우에만                */
+    /*   GPS 관련 화면/항법 기능을 활성화한다.                            */
+    /*                                                                    */
+    /* 현재 usable 기준                                                     */
+    /* 1) low-level fix.valid = true                                       */
+    /* 2) low-level fixOk  = true                                          */
+    /* 3) fixType >= 3 (3D fix 이상)                                       */
+    /* 4) 위/경도가 지구 범위 안이며 (0,0) 기본값이 아님                    */
+    /* 5) host time 기준으로 너무 오래된 fix 가 아님                       */
+    /* 6) pDOP 가 채워져 있다면 일정 이하일 것                              */
+    /*                                                                    */
+    /* pDOP 는 흔히 x100 스케일(예: 120 = 1.20)로 들어오므로,               */
+    /* 4.00 이하일 때만 usable 로 본다. 다만 0 은 저수준 미채움 가능성을   */
+    /* 고려해 "정보 없음" 으로 보고 여기서는 거부하지 않는다.            */
+    /* ------------------------------------------------------------------ */
+    if (gps == NULL)
+    {
+        return false;
+    }
+
+    if ((gps->fix.valid == false) ||
+        (gps->fix.fixOk == false) ||
+        (gps->fix.fixType < VARIO_STATE_GPS_FIX_MIN_FIX_TYPE))
+    {
+        return false;
+    }
+
+    if (vario_state_has_plausible_gps_ll(gps->fix.lat, gps->fix.lon) == false)
+    {
+        return false;
+    }
+
+    if (gps->fix.last_update_ms == 0u)
+    {
+        return false;
+    }
+
+    if ((now_ms >= gps->fix.last_update_ms) &&
+        ((now_ms - gps->fix.last_update_ms) > VARIO_STATE_GPS_FIX_MAX_AGE_MS))
+    {
+        return false;
+    }
+
+    if ((gps->fix.pDOP != 0u) && (gps->fix.pDOP > VARIO_STATE_GPS_FIX_MAX_PDOP_X100))
+    {
+        return false;
+    }
+
+    return true;
+}
+
 static bool vario_state_compute_glide_ratio(float speed_kmh, float vario_mps, float *out_ratio)
 {
     float sink_mps;
@@ -845,7 +966,7 @@ static void vario_state_update_bike_present(uint32_t now_ms)
 /* -------------------------------------------------------------------------- */
 /* pressure / temperature visible cache                                        */
 /* -------------------------------------------------------------------------- */
-static void vario_state_update_sensor_caches(void)
+static void vario_state_update_sensor_caches(uint32_t now_ms)
 {
     const app_altitude_state_t *alt;
     const app_gy86_state_t     *gy86;
@@ -858,9 +979,16 @@ static void vario_state_update_sensor_caches(void)
     gps = &s_vario_state.runtime.gps;
 
     s_vario_state.runtime.baro_valid = ((alt->initialized != false) && (alt->baro_valid != false));
-    s_vario_state.runtime.gps_valid = ((gps->fix.valid != false) &&
-                                       (gps->fix.fixOk != false) &&
-                                       (gps->fix.fixType != 0u));
+
+    /* ------------------------------------------------------------------ */
+    /* GPS usable 판정은 이 지점에서 전역 runtime flag 로 확정한다.       */
+    /*                                                                    */
+    /* renderer / navigation / glide / trail 은 저마다 raw gps field 를   */
+    /* 다시 해석하지 않고, 이 flag 를 공통 contract 로 사용해야            */
+    /* GPS disconnected / weak fix / stale fix 예외 처리가 한 방향으로     */
+    /* 유지된다.                                                           */
+    /* ------------------------------------------------------------------ */
+    s_vario_state.runtime.gps_valid = vario_state_has_usable_gps_fix(gps, now_ms);
 
     s_vario_state.runtime.gps_time_valid = ((gps->fix.valid_time != 0u) && (gps->fix.valid != false));
     s_vario_state.runtime.gps_hour = gps->fix.hour;
@@ -899,6 +1027,10 @@ static void vario_state_update_sensor_caches(void)
     if (s_vario_state.runtime.gps_valid != false)
     {
         s_vario_state.runtime.gps_altitude_m = ((float)gps->fix.hMSL) * 0.001f;
+    }
+    else
+    {
+        s_vario_state.runtime.gps_altitude_m = 0.0f;
     }
 }
 
@@ -1041,12 +1173,22 @@ static void vario_state_update_ground_speed(void)
 
     gps = &s_vario_state.runtime.gps;
 
-    if ((gps->fix.valid == false) ||
-        (gps->fix.fixOk == false) ||
-        (gps->fix.fixType == 0u))
+    if (s_vario_state.runtime.gps_valid == false)
     {
-        s_vario_state.runtime.gps_valid = false;
+        /* -------------------------------------------------------------- */
+        /* GPS usable fix 가 끊기면 속도 관련 cache 를 즉시 0으로 되돌린다. */
+        /*                                                              */
+        /* 이렇게 해야 TRAINER 종료 직후 또는 실제 GPS loss 직후에도      */
+        /* - 큰 GS 숫자                                                  */
+        /* - 5Hz publish speed                                           */
+        /* - fast GS bar                                                 */
+        /* 가 직전 값을 붙잡고 남지 않는다.                              */
+        /* -------------------------------------------------------------- */
         s_vario_state.runtime.gs_bar_speed_kmh = 0.0f;
+        s_vario_state.runtime.filtered_ground_speed_kmh = 0.0f;
+        s_vario_state.runtime.ground_speed_kmh = 0.0f;
+        s_vario_state.runtime.last_published_ground_speed_kmh = 0.0f;
+        s_vario_state.runtime.last_gps_host_time_ms = 0u;
         return;
     }
 
@@ -1119,9 +1261,7 @@ static bool vario_state_select_heading_measurement(float *out_heading_deg, uint8
     if ((settings->heading_source == VARIO_HEADING_SOURCE_AUTO) ||
         (settings->heading_source == VARIO_HEADING_SOURCE_GPS))
     {
-        if ((gps->fix.valid != false) &&
-            (gps->fix.fixOk != false) &&
-            (gps->fix.fixType != 0u) &&
+        if ((s_vario_state.runtime.gps_valid != false) &&
             (speed_kmh >= VARIO_STATE_HEADING_GPS_MIN_SPEED_KMH))
         {
             if (gps->fix.head_veh_valid != 0u)
@@ -1347,10 +1487,7 @@ static void vario_state_update_flight_logic(uint32_t now_ms)
     start_speed_kmh = ((float)settings->flight_start_speed_kmh_x10) * 0.1f;
     soft_start_speed_kmh = start_speed_kmh * VARIO_STATE_TAKEOFF_SOFT_SPEED_RATIO;
 
-    gps_motion_valid = (s_vario_state.runtime.gps_valid != false) &&
-                       (gps->fix.valid != false) &&
-                       (gps->fix.fixOk != false) &&
-                       (gps->fix.fixType != 0u);
+    gps_motion_valid = (s_vario_state.runtime.gps_valid != false);
 
     /* ---------------------------------------------------------------------- */
     /*  takeoff detection                                                     */
@@ -1609,9 +1746,7 @@ static void vario_state_update_trail(void)
 
     gps = &s_vario_state.runtime.gps;
 
-    if ((gps->fix.valid == false) ||
-        (gps->fix.fixOk == false) ||
-        (gps->fix.fixType == 0u))
+    if (s_vario_state.runtime.gps_valid == false)
     {
         return;
     }
@@ -1884,7 +2019,21 @@ static void vario_state_publish_5hz(uint32_t now_ms)
                                                                vario_trigger_mps);
     }
 
-    quant_gs_kmh = roundf(s_vario_state.runtime.filtered_ground_speed_kmh * 10.0f) * 0.1f;
+    /* ------------------------------------------------------------------ */
+    /* GPS usable fix 가 없을 때는 publish speed 를 0으로 고정한다.        */
+    /*                                                                    */
+    /* renderer 쪽에서는 이 상태를 보고 숫자를 '--' / '-' 로 바꾸고,      */
+    /* 우측 GS instant lane 을 dither 패턴으로 채워 INOP 를 표시한다.     */
+    /* 여기서는 stale 속도 숫자가 publish 경로에 남지 않게 0으로 차단한다. */
+    /* ------------------------------------------------------------------ */
+    if (s_vario_state.runtime.gps_valid != false)
+    {
+        quant_gs_kmh = roundf(s_vario_state.runtime.filtered_ground_speed_kmh * 10.0f) * 0.1f;
+    }
+    else
+    {
+        quant_gs_kmh = 0.0f;
+    }
 
     if ((settings != NULL) &&
         (vario_state_select_alt1_altitude_cm(alt,
@@ -1976,7 +2125,7 @@ void Vario_State_Task(uint32_t now_ms)
         vario_state_trainer_apply_snapshots(now_ms);
     }
 
-    vario_state_update_sensor_caches();
+    vario_state_update_sensor_caches(now_ms);
     vario_state_update_ground_speed();
     vario_state_update_display_filter(now_ms);
     vario_state_update_glide_ratio_fast_path();
@@ -2321,6 +2470,11 @@ void Vario_State_ResetFlightMetrics(void)
     s_vario_state.runtime.wind_speed_kmh = 0.0f;
     s_vario_state.runtime.wind_from_deg = 0.0f;
     s_vario_state.runtime.estimated_airspeed_kmh = 0.0f;
+    s_vario_state.runtime.ground_speed_kmh = 0.0f;
+    s_vario_state.runtime.gs_bar_speed_kmh = 0.0f;
+    s_vario_state.runtime.filtered_ground_speed_kmh = 0.0f;
+    s_vario_state.runtime.last_published_ground_speed_kmh = 0.0f;
+    s_vario_state.runtime.last_gps_host_time_ms = 0u;
     s_vario_state.runtime.manual_mccready_mps = 0.0f;
     s_vario_state.runtime.speed_to_fly_kmh = 0.0f;
     s_vario_state.runtime.speed_command_delta_kmh = 0.0f;

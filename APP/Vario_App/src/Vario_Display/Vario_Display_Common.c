@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stddef.h>
 #include <string.h>
+#include <ctype.h>
 
 /* -------------------------------------------------------------------------- */
 /* 아이콘 fallback                                                              */
@@ -284,6 +285,21 @@ static const unsigned char vario_icon_vario_led_down_bits[] = {
 #define VARIO_UI_DECIMAL_FRAC_GAP_X                1
 #define VARIO_UI_DECIMAL_SIGN_GAP_X                1
 #define VARIO_UI_DECIMAL_FRAC_TOP_BIAS_Y           0
+
+/* -------------------------------------------------------------------------- */
+/* Logisoso fixed-slot typography                                             */
+/*                                                                            */
+/* 최신 사용자 요구사항                                                       */
+/* - Logisoso 계열 숫자는 '1' 이 다른 숫자보다 좁아, 동일한 자리라도            */
+/*   문자열 폭 정렬만 사용하면 마지막 자리 위치가 흔들린다.                    */
+/* - 따라서 ALT1 / 큰 GS / 큰 VARIO 는 "문자열 통째 정렬" 대신                 */
+/*   "slot 별 개별 glyph draw" 를 사용한다.                                   */
+/* - 자리 간 pitch 는 기준 숫자 폭보다 1 px 더 가깝게 만든다.                  */
+/* - glyph 자체가 좁은 경우('1', '-') 는 slot 중앙에 배치한다.                 */
+/* -------------------------------------------------------------------------- */
+#define VARIO_UI_LOGISOSO_SLOT_TIGHTEN_X           1
+#define VARIO_UI_LOGISOSO_ALT1_SLOT_COUNT          5u
+#define VARIO_UI_LOGISOSO_SPEED_SLOT_COUNT         2u
 
 /* -------------------------------------------------------------------------- */
 /* Flight average / peak cache                                                 */
@@ -998,10 +1014,26 @@ static void vario_display_format_filtered_selected_altitude(char *buf,
     /*   결과를 사용해서 과도한 떨림 없이 읽기 쉽게 만든다.                    */
     /* - feet/meter 환산은 기존 helper를 그대로 사용한다.                      */
     /* ---------------------------------------------------------------------- */
-    vario_display_format_altitude_with_unit(buf,
-                                            buf_len,
-                                            rt->baro_altitude_m,
-                                            unit);
+    {
+        long display_value;
+
+        /* ------------------------------------------------------------------ */
+        /* ALT1 큰 숫자 계약                                                   */
+        /* - 표시 범위는 -9999 ~ 99999 로 clamp 한다.                          */
+        /* - 이후 fixed-slot renderer 가 5개 column 안에 값을 안정적으로 배치한다.*/
+        /* ------------------------------------------------------------------ */
+        display_value = (long)Vario_Settings_AltitudeMetersToDisplayRoundedWithUnit(rt->baro_altitude_m, unit);
+        if (display_value > 99999L)
+        {
+            display_value = 99999L;
+        }
+        if (display_value < -9999L)
+        {
+            display_value = -9999L;
+        }
+
+        snprintf(buf, buf_len, "%ld", display_value);
+    }
 }
 
 static void vario_display_format_speed_value(char *buf, size_t buf_len, float speed_kmh)
@@ -2121,7 +2153,512 @@ static int16_t vario_display_get_marker_top_y(int16_t center_y,
     return top_y;
 }
 
-static void vario_display_draw_decimal_value(u8g2_t *u8g2,
+static int16_t vario_display_get_compact_digit_slot_width(u8g2_t *u8g2,
+                                                           const uint8_t *font)
+{
+    static const char *const k_samples[] = {"0", "2", "3", "4", "5", "6", "7", "8", "9"};
+    int16_t max_w;
+    uint32_t i;
+
+    if ((u8g2 == NULL) || (font == NULL))
+    {
+        return 0;
+    }
+
+    max_w = 0;
+    for (i = 0u; i < (sizeof(k_samples) / sizeof(k_samples[0])); ++i)
+    {
+        int16_t w;
+
+        /* ------------------------------------------------------------------ */
+        /* Logisoso24_tn 계열의 넓은 숫자 폭을 실제로 측정한다.                 */
+        /* - 1 은 의도적으로 기준폭에서 제외한다.                              */
+        /* - 이렇게 해야 1 이 들어와도 slot 자체는 흔들리지 않는다.            */
+        /* ------------------------------------------------------------------ */
+        w = vario_display_measure_text(u8g2, font, k_samples[i]);
+        if (w > max_w)
+        {
+            max_w = w;
+        }
+    }
+
+    return max_w;
+}
+
+static int16_t vario_display_get_compact_digit_pitch(u8g2_t *u8g2,
+                                                     const uint8_t *font)
+{
+    int16_t slot_w;
+    int16_t pitch;
+
+    slot_w = vario_display_get_compact_digit_slot_width(u8g2, font);
+    if (slot_w <= 0)
+    {
+        return 0;
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* 자리 간격을 1 px 좁혀, 사용자가 요구한 "숫자들이 1px 더 가깝게" 를 반영한다.*/
+    /* ---------------------------------------------------------------------- */
+    pitch = (int16_t)(slot_w - VARIO_UI_LOGISOSO_SLOT_TIGHTEN_X);
+    if (pitch < 1)
+    {
+        pitch = 1;
+    }
+
+    return pitch;
+}
+
+static int16_t vario_display_get_compact_digit_area_w(u8g2_t *u8g2,
+                                                      const uint8_t *font,
+                                                      uint8_t slot_count)
+{
+    int16_t slot_w;
+    int16_t pitch;
+
+    if ((u8g2 == NULL) || (font == NULL) || (slot_count == 0u))
+    {
+        return 0;
+    }
+
+    slot_w = vario_display_get_compact_digit_slot_width(u8g2, font);
+    pitch = vario_display_get_compact_digit_pitch(u8g2, font);
+    if ((slot_w <= 0) || (pitch <= 0))
+    {
+        return 0;
+    }
+
+    return (int16_t)(slot_w + ((int16_t)(slot_count - 1u) * pitch));
+}
+
+static void vario_display_draw_compact_slot_char(u8g2_t *u8g2,
+                                                 const uint8_t *font,
+                                                 int16_t slot_x,
+                                                 int16_t slot_w,
+                                                 int16_t top_y,
+                                                 char draw_char)
+{
+    char    text[2];
+    int16_t glyph_w;
+    int16_t glyph_x;
+
+    if ((u8g2 == NULL) || (font == NULL) || (draw_char == ' ') || (draw_char == ' '))
+    {
+        return;
+    }
+
+    text[0] = draw_char;
+    text[1] = ' ';
+
+    glyph_w = vario_display_measure_text(u8g2, font, text);
+    glyph_x = slot_x;
+
+    /* ---------------------------------------------------------------------- */
+    /* 1 과 '-' 는 다른 숫자보다 좁다.                                        */
+    /* slot 중앙으로 넣어야 tens / ones / 5th altitude slot 이 완전히 고정된다.*/
+    /* ---------------------------------------------------------------------- */
+    if ((glyph_w > 0) && (glyph_w < slot_w))
+    {
+        glyph_x = (int16_t)(slot_x + ((slot_w - glyph_w) / 2));
+    }
+
+    u8g2_SetFont(u8g2, font);
+    u8g2_DrawStr(u8g2, glyph_x, top_y, text);
+}
+
+static bool vario_display_parse_fixed_decimal_text(const char *value_text,
+                                                   char *whole_buf,
+                                                   size_t whole_len,
+                                                   char *frac_buf,
+                                                   size_t frac_len)
+{
+    const char *dot_pos;
+    size_t      copy_len;
+    size_t      i;
+    size_t      out_i;
+
+    if ((value_text == NULL) || (whole_buf == NULL) || (frac_buf == NULL) ||
+        (whole_len == 0u) || (frac_len == 0u))
+    {
+        return false;
+    }
+
+    whole_buf[0] = ' ';
+    frac_buf[0] = ' ';
+
+    dot_pos = strchr(value_text, '.');
+    if (dot_pos == NULL)
+    {
+        return false;
+    }
+
+    copy_len = (size_t)(dot_pos - value_text);
+    if (copy_len >= whole_len)
+    {
+        copy_len = whole_len - 1u;
+    }
+
+    out_i = 0u;
+    for (i = 0u; i < copy_len; ++i)
+    {
+        const char ch = value_text[i];
+
+        if (ch == ' ')
+        {
+            continue;
+        }
+
+        /* ------------------------------------------------------------------ */
+        /* GPS no-fix 속도 "--.-" 는 두 개의 dash 가 모두 whole slot 이다.    */
+        /* sign 문법으로 처리하지 않고 그대로 복사해야 두 dash 가 동일하게 보인다.*/
+        /* ------------------------------------------------------------------ */
+        if (out_i < (whole_len - 1u))
+        {
+            whole_buf[out_i++] = ch;
+        }
+    }
+    whole_buf[out_i] = ' ';
+
+    if (*(dot_pos + 1) != ' ')
+    {
+        frac_buf[0] = *(dot_pos + 1);
+        frac_buf[1] = ' ';
+        return true;
+    }
+
+    return false;
+}
+
+static bool vario_display_parse_fixed_altitude_text(const char *value_text,
+                                                    char *digits_buf,
+                                                    size_t digits_len,
+                                                    bool *negative,
+                                                    bool *all_dash)
+{
+    size_t i;
+    size_t digit_count;
+    size_t dash_count;
+
+    if ((value_text == NULL) || (digits_buf == NULL) || (digits_len == 0u) ||
+        (negative == NULL) || (all_dash == NULL))
+    {
+        return false;
+    }
+
+    digits_buf[0] = ' ';
+    *negative = false;
+    *all_dash = false;
+    digit_count = 0u;
+    dash_count = 0u;
+
+    for (i = 0u; value_text[i] != ' '; ++i)
+    {
+        const unsigned char ch = (unsigned char)value_text[i];
+
+        if (ch == ' ')
+        {
+            continue;
+        }
+
+        if (ch == '-')
+        {
+            *negative = true;
+            ++dash_count;
+            continue;
+        }
+
+        if (isdigit(ch) != 0)
+        {
+            if (digit_count < (digits_len - 1u))
+            {
+                digits_buf[digit_count++] = (char)ch;
+            }
+            continue;
+        }
+    }
+
+    digits_buf[digit_count] = ' ';
+
+    if ((digit_count == 0u) && (dash_count >= VARIO_UI_LOGISOSO_ALT1_SLOT_COUNT))
+    {
+        *all_dash = true;
+        *negative = false;
+        return true;
+    }
+
+    return (digit_count > 0u);
+}
+
+static void vario_display_draw_fixed_alt1_value(u8g2_t *u8g2,
+                                                int16_t box_x,
+                                                int16_t box_y,
+                                                int16_t box_w,
+                                                int16_t box_h,
+                                                const char *value_text)
+{
+    char    digits[8];
+    bool    negative;
+    bool    all_dash;
+    int16_t slot_w;
+    int16_t pitch;
+    int16_t cluster_w;
+    int16_t main_h;
+    int16_t top_y;
+    int16_t draw_x;
+    size_t  digit_count;
+    char    slot_char[VARIO_UI_LOGISOSO_ALT1_SLOT_COUNT];
+    int16_t slot_i;
+
+    if ((u8g2 == NULL) || (value_text == NULL))
+    {
+        return;
+    }
+
+    memset(digits, 0, sizeof(digits));
+    memset(slot_char, 0, sizeof(slot_char));
+
+    if (vario_display_parse_fixed_altitude_text(value_text,
+                                                digits,
+                                                sizeof(digits),
+                                                &negative,
+                                                &all_dash) == false)
+    {
+        vario_display_draw_text_box_top(u8g2,
+                                        box_x,
+                                        box_y,
+                                        box_w,
+                                        VARIO_UI_ALIGN_RIGHT,
+                                        VARIO_UI_FONT_ALT1_VALUE,
+                                        value_text);
+        return;
+    }
+
+    slot_w = vario_display_get_compact_digit_slot_width(u8g2, VARIO_UI_FONT_ALT1_VALUE);
+    pitch = vario_display_get_compact_digit_pitch(u8g2, VARIO_UI_FONT_ALT1_VALUE);
+    cluster_w = vario_display_get_compact_digit_area_w(u8g2,
+                                                       VARIO_UI_FONT_ALT1_VALUE,
+                                                       VARIO_UI_LOGISOSO_ALT1_SLOT_COUNT);
+    if ((slot_w <= 0) || (pitch <= 0) || (cluster_w <= 0) || (cluster_w > box_w))
+    {
+        vario_display_draw_text_box_top(u8g2,
+                                        box_x,
+                                        box_y,
+                                        box_w,
+                                        VARIO_UI_ALIGN_RIGHT,
+                                        VARIO_UI_FONT_ALT1_VALUE,
+                                        value_text);
+        return;
+    }
+
+    main_h = vario_display_get_font_height(u8g2, VARIO_UI_FONT_ALT1_VALUE);
+    if (main_h <= 0)
+    {
+        main_h = box_h;
+    }
+
+    top_y = box_y;
+    if (box_h > main_h)
+    {
+        top_y = (int16_t)(box_y + ((box_h - main_h) / 2));
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* ALT1 value box 의 시작 X 는 유지한다.                                   */
+    /* 이 상태에서 자리 간격만 1 px 좁히면, unit X 를 안 건드려도 숫자 덩어리가  */
+    /* 조금 왼쪽으로 물러나면서 겹침을 줄일 수 있다.                           */
+    /* ---------------------------------------------------------------------- */
+    draw_x = box_x;
+
+    if (all_dash != false)
+    {
+        for (slot_i = 0; slot_i < (int16_t)VARIO_UI_LOGISOSO_ALT1_SLOT_COUNT; ++slot_i)
+        {
+            slot_char[slot_i] = '-';
+        }
+    }
+    else
+    {
+        size_t src_i;
+
+        digit_count = strlen(digits);
+        if (((negative != false) && (digit_count > 4u)) ||
+            ((negative == false) && (digit_count > 5u)))
+        {
+            vario_display_draw_text_box_top(u8g2,
+                                            box_x,
+                                            box_y,
+                                            box_w,
+                                            VARIO_UI_ALIGN_RIGHT,
+                                            VARIO_UI_FONT_ALT1_VALUE,
+                                            value_text);
+            return;
+        }
+
+        if (negative != false)
+        {
+            slot_char[0] = '-';
+        }
+
+        for (src_i = 0u; src_i < digit_count; ++src_i)
+        {
+            slot_char[VARIO_UI_LOGISOSO_ALT1_SLOT_COUNT - (int16_t)digit_count + (int16_t)src_i] = digits[src_i];
+        }
+    }
+
+    u8g2_SetFontPosTop(u8g2);
+    for (slot_i = 0; slot_i < (int16_t)VARIO_UI_LOGISOSO_ALT1_SLOT_COUNT; ++slot_i)
+    {
+        vario_display_draw_compact_slot_char(u8g2,
+                                             VARIO_UI_FONT_ALT1_VALUE,
+                                             (int16_t)(draw_x + (slot_i * pitch)),
+                                             slot_w,
+                                             top_y,
+                                             slot_char[slot_i]);
+    }
+    u8g2_SetFontPosBaseline(u8g2);
+}
+
+static void vario_display_draw_fixed_speed_current_value(u8g2_t *u8g2,
+                                                         int16_t box_x,
+                                                         int16_t box_y,
+                                                         int16_t box_w,
+                                                         int16_t box_h,
+                                                         const char *value_text)
+{
+    char    whole[8];
+    char    frac[4];
+    size_t  whole_len;
+    int16_t slot_w;
+    int16_t pitch;
+    int16_t frac_w;
+    int16_t gap_to_frac;
+    int16_t total_w;
+    int16_t draw_x;
+    int16_t main_h;
+    int16_t frac_h;
+    int16_t whole_top;
+    int16_t frac_top;
+    int16_t tens_x;
+    int16_t ones_x;
+    int16_t frac_x;
+
+    if ((u8g2 == NULL) || (value_text == NULL))
+    {
+        return;
+    }
+
+    memset(whole, 0, sizeof(whole));
+    memset(frac, 0, sizeof(frac));
+
+    if (vario_display_parse_fixed_decimal_text(value_text,
+                                               whole,
+                                               sizeof(whole),
+                                               frac,
+                                               sizeof(frac)) == false)
+    {
+        vario_display_draw_decimal_value(u8g2,
+                                         box_x,
+                                         box_y,
+                                         box_w,
+                                         box_h,
+                                         VARIO_UI_ALIGN_RIGHT,
+                                         VARIO_UI_FONT_BOTTOM_MAIN,
+                                         VARIO_UI_FONT_BOTTOM_FRAC,
+                                         value_text);
+        return;
+    }
+
+    whole_len = strlen(whole);
+    if ((whole_len == 0u) || (whole_len > VARIO_UI_LOGISOSO_SPEED_SLOT_COUNT) || (frac[0] == ' '))
+    {
+        vario_display_draw_decimal_value(u8g2,
+                                         box_x,
+                                         box_y,
+                                         box_w,
+                                         box_h,
+                                         VARIO_UI_ALIGN_RIGHT,
+                                         VARIO_UI_FONT_BOTTOM_MAIN,
+                                         VARIO_UI_FONT_BOTTOM_FRAC,
+                                         value_text);
+        return;
+    }
+
+    slot_w = vario_display_get_compact_digit_slot_width(u8g2, VARIO_UI_FONT_BOTTOM_MAIN);
+    pitch = vario_display_get_compact_digit_pitch(u8g2, VARIO_UI_FONT_BOTTOM_MAIN);
+    frac_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_BOTTOM_FRAC, frac);
+    gap_to_frac = (int16_t)(VARIO_UI_DECIMAL_FRAC_GAP_X - VARIO_UI_LOGISOSO_SLOT_TIGHTEN_X);
+    if (gap_to_frac < 0)
+    {
+        gap_to_frac = 0;
+    }
+
+    if ((slot_w <= 0) || (pitch <= 0) || (frac_w <= 0))
+    {
+        vario_display_draw_decimal_value(u8g2,
+                                         box_x,
+                                         box_y,
+                                         box_w,
+                                         box_h,
+                                         VARIO_UI_ALIGN_RIGHT,
+                                         VARIO_UI_FONT_BOTTOM_MAIN,
+                                         VARIO_UI_FONT_BOTTOM_FRAC,
+                                         value_text);
+        return;
+    }
+
+    total_w = (int16_t)(slot_w + pitch + gap_to_frac + frac_w);
+    draw_x = (int16_t)(box_x + box_w - total_w);
+    if (draw_x < box_x)
+    {
+        draw_x = box_x;
+    }
+
+    main_h = vario_display_get_font_height(u8g2, VARIO_UI_FONT_BOTTOM_MAIN);
+    frac_h = vario_display_get_font_height(u8g2, VARIO_UI_FONT_BOTTOM_FRAC);
+    if (main_h <= 0)
+    {
+        main_h = box_h;
+    }
+    if (frac_h <= 0)
+    {
+        frac_h = box_h;
+    }
+
+    whole_top = box_y;
+    if (box_h > main_h)
+    {
+        whole_top = (int16_t)(box_y + ((box_h - main_h) / 2));
+    }
+    frac_top = (int16_t)(whole_top + VARIO_UI_DECIMAL_FRAC_TOP_BIAS_Y);
+
+    tens_x = draw_x;
+    ones_x = (int16_t)(draw_x + pitch);
+    frac_x = (int16_t)(ones_x + slot_w + gap_to_frac);
+
+    u8g2_SetFontPosTop(u8g2);
+    if (whole_len >= 2u)
+    {
+        vario_display_draw_compact_slot_char(u8g2,
+                                             VARIO_UI_FONT_BOTTOM_MAIN,
+                                             tens_x,
+                                             slot_w,
+                                             whole_top,
+                                             whole[0]);
+    }
+
+    vario_display_draw_compact_slot_char(u8g2,
+                                         VARIO_UI_FONT_BOTTOM_MAIN,
+                                         ones_x,
+                                         slot_w,
+                                         whole_top,
+                                         whole[whole_len - 1u]);
+
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_BOTTOM_FRAC);
+    u8g2_DrawStr(u8g2, frac_x, frac_top, frac);
+    u8g2_SetFontPosBaseline(u8g2);
+}
+
+ void vario_display_draw_decimal_value(u8g2_t *u8g2,
                                              int16_t box_x,
                                              int16_t box_y,
                                              int16_t box_w,
@@ -2273,9 +2810,9 @@ static void vario_display_draw_fixed_vario_current_value(u8g2_t *u8g2,
     char    sign[4];
     char    whole[16];
     char    frac[4];
-    char    digit_ch[2];
     size_t  whole_len;
     int16_t digit_w;
+    int16_t pitch;
     int16_t frac_w;
     int16_t main_h;
     int16_t frac_h;
@@ -2292,7 +2829,6 @@ static void vario_display_draw_fixed_vario_current_value(u8g2_t *u8g2,
     memset(sign, 0, sizeof(sign));
     memset(whole, 0, sizeof(whole));
     memset(frac, 0, sizeof(frac));
-    memset(digit_ch, 0, sizeof(digit_ch));
 
     vario_display_split_decimal_value(value_text,
                                       sign,
@@ -2342,9 +2878,10 @@ static void vario_display_draw_fixed_vario_current_value(u8g2_t *u8g2,
         return;
     }
 
-    digit_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_BOTTOM_MAIN, "0");
+    digit_w = vario_display_get_compact_digit_slot_width(u8g2, VARIO_UI_FONT_BOTTOM_MAIN);
+    pitch = vario_display_get_compact_digit_pitch(u8g2, VARIO_UI_FONT_BOTTOM_MAIN);
     frac_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_BOTTOM_FRAC, frac);
-    if ((digit_w <= 0) || (frac_w <= 0))
+    if ((digit_w <= 0) || (pitch <= 0) || (frac_w <= 0))
     {
         vario_display_draw_decimal_value(u8g2,
                                          box_x,
@@ -2376,23 +2913,32 @@ static void vario_display_draw_fixed_vario_current_value(u8g2_t *u8g2,
         whole_top = (int16_t)(box_y + ((box_h - main_h) / 2));
     }
     frac_top = (int16_t)(whole_top + VARIO_UI_DECIMAL_FRAC_TOP_BIAS_Y);
-    frac_x = (int16_t)(draw_x + (digit_w * 2) + VARIO_UI_DECIMAL_FRAC_GAP_X);
+    frac_x = (int16_t)(draw_x + pitch + digit_w + (VARIO_UI_DECIMAL_FRAC_GAP_X - VARIO_UI_LOGISOSO_SLOT_TIGHTEN_X));
+    if (frac_x < (int16_t)(draw_x + pitch + digit_w))
+    {
+        frac_x = (int16_t)(draw_x + pitch + digit_w);
+    }
 
     u8g2_SetFontPosTop(u8g2);
-    u8g2_SetFont(u8g2, VARIO_UI_FONT_BOTTOM_MAIN);
 
     /* tens slot: 10 이상일 때만 그림. 1.x / 0.x 에서는 빈칸만 예약해 둔다. */
     if (whole_len >= 2u)
     {
-        digit_ch[0] = whole[0];
-        digit_ch[1] = '\0';
-        u8g2_DrawStr(u8g2, draw_x, whole_top, digit_ch);
+        vario_display_draw_compact_slot_char(u8g2,
+                                             VARIO_UI_FONT_BOTTOM_MAIN,
+                                             draw_x,
+                                             digit_w,
+                                             whole_top,
+                                             whole[0]);
     }
 
     /* ones slot: 0.x 일 때도 반드시 '0' 을 보여야 하므로 항상 마지막 digit 을 그림. */
-    digit_ch[0] = whole[whole_len - 1u];
-    digit_ch[1] = '\0';
-    u8g2_DrawStr(u8g2, (int16_t)(draw_x + digit_w), whole_top, digit_ch);
+    vario_display_draw_compact_slot_char(u8g2,
+                                         VARIO_UI_FONT_BOTTOM_MAIN,
+                                         (int16_t)(draw_x + pitch),
+                                         digit_w,
+                                         whole_top,
+                                         whole[whole_len - 1u]);
 
     u8g2_SetFont(u8g2, VARIO_UI_FONT_BOTTOM_FRAC);
     u8g2_DrawStr(u8g2, frac_x, frac_top, frac);
@@ -3455,13 +4001,12 @@ static void vario_display_draw_top_right_altitudes(u8g2_t *u8g2,
 
     unit_x = (int16_t)(right_limit_x - unit_box_w);
     value_x = (int16_t)(unit_x - VARIO_UI_TOP_ALT1_VALUE_UNIT_GAP - alt1_value_box_w);
-    vario_display_draw_text_box_top(u8g2,
-                                    value_x,
-                                    (int16_t)(alt1_top_y + ((alt1_row_h - alt1_value_h) / 2)),
-                                    alt1_value_box_w,
-                                    VARIO_UI_ALIGN_RIGHT,
-                                    VARIO_UI_FONT_ALT1_VALUE,
-                                    alt1_text);
+    vario_display_draw_fixed_alt1_value(u8g2,
+                                        value_x,
+                                        (int16_t)(alt1_top_y + ((alt1_row_h - alt1_value_h) / 2)),
+                                        alt1_value_box_w,
+                                        alt1_value_h,
+                                        alt1_text);
     vario_display_draw_text_box_top(u8g2,
                                     unit_x,
                                     (int16_t)(alt1_top_y + ((alt1_row_h - unit_h) / 2)),
@@ -3988,11 +4533,24 @@ static void vario_display_draw_speed_value_block(u8g2_t *u8g2,
     /* ------------------------------------------------------------------ */
     value_box_y = (int16_t)(v->y + v->h - value_box_h);
 
-    vario_display_format_speed_value(value_text,
-                                     sizeof(value_text),
-                                     (s_vario_ui_dynamic.displayed_speed_valid != false) ?
-                                         s_vario_ui_dynamic.displayed_speed_kmh :
-                                         rt->ground_speed_kmh);
+    if (rt->gps_valid == false)
+    {
+        /* ------------------------------------------------------------------ */
+        /* GPS no-fix speed 표시 계약                                          */
+        /* - 큰 10의 자리: main Logisoso '-'                                   */
+        /* - 큰 1의 자리 : main Logisoso '-'                                   */
+        /* - 작은 0.1 자리: frac font '-'                                      */
+        /* ------------------------------------------------------------------ */
+        snprintf(value_text, sizeof(value_text), "--.-");
+    }
+    else
+    {
+        vario_display_format_speed_value(value_text,
+                                         sizeof(value_text),
+                                         (s_vario_ui_dynamic.displayed_speed_valid != false) ?
+                                             s_vario_ui_dynamic.displayed_speed_kmh :
+                                             rt->ground_speed_kmh);
+    }
     vario_display_format_peak_speed(max_text, sizeof(max_text), s_vario_ui_dynamic.top_speed_kmh);
     vario_display_format_optional_speed(mc_text,
                                         sizeof(mc_text),
@@ -4048,15 +4606,12 @@ static void vario_display_draw_speed_value_block(u8g2_t *u8g2,
                                     VARIO_UI_FONT_BOTTOM_MAX_VALUE,
                                     max_text);
 
-    vario_display_draw_decimal_value(u8g2,
-                                     value_box_x,
-                                     value_box_y,
-                                     VARIO_UI_BOTTOM_BOX_W,
-                                     value_box_h,
-                                     VARIO_UI_ALIGN_RIGHT,
-                                     VARIO_UI_FONT_BOTTOM_MAIN,
-                                     VARIO_UI_FONT_BOTTOM_FRAC,
-                                     value_text);
+    vario_display_draw_fixed_speed_current_value(u8g2,
+                                                 value_box_x,
+                                                 value_box_y,
+                                                 VARIO_UI_BOTTOM_BOX_W,
+                                                 value_box_h,
+                                                 value_text);
 }
 
 

@@ -184,7 +184,24 @@ static bool vario_nav_runtime_has_valid_gps(const vario_runtime_t *rt)
     if ((rt->gps_valid == false) ||
         (rt->gps.fix.valid == false) ||
         (rt->gps.fix.fixOk == false) ||
-        (rt->gps.fix.fixType == 0u))
+        (rt->gps.fix.fixType < 3u))
+    {
+        return false;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* navigation 계층은 Vario_State 가 이미 만든 gps_valid 를 신뢰하되,   */
+    /* 저장/항법용 좌표로서 말이 되는 범위인지 한 번 더 방어한다.          */
+    /*                                                                    */
+    /* - 위도/경도 범위 outside 거부                                        */
+    /* - (0,0) 거부                                                         */
+    /*                                                                    */
+    /* 이렇게 하면 GPS 초기화 잔상이나 weak fix 가 SAVE PATH 로             */
+    /* 들어오는 일을 줄일 수 있다.                                         */
+    /* ------------------------------------------------------------------ */
+    if ((rt->gps.fix.lat > 900000000) || (rt->gps.fix.lat < -900000000) ||
+        (rt->gps.fix.lon > 1800000000) || (rt->gps.fix.lon < -1800000000) ||
+        ((rt->gps.fix.lat == 0) && (rt->gps.fix.lon == 0)))
     {
         return false;
     }
@@ -1083,6 +1100,44 @@ static void vario_nav_save_current_here(uint8_t action_row, uint32_t now_ms)
         return;
     }
 
+    /* ------------------------------------------------------------------ */
+    /* 현재 위치를 저장하는 모든 동작은 usable GPS fix 를 공통 전제로 둔다. */
+    /*                                                                    */
+    /* 사용자가 요구한 UX                                                  */
+    /* - GPS fix 가 없으면 저장 시도를 조용히 무시하지 않는다.            */
+    /* - Toast 로 명시적으로 "왜 저장이 안 되는지" 알려 준다.           */
+    /*                                                                    */
+    /* action row 별로 문구를 분리해 두면,                                 */
+    /* 이후 "CANNOT SAVE FIELD" / "CANNOT SET HOME" 같은 UX 로          */
+    /* 세분화하기도 쉽다.                                                  */
+    /* ------------------------------------------------------------------ */
+    if (vario_nav_runtime_has_valid_gps(rt) == false)
+    {
+        switch (action_row)
+        {
+            case 0u:
+                vario_nav_show_simple_toast("NO GPS FIX. CANNOT SAVE WP", now_ms);
+                break;
+
+            case 1u:
+                vario_nav_show_simple_toast("NO GPS FIX. CANNOT SAVE FIELD", now_ms);
+                break;
+
+            case 2u:
+                vario_nav_show_simple_toast("NO GPS FIX. CANNOT SET HOME", now_ms);
+                break;
+
+            case 3u:
+                vario_nav_show_simple_toast("NO GPS FIX. CANNOT SAVE MARK", now_ms);
+                break;
+
+            default:
+                vario_nav_show_simple_toast("NO GPS FIX", now_ms);
+                break;
+        }
+        return;
+    }
+
     if (action_row == 0u)
     {
         vario_nav_make_name(point.name, sizeof(point.name), "PT", s_nav.next_wp_index);
@@ -1101,6 +1156,7 @@ static void vario_nav_save_current_here(uint8_t action_row, uint32_t now_ms)
             vario_nav_activate_point_source(VARIO_NAV_SOURCE_USER_WP,
                                             s_nav.active_waypoint_index,
                                             now_ms);
+            vario_nav_show_simple_toast("WAYPOINT SAVED!", now_ms);
         }
     }
     else if (action_row == 1u)
@@ -1121,6 +1177,7 @@ static void vario_nav_save_current_here(uint8_t action_row, uint32_t now_ms)
             vario_nav_activate_point_source(VARIO_NAV_SOURCE_LANDABLE,
                                             s_nav.active_landable_index,
                                             now_ms);
+            vario_nav_show_simple_toast("FIELD SAVED!", now_ms);
         }
     }
     else if (action_row == 2u)
@@ -1152,6 +1209,7 @@ static void vario_nav_save_current_here(uint8_t action_row, uint32_t now_ms)
             vario_nav_activate_point_source(VARIO_NAV_SOURCE_MARK,
                                             s_nav.active_mark_index,
                                             now_ms);
+            vario_nav_show_simple_toast("MARK SAVED!", now_ms);
         }
     }
 }
@@ -1780,6 +1838,10 @@ void Vario_Navigation_ActivateSelected(uint32_t now_ms)
                             vario_nav_show_simple_toast("Home updated", now_ms);
                         }
                     }
+                }
+                else
+                {
+                    vario_nav_show_simple_toast("NO GPS FIX. CANNOT SET HOME", now_ms);
                 }
             }
             else if (s_nav.cursor == 3u)
