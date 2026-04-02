@@ -2896,6 +2896,42 @@ static void vario_display_format_arrival_height_value(char *buf,
 
 
 
+static void vario_display_format_lower_left_context_label(char *buf,
+                                                          size_t buf_len,
+                                                          const vario_runtime_t *rt)
+{
+    const char *src;
+    size_t src_len;
+
+    if ((buf == NULL) || (buf_len == 0u))
+    {
+        return;
+    }
+
+    buf[0] = '\0';
+    if (rt == NULL)
+    {
+        return;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* 좌하단 glide block 상단 context label                               */
+    /* - target name 이 있으면 그 이름을 우선 사용한다.                    */
+    /* - 이름이 없으면 source short label(HME/LND/WPT/...) 를 쓴다.        */
+    /* - 길이는 최대 8자로 잘라, 기존 숫자 블록 위에 작게 얹는다.          */
+    /* ------------------------------------------------------------------ */
+    src = (rt->target_name[0] != '\0') ? rt->target_name
+                                         : Vario_Navigation_GetShortSourceLabel(rt->target_kind);
+    src_len = strlen(src);
+    if (src_len > 8u)
+    {
+        src_len = 8u;
+    }
+
+    memcpy(buf, src, src_len);
+    buf[src_len] = '\0';
+}
+
 static void vario_display_draw_lower_left_glide_computer(u8g2_t *u8g2,
                                                            const vario_viewport_t *v,
                                                            const vario_runtime_t *rt)
@@ -2903,6 +2939,7 @@ static void vario_display_draw_lower_left_glide_computer(u8g2_t *u8g2,
     char    final_glide_text[16];
     char    arrival_text[16];
     char    distance_text[16];
+    char    context_label[9];
     const char *distance_label;
     char    distance_unit[8];
     int16_t left_x;
@@ -2918,6 +2955,9 @@ static void vario_display_draw_lower_left_glide_computer(u8g2_t *u8g2,
     int16_t row1_y;
     int16_t row2_y;
     int16_t icon_x;
+    int16_t context_x;
+    int16_t context_y;
+    int16_t context_box_w;
     int16_t value_x;
     int16_t unit_x;
     long    arrival_disp;
@@ -2930,6 +2970,7 @@ static void vario_display_draw_lower_left_glide_computer(u8g2_t *u8g2,
     }
 
     distance_label = Vario_Navigation_GetShortSourceLabel(rt->target_kind);
+    vario_display_format_lower_left_context_label(context_label, sizeof(context_label), rt);
 
     /* ---------------------------------------------------------------------- */
     /* 좌하단 glide-computer 3중 세트                                          */
@@ -3033,6 +3074,21 @@ static void vario_display_draw_lower_left_glide_computer(u8g2_t *u8g2,
     value_x = (int16_t)(icon_x + icon_lane_w + VARIO_UI_TOP_ALT_ROW_ICON_GAP);
     unit_x = (int16_t)(value_x + value_box_w + VARIO_UI_TOP_ALT_ROW_VALUE_UNIT_GAP);
 
+    /* ------------------------------------------------------------------ */
+    /* 새 context label 좌표                                                */
+    /* - X 는 Final Glide XBM 의 실제 시작 X                               */
+    /* - Y 는 Final Glide 숫자 top 보다 2 px 위                            */
+    /* - font 는 unit label 과 동일                                         */
+    /* - 좌측 정렬                                                          */
+    /* ------------------------------------------------------------------ */
+    context_x = (int16_t)(icon_x + ((icon_lane_w - VARIO_ICON_FINAL_GLIDE_WIDTH) / 2));
+    context_y = (int16_t)(row0_y + ((row_h - value_h) / 2) - unit_h - 2);
+    context_box_w = (int16_t)((value_x + value_box_w) - context_x);
+    if (context_box_w < 8)
+    {
+        context_box_w = 8;
+    }
+
     if (rt->final_glide_valid != false)
     {
         snprintf(final_glide_text,
@@ -3068,6 +3124,17 @@ static void vario_display_draw_lower_left_glide_computer(u8g2_t *u8g2,
     else
     {
         snprintf(distance_text, sizeof(distance_text), "---.-");
+    }
+
+    if (context_label[0] != '\0')
+    {
+        vario_display_draw_text_box_top(u8g2,
+                                        context_x,
+                                        context_y,
+                                        context_box_w,
+                                        VARIO_UI_ALIGN_LEFT,
+                                        VARIO_UI_FONT_ALT2_UNIT,
+                                        context_label);
     }
 
     vario_display_draw_xbm(u8g2,
@@ -4552,6 +4619,154 @@ static void vario_display_draw_circle_clipped_segment(u8g2_t *u8g2,
     u8g2_DrawLine(u8g2, x1, y1, x2, y2);
 }
 
+#ifndef VARIO_UI_TRAIL_MARKER_RADIUS_PX
+#define VARIO_UI_TRAIL_MARKER_RADIUS_PX 4u
+#endif
+
+static bool vario_display_project_trail_point_px(int32_t origin_lat_e7,
+                                                 int32_t origin_lon_e7,
+                                                 int32_t point_lat_e7,
+                                                 int32_t point_lon_e7,
+                                                 bool heading_up_mode,
+                                                 float current_heading_deg,
+                                                 int16_t draw_center_x,
+                                                 int16_t draw_center_y,
+                                                 float meters_per_px,
+                                                 int16_t *out_px,
+                                                 int16_t *out_py)
+{
+    float org_lat_deg;
+    float org_lon_deg;
+    float pt_lat_deg;
+    float pt_lon_deg;
+    float mean_lat_rad;
+    float dx_m;
+    float dy_m;
+    float plot_dx_m;
+    float plot_dy_m;
+
+    if ((out_px == NULL) || (out_py == NULL) || (meters_per_px <= 0.0f))
+    {
+        return false;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* trail breadcrumb 와 overlay marker 는 완전히 같은 local tangent      */
+    /* 투영식을 써야 한다. 그래야 north-up / trail-up 어느 모드에서도         */
+    /* 저장된 START / LAND / WPT 기호가 breadcrumb 배경과 정확히 맞물린다.   */
+    /* ------------------------------------------------------------------ */
+    org_lat_deg = ((float)origin_lat_e7) * 1.0e-7f;
+    org_lon_deg = ((float)origin_lon_e7) * 1.0e-7f;
+    pt_lat_deg  = ((float)point_lat_e7) * 1.0e-7f;
+    pt_lon_deg  = ((float)point_lon_e7) * 1.0e-7f;
+    mean_lat_rad = vario_display_deg_to_rad((org_lat_deg + pt_lat_deg) * 0.5f);
+
+    dx_m = (pt_lon_deg - org_lon_deg) * (111319.5f * cosf(mean_lat_rad));
+    dy_m = (pt_lat_deg - org_lat_deg) * 111132.0f;
+    plot_dx_m = dx_m;
+    plot_dy_m = dy_m;
+
+    if (heading_up_mode != false)
+    {
+        float heading_rad;
+        float rot_x;
+        float rot_y;
+
+        heading_rad = vario_display_deg_to_rad(current_heading_deg);
+        rot_x = (dx_m * cosf(heading_rad)) - (dy_m * sinf(heading_rad));
+        rot_y = (dx_m * sinf(heading_rad)) + (dy_m * cosf(heading_rad));
+        plot_dx_m = rot_x;
+        plot_dy_m = rot_y;
+    }
+
+    *out_px = (int16_t)lroundf((float)draw_center_x + (plot_dx_m / meters_per_px));
+    *out_py = (int16_t)lroundf((float)draw_center_y - (plot_dy_m / meters_per_px));
+    return true;
+}
+
+static void vario_display_draw_hollow_triangle(u8g2_t *u8g2,
+                                               int16_t center_x,
+                                               int16_t center_y,
+                                               uint8_t radius_px,
+                                               bool inverted)
+{
+    int16_t x_left;
+    int16_t x_right;
+    int16_t y_top;
+    int16_t y_bottom;
+
+    if ((u8g2 == NULL) || (radius_px == 0u))
+    {
+        return;
+    }
+
+    x_left = (int16_t)(center_x - (int16_t)radius_px);
+    x_right = (int16_t)(center_x + (int16_t)radius_px);
+    y_top = (int16_t)(center_y - (int16_t)radius_px);
+    y_bottom = (int16_t)(center_y + (int16_t)radius_px);
+
+    if (inverted == false)
+    {
+        u8g2_DrawLine(u8g2, center_x, y_top, x_left, y_bottom);
+        u8g2_DrawLine(u8g2, center_x, y_top, x_right, y_bottom);
+        u8g2_DrawLine(u8g2, x_left, y_bottom, x_right, y_bottom);
+    }
+    else
+    {
+        u8g2_DrawLine(u8g2, x_left, y_top, x_right, y_top);
+        u8g2_DrawLine(u8g2, x_left, y_top, center_x, y_bottom);
+        u8g2_DrawLine(u8g2, x_right, y_top, center_x, y_bottom);
+    }
+}
+
+static void vario_display_draw_trail_overlay_marker(u8g2_t *u8g2,
+                                                    int16_t center_x,
+                                                    int16_t center_y,
+                                                    uint8_t marker_kind)
+{
+    if (u8g2 == NULL)
+    {
+        return;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* START / LAND / WPT overlay 기호                                      */
+    /* - START : hollow triangle                                            */
+    /* - LAND  : hollow inverted triangle                                   */
+    /* - WPT   : hollow circle                                              */
+    /*                                                                    */
+    /* 반지름 4 px 는 breadcrumb dot(1~3 px) 보다 분명히 크고,             */
+    /* 240x128 trail page 에서 과하게 시야를 가리지 않는 절충값이다.         */
+    /* ------------------------------------------------------------------ */
+    switch ((vario_nav_trail_marker_kind_t)marker_kind)
+    {
+        case VARIO_NAV_TRAIL_MARKER_START:
+            vario_display_draw_hollow_triangle(u8g2,
+                                               center_x,
+                                               center_y,
+                                               VARIO_UI_TRAIL_MARKER_RADIUS_PX,
+                                               false);
+            break;
+
+        case VARIO_NAV_TRAIL_MARKER_LANDABLE:
+            vario_display_draw_hollow_triangle(u8g2,
+                                               center_x,
+                                               center_y,
+                                               VARIO_UI_TRAIL_MARKER_RADIUS_PX,
+                                               true);
+            break;
+
+        case VARIO_NAV_TRAIL_MARKER_WAYPOINT:
+        default:
+            u8g2_DrawCircle(u8g2,
+                            center_x,
+                            center_y,
+                            VARIO_UI_TRAIL_MARKER_RADIUS_PX,
+                            U8G2_DRAW_ALL);
+            break;
+    }
+}
+
 static uint8_t vario_display_get_trail_dot_size_px(const vario_settings_t *settings,
                                                   int16_t vario_cms)
 {
@@ -4666,45 +4881,29 @@ static void vario_display_draw_trail_background(u8g2_t *u8g2,
         for (i = 0u; i < rt->trail_count; ++i)
         {
             uint8_t idx;
-            float   org_lat_deg;
-            float   org_lon_deg;
-            float   pt_lat_deg;
-            float   pt_lon_deg;
-            float   mean_lat_rad;
-            float   dx_m;
-            float   dy_m;
-            float   plot_dx_m;
-            float   plot_dy_m;
             int16_t px;
             int16_t py;
 
             idx = (uint8_t)((start_index + i) % VARIO_TRAIL_MAX_POINTS);
-            org_lat_deg = ((float)origin_lat_e7) * 1.0e-7f;
-            org_lon_deg = ((float)origin_lon_e7) * 1.0e-7f;
-            pt_lat_deg  = ((float)rt->trail_lat_e7[idx]) * 1.0e-7f;
-            pt_lon_deg  = ((float)rt->trail_lon_e7[idx]) * 1.0e-7f;
-            mean_lat_rad = vario_display_deg_to_rad((org_lat_deg + pt_lat_deg) * 0.5f);
-
-            dx_m = (pt_lon_deg - org_lon_deg) * (111319.5f * cosf(mean_lat_rad));
-            dy_m = (pt_lat_deg - org_lat_deg) * 111132.0f;
-            plot_dx_m = dx_m;
-            plot_dy_m = dy_m;
-
-            if (heading_up_mode != false)
+            /* ---------------------------------------------------------- */
+            /* trail dot 와 overlay marker 는 같은 화면 투영 helper 를 쓴다. */
+            /* north-up / heading-up 전환 시에도 같은 기준을 유지해          */
+            /* marker 와 breadcrumb 간 상대 위치가 흔들리지 않게 한다.       */
+            /* ---------------------------------------------------------- */
+            if (vario_display_project_trail_point_px(origin_lat_e7,
+                                                     origin_lon_e7,
+                                                     rt->trail_lat_e7[idx],
+                                                     rt->trail_lon_e7[idx],
+                                                     heading_up_mode,
+                                                     current_heading_deg,
+                                                     draw_center_x,
+                                                     draw_center_y,
+                                                     meters_per_px,
+                                                     &px,
+                                                     &py) == false)
             {
-                float heading_rad;
-                float rot_x;
-                float rot_y;
-
-                heading_rad = vario_display_deg_to_rad(current_heading_deg);
-                rot_x = (dx_m * cosf(heading_rad)) - (dy_m * sinf(heading_rad));
-                rot_y = (dx_m * sinf(heading_rad)) + (dy_m * cosf(heading_rad));
-                plot_dx_m = rot_x;
-                plot_dy_m = rot_y;
+                continue;
             }
-
-            px = (int16_t)lroundf((float)draw_center_x + (plot_dx_m / meters_per_px));
-            py = (int16_t)lroundf((float)draw_center_y - (plot_dy_m / meters_per_px));
 
             if ((px < v->x) || (px >= (v->x + v->w)) || (py < v->y) || (py >= (v->y + v->h)))
             {
@@ -4716,6 +4915,61 @@ static void vario_display_draw_trail_background(u8g2_t *u8g2,
                                          py,
                                          vario_display_get_trail_dot_size_px(settings,
                                                                              rt->trail_vario_cms[idx]));
+        }
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* START / LAND / WPT overlay marker                                   */
+    /*                                                                    */
+    /* 사용자가 미리 저장한 출발점 / 착륙지 / 포인트를 trail 위에 겹쳐 보면   */
+    /* 현재 flight breadcrumb 과 site 기준점의 상대 관계를 빠르게 읽을 수 있다.*/
+    /* ------------------------------------------------------------------ */
+    if ((origin_valid != false) && (meters_per_px > 0.0f))
+    {
+        uint8_t marker_count;
+        uint8_t marker_i;
+
+        marker_count = Vario_Navigation_GetTrailMarkerCount();
+        for (marker_i = 0u; marker_i < marker_count; ++marker_i)
+        {
+            vario_nav_trail_marker_t marker;
+            int16_t marker_px;
+            int16_t marker_py;
+
+            if (Vario_Navigation_GetTrailMarker(marker_i, &marker) == false)
+            {
+                continue;
+            }
+            if (marker.valid == false)
+            {
+                continue;
+            }
+
+            if (vario_display_project_trail_point_px(origin_lat_e7,
+                                                     origin_lon_e7,
+                                                     marker.lat_e7,
+                                                     marker.lon_e7,
+                                                     heading_up_mode,
+                                                     current_heading_deg,
+                                                     draw_center_x,
+                                                     draw_center_y,
+                                                     meters_per_px,
+                                                     &marker_px,
+                                                     &marker_py) == false)
+            {
+                continue;
+            }
+
+            if ((marker_px < v->x) || (marker_px >= (v->x + v->w)) ||
+                (marker_py < v->y) || (marker_py >= (v->y + v->h)))
+            {
+                continue;
+            }
+
+            vario_display_draw_trail_overlay_marker(u8g2,
+                                                    marker_px,
+                                                    marker_py,
+                                                    marker.kind);
         }
     }
 

@@ -110,6 +110,22 @@ typedef struct
     float arrival_height_m;
 } vario_nav_solution_t;
 
+typedef enum
+{
+    VARIO_NAV_TRAIL_MARKER_START = 0u,
+    VARIO_NAV_TRAIL_MARKER_LANDABLE,
+    VARIO_NAV_TRAIL_MARKER_WAYPOINT
+} vario_nav_trail_marker_kind_t;
+
+typedef struct
+{
+    bool valid;
+    uint8_t kind;
+    int32_t lat_e7;
+    int32_t lon_e7;
+    char name[VARIO_NAV_RUNTIME_NAME_MAX];
+} vario_nav_trail_marker_t;
+
 void Vario_Navigation_Init(void);
 void Vario_Navigation_ResetFlightRam(void);
 
@@ -122,6 +138,9 @@ void Vario_Navigation_CycleTargetSource(void);
 void Vario_Navigation_ClearTarget(void);
 void Vario_Navigation_FormatActiveSourceToast(char *out_text, size_t out_size);
 const char *Vario_Navigation_GetShortSourceLabel(uint8_t target_kind);
+uint8_t Vario_Navigation_GetTrailMarkerCount(void);
+bool Vario_Navigation_GetTrailMarker(uint8_t marker_index,
+                                     vario_nav_trail_marker_t *out_marker);
 
 bool Vario_Navigation_ComputeSolutionForTarget(const vario_runtime_t *rt,
                                                const vario_nav_active_target_t *target,

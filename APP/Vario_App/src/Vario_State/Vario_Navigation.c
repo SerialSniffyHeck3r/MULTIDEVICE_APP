@@ -698,6 +698,162 @@ const char *Vario_Navigation_GetShortSourceLabel(uint8_t target_kind)
     }
 }
 
+/* -------------------------------------------------------------------------- */
+/* Trail overlay marker export                                                */
+/*                                                                            */
+/* breadcrumb trail renderer 는 navigation 내부 저장 구조를 직접 참조하지       */
+/* 않는다. display layer 는 이 export API 만 사용해 START / LAND / WPT         */
+/* marker snapshot 을 얻고, 그 결과를 화면 좌표로 투영해서 그린다.             */
+/*                                                                            */
+/* 이렇게 분리하면                                                             */
+/* - display 가 persistence layout 을 몰라도 되고                             */
+/* - 추후 site 저장 구조가 바뀌어도 display contract 는 유지할 수 있다.        */
+/* -------------------------------------------------------------------------- */
+static bool vario_nav_fill_trail_marker_from_point(const vario_nav_point_t *point,
+                                                   uint8_t marker_kind,
+                                                   vario_nav_trail_marker_t *out_marker)
+{
+    if (out_marker == NULL)
+    {
+        return false;
+    }
+
+    memset(out_marker, 0, sizeof(*out_marker));
+    if ((point == NULL) || (point->valid == false))
+    {
+        return false;
+    }
+
+    out_marker->valid = true;
+    out_marker->kind = marker_kind;
+    out_marker->lat_e7 = point->lat_e7;
+    out_marker->lon_e7 = point->lon_e7;
+
+    if (point->name[0] != '\0')
+    {
+        snprintf(out_marker->name, sizeof(out_marker->name), "%s", point->name);
+    }
+    else
+    {
+        switch ((vario_nav_trail_marker_kind_t)marker_kind)
+        {
+            case VARIO_NAV_TRAIL_MARKER_START:
+                snprintf(out_marker->name, sizeof(out_marker->name), "START");
+                break;
+            case VARIO_NAV_TRAIL_MARKER_LANDABLE:
+                snprintf(out_marker->name, sizeof(out_marker->name), "FIELD");
+                break;
+            case VARIO_NAV_TRAIL_MARKER_WAYPOINT:
+            default:
+                snprintf(out_marker->name, sizeof(out_marker->name), "POINT");
+                break;
+        }
+    }
+
+    return true;
+}
+
+uint8_t Vario_Navigation_GetTrailMarkerCount(void)
+{
+    uint8_t count;
+    uint8_t i;
+
+    count = 0u;
+
+    /* ------------------------------------------------------------------ */
+    /* START 는 launch point 를 export 한다.                                */
+    /* trail 의 가장 오래된 breadcrumb 대신 takeoff capture 지점을 쓰면     */
+    /* 사용자가 기대하는 "출발점" 과 더 잘 맞는다.                         */
+    /* ------------------------------------------------------------------ */
+    if (s_nav.launch.valid != false)
+    {
+        ++count;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* 활성 SITE 의 LANDABLE / WAYPOINT 를 모두 overlay marker 로 내보낸다.*/
+    /* active target 하나만 보여 주지 않고, 주변에 저장된 field/point 를    */
+    /* 함께 보여 줘야 breadcrumb trail page 의 상황 파악이 쉬워진다.        */
+    /* ------------------------------------------------------------------ */
+    for (i = 0u; i < VARIO_NAV_MAX_LANDABLES; ++i)
+    {
+        if (s_nav.landables[i].valid != false)
+        {
+            ++count;
+        }
+    }
+
+    for (i = 0u; i < VARIO_NAV_MAX_USER_WAYPOINTS; ++i)
+    {
+        if (s_nav.waypoints[i].valid != false)
+        {
+            ++count;
+        }
+    }
+
+    return count;
+}
+
+bool Vario_Navigation_GetTrailMarker(uint8_t marker_index,
+                                     vario_nav_trail_marker_t *out_marker)
+{
+    uint8_t logical_index;
+    uint8_t i;
+
+    if (out_marker == NULL)
+    {
+        return false;
+    }
+
+    memset(out_marker, 0, sizeof(*out_marker));
+    logical_index = 0u;
+
+    if (s_nav.launch.valid != false)
+    {
+        if (marker_index == logical_index)
+        {
+            return vario_nav_fill_trail_marker_from_point(&s_nav.launch,
+                                                          (uint8_t)VARIO_NAV_TRAIL_MARKER_START,
+                                                          out_marker);
+        }
+        ++logical_index;
+    }
+
+    for (i = 0u; i < VARIO_NAV_MAX_LANDABLES; ++i)
+    {
+        if (s_nav.landables[i].valid == false)
+        {
+            continue;
+        }
+
+        if (marker_index == logical_index)
+        {
+            return vario_nav_fill_trail_marker_from_point(&s_nav.landables[i],
+                                                          (uint8_t)VARIO_NAV_TRAIL_MARKER_LANDABLE,
+                                                          out_marker);
+        }
+        ++logical_index;
+    }
+
+    for (i = 0u; i < VARIO_NAV_MAX_USER_WAYPOINTS; ++i)
+    {
+        if (s_nav.waypoints[i].valid == false)
+        {
+            continue;
+        }
+
+        if (marker_index == logical_index)
+        {
+            return vario_nav_fill_trail_marker_from_point(&s_nav.waypoints[i],
+                                                          (uint8_t)VARIO_NAV_TRAIL_MARKER_WAYPOINT,
+                                                          out_marker);
+        }
+        ++logical_index;
+    }
+
+    return false;
+}
+
 static const char *vario_nav_source_name(vario_nav_target_source_t source)
 {
     switch (source)
