@@ -6,7 +6,7 @@
 #include <string.h>
 
 #define UI_CONFIRM_BOX_W              208
-#define UI_CONFIRM_BOX_H               82
+#define UI_CONFIRM_BOX_H               90
 #define UI_CONFIRM_TITLE_MAX           31
 #define UI_CONFIRM_BODY_MAX            47
 #define UI_CONFIRM_OPTION_MAX          23
@@ -187,6 +187,25 @@ void UI_Confirm_Draw(u8g2_t *u8g2)
                    (u8g2_uint_t)(y0 + 22),
                    (u8g2_uint_t)(box_w - 12));
 
+    /* ------------------------------------------------------------------ */
+    /* CONFIRM 엔진 공통 레이아웃                                           */
+    /*                                                                    */
+    /* CLEAR SITE 같은 3-option confirm 에서는                             */
+    /* - option3 줄                                                        */
+    /* - LONG PRESS 안내 줄                                                */
+    /* 이 서로 겹치지 않도록 엔진 레벨에서 spacing 을 보장해야 한다.        */
+    /*                                                                    */
+    /* 구현 방침                                                            */
+    /* - box 높이를 90 px 로 올려 하단 안내 band 를 따로 확보한다.          */
+    /* - option3 baseline 은 기존 기억을 크게 깨지 않게 y0 + 72 를 유지한다.*/
+    /* - 안내 문구 baseline 은 y0 + box_h - 5 로 내려, option3 와의        */
+    /*   수직 간격을 충분히 둔다.                                           */
+    /*                                                                    */
+    /* 튜닝 메모                                                            */
+    /* - 82 px 에서는 6x12 / 5x7 조합이 하단에서 맞부딪힐 수 있다.          */
+    /* - 90 px 는 128 px 화면의 safe area 안에서 중앙 정렬을 유지하면서     */
+    /*   세 줄 선택지와 안내문을 동시에 안정적으로 담는다.                  */
+    /* ------------------------------------------------------------------ */
     ui_confirm_draw_centered(u8g2, u8g2_font_6x12_mf, cx, (int16_t)(y0 + 15), s_confirm.title);
     ui_confirm_draw_centered(u8g2, u8g2_font_5x8_tr,  cx, (int16_t)(y0 + 33), s_confirm.body);
     ui_confirm_draw_centered(u8g2, u8g2_font_6x12_mf, cx, (int16_t)(y0 + 48), s_confirm.option1);
@@ -195,6 +214,6 @@ void UI_Confirm_Draw(u8g2_t *u8g2)
     ui_confirm_draw_centered(u8g2,
                              u8g2_font_5x7_tr,
                              cx,
-                             (int16_t)(y0 + box_h - 4),
+                             (int16_t)(y0 + box_h - 5),
                              "LONG PRESS FN KEY TO CHOOSE!");
 }

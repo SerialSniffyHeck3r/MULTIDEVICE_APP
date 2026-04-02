@@ -248,15 +248,19 @@ void UI_Menu_Draw(u8g2_t *u8g2)
         u8g2_SetFont(u8g2, u8g2_font_5x8_tr);
 
         /* ------------------------------------------------------------------ */
-        /* NAV MENU row 안의 문자열 baseline 을 2px 위로 올린다.              */
+        /* NAV MENU row 문자열은 "지금 적용되어 있는 repo 기준"으로           */
+        /* 현재 위치에서 딱 1 px 아래로 내린다.                              */
         /*                                                                    */
-        /* 사용자가 요청한 수정은 "칸 하나 내부의 표시 글자를 위로 2픽셀"     */
-        /* 올리는 것이므로, row box 크기/간격은 그대로 두고 text baseline 만   */
-        /* row_y + 10 -> row_y + 8 로 절대 위치를 교체한다.                  */
+        /* 기존 수정본은 row_y + 8 baseline 을 사용하고 있었다.               */
+        /* 이번 요구사항은 그 상태를 기준으로 1 px 아래로 이동하는 것이므로,   */
+        /* row_y + 9 로 절대 위치를 교체한다.                                 */
+        /*                                                                    */
+        /* row box / padding / selection frame 은 건드리지 않고,              */
+        /* 문자열 baseline 만 바꿔서 visual balance 만 미세 조정한다.         */
         /* ------------------------------------------------------------------ */
         u8g2_DrawStr(u8g2,
                      (u8g2_uint_t)(x0 + 10),
-                     (u8g2_uint_t)(row_y + 8),
+                     (u8g2_uint_t)(row_y + 9),
                      s_menu.text[i]);
         u8g2_SetDrawColor(u8g2, 1);
     }
