@@ -156,6 +156,20 @@
 #define BIKE_DYN_MOUNT_SELF_CAL_RATE_DEG_PER_S  (0.32f)
 #define BIKE_DYN_MOUNT_SELF_CAL_MIN_QUALITY     (450.0f)
 #define BIKE_DYN_MOUNT_SELF_CAL_MIN_SPEED_MMPS  (2500)
+#define BIKE_DYN_MOUNT_SELF_CAL_MIN_BANK_DEG    (4.0f)
+#define BIKE_DYN_MOUNT_SELF_CAL_MAX_BANK_DIFF_DEG (18.0f)
+#define BIKE_DYN_MOUNT_SELF_CAL_HOLDOFF_MS      (2500u)
+
+/* -------------------------------------------------------------------------- */
+/*  external reference stale decay / low-speed safety gate                    */
+/*                                                                            */
+/*  tuning 경향                                                               */
+/*  - DECAY_TAU 를 줄이면 stale reference가 더 빨리 사라져 bench/정차 안정성↑  */
+/*  - 너무 줄이면 실제 주행 중 packet drop 때 외부 reference continuity가 감소  */
+/*  - COORD_MIN_SPEED 를 올리면 저속/정차 오인식이 줄고 더 상용기 친화적이다.   */
+/* -------------------------------------------------------------------------- */
+#define BIKE_DYN_REFERENCE_DECAY_TAU_MS        (260u)
+#define BIKE_DYN_COORD_MIN_SPEED_MMPS          (1500)
 
 /* -------------------------------------------------------------------------- */
 /*  내부 런타임                                                                 */
@@ -316,12 +330,16 @@ typedef struct
     float grade_rate_dps;
 
     /* ---------------------------------------------------------------------- */
-    /*  online yaw mount self-cal                                              */
+    /*  online yaw mount self-cal candidate                                    */
     /*                                                                        */
     /*  mount_auto_yaw_deg                                                     */
     /*  - static user trim(settings->mount_yaw_trim_deg_x10) 과 별도로          */
-    /*    주행 중 천천히 적응되는 runtime trim                                  */
-    /*  - zero capture는 roll/pitch 오차를 잡고, 이 변수는 yaw 오차를 잡는다.  */
+    /*    주행 중 천천히 적응되는 runtime yaw trim candidate                    */
+    /*  - commercial safety 관점에서 이 값은 '즉시 sign-critical bank basis' 를  */
+    /*    뒤집는 경로에 직접 꽂지 않는다.                                       */
+    /*  - 즉, bank/grade 부호 계산에 쓰는 canonical zero basis 는               */
+    /*    zero capture 이후 immutable 하게 유지하고,                            */
+    /*    이 값은 projection/보정 경로에서만 보조적으로 쓴다.                  */
     /* ---------------------------------------------------------------------- */
     float mount_auto_yaw_deg;
 
@@ -1754,6 +1772,11 @@ static bool BIKE_DYN_RebuildZeroBasis(const app_bike_settings_t *settings)
     float up_x;
     float up_y;
     float up_z;
+    float dyn_x_s;
+    float dyn_y_s;
+    float dyn_z_s;
+    float lon_now_g;
+    float lat_now_g;
     bool  have_static_up;
 
     if (settings == 0)
@@ -1802,6 +1825,15 @@ static bool BIKE_DYN_RebuildZeroBasis(const app_bike_settings_t *settings)
         return false;
     }
 
+    /* ---------------------------------------------------------------------- */
+    /*  canonical zero basis 저장                                              */
+    /*                                                                        */
+    /*  매우 중요                                                              */
+    /*  - zero_fwd / zero_left / zero_up 는 '사용자가 잡은 기준' 이다.         */
+    /*  - 이 기준은 다음 zero capture 전까지 sign-critical path 에서            */
+    /*    절대로 다시 회전되거나 재해석되면 안 된다.                           */
+    /*  - 즉, left/right 부호의 원장(ledger) 역할을 하는 frozen basis 이다.    */
+    /* ---------------------------------------------------------------------- */
     s_bike_runtime.zero_fwd_x_s  = fwd_x;
     s_bike_runtime.zero_fwd_y_s  = fwd_y;
     s_bike_runtime.zero_fwd_z_s  = fwd_z;
@@ -1814,6 +1846,27 @@ static bool BIKE_DYN_RebuildZeroBasis(const app_bike_settings_t *settings)
     s_bike_runtime.zero_up_y_s   = up_y;
     s_bike_runtime.zero_up_z_s   = up_z;
 
+    /* ---------------------------------------------------------------------- */
+    /*  새 zero 기준에서 현재 specific-force 를 즉시 다시 투영한다.            */
+    /*                                                                        */
+    /*  이유                                                                   */
+    /*  - 기존 구현은 zero 직전 basis 로 계산된 lon_imu / lat_imu 값을          */
+    /*    그대로 bias baseline 으로 복사했다.                                  */
+    /*  - 수동 rezero 또는 기준 재설정 직후에는 이 값이 새 basis 와 다를 수 있어 */
+    /*    첫 프레임 residual 이 남는 잠재 버그가 있었다.                       */
+    /*  - 따라서 zero capture 성공 순간, 현재 accel-gravity 를                  */
+    /*    '새 canonical basis' 로 다시 한 번 즉시 계산해서                     */
+    /*    bias baseline 을 같은 좌표계로 맞춘다.                               */
+    /* ---------------------------------------------------------------------- */
+    dyn_x_s = s_bike_runtime.last_ax_g - s_bike_runtime.gravity_est_x_s;
+    dyn_y_s = s_bike_runtime.last_ay_g - s_bike_runtime.gravity_est_y_s;
+    dyn_z_s = s_bike_runtime.last_az_g - s_bike_runtime.gravity_est_z_s;
+
+    lon_now_g = BIKE_DYN_Dot3(dyn_x_s, dyn_y_s, dyn_z_s,
+                              fwd_x, fwd_y, fwd_z);
+    lat_now_g = BIKE_DYN_Dot3(dyn_x_s, dyn_y_s, dyn_z_s,
+                              left_x, left_y, left_z);
+
     s_bike_runtime.zero_valid                 = true;
     s_bike_runtime.last_zero_capture_ms       = (s_bike_runtime.last_imu_timestamp_ms != 0u)
                                               ? s_bike_runtime.last_imu_timestamp_ms
@@ -1823,9 +1876,40 @@ static bool BIKE_DYN_RebuildZeroBasis(const app_bike_settings_t *settings)
     s_bike_runtime.zero_capture_sample_count  = 0u;
 
     /* ---------------------------------------------------------------------- */
-    /*  새 기준을 잡는 순간 표시각은 0으로 만든다.                              */
-    /*  bias 는 현재 IMU level acceleration 값을 기준으로 재기준화해서          */
-    /*  정차 직후 "잔류 lat/lon" 이 남지 않도록 한다.                           */
+    /*  zero / hard rezero 경계에서는 runtime yaw self-cal candidate 를 비운다. */
+    /*                                                                        */
+    /*  이유                                                                   */
+    /*  - 이전 주행에서 학습된 yaw candidate 가 새 zero 기준에 섞이면          */
+    /*    zero 기준 자체가 mutable state 처럼 변질될 수 있다.                  */
+    /*  - 판매용 코드에서는 zero 를 '절대 기준' 으로 취급하는 편이 훨씬 안전하다.*/
+    /* ---------------------------------------------------------------------- */
+    s_bike_runtime.mount_auto_yaw_deg = 0.0f;
+
+    /* ---------------------------------------------------------------------- */
+    /*  외부 reference / derivative cache 도 함께 정리한다.                    */
+    /*                                                                        */
+    /*  이유                                                                   */
+    /*  - zero 는 보통 정차/준정차에서 수행된다.                                */
+    /*  - 이때 직전 주행의 stale lon/lat reference 를 남겨 두면                 */
+    /*    zero 직후 coordinated bank / bias adaptation 경로가                   */
+    /*    옛 상태를 잠깐 끌고 갈 수 있다.                                       */
+    /* ---------------------------------------------------------------------- */
+    s_bike_runtime.lon_ref_g                = 0.0f;
+    s_bike_runtime.lat_ref_g                = 0.0f;
+    s_bike_runtime.lat_ref_fast_g           = 0.0f;
+    s_bike_runtime.lat_ref_slow_g           = 0.0f;
+    s_bike_runtime.lon_ref_quality_permille = 0.0f;
+    s_bike_runtime.lat_ref_quality_permille = 0.0f;
+    s_bike_runtime.prev_gnss_speed_valid    = false;
+    s_bike_runtime.prev_gnss_heading_valid  = false;
+    s_bike_runtime.prev_obd_speed_valid     = false;
+    s_bike_runtime.prev_gnss_speed_ms       = 0u;
+    s_bike_runtime.prev_gnss_heading_ms     = 0u;
+    s_bike_runtime.prev_obd_speed_ms        = 0u;
+
+    /* ---------------------------------------------------------------------- */
+    /*  새 기준을 잡는 순간 표시각/속도 출력은 0 으로 re-seed 한다.             */
+    /*  bias 는 위에서 재계산한 새 basis 기준 lon/lat 값으로 다시 잡는다.       */
     /* ---------------------------------------------------------------------- */
     s_bike_runtime.bank_raw_deg      = 0.0f;
     s_bike_runtime.grade_raw_deg     = 0.0f;
@@ -1833,9 +1917,13 @@ static bool BIKE_DYN_RebuildZeroBasis(const app_bike_settings_t *settings)
     s_bike_runtime.bank_coord_deg    = 0.0f;
     s_bike_runtime.bank_display_deg  = 0.0f;
     s_bike_runtime.grade_display_deg = 0.0f;
+    s_bike_runtime.bank_rate_dps     = 0.0f;
+    s_bike_runtime.grade_rate_dps    = 0.0f;
 
-    s_bike_runtime.lon_bias_g  = s_bike_runtime.lon_imu_g;
-    s_bike_runtime.lat_bias_g  = s_bike_runtime.lat_imu_g;
+    s_bike_runtime.lon_imu_g  = lon_now_g;
+    s_bike_runtime.lat_imu_g  = lat_now_g;
+    s_bike_runtime.lon_bias_g = lon_now_g;
+    s_bike_runtime.lat_bias_g = lat_now_g;
     s_bike_runtime.lon_fused_g = 0.0f;
     s_bike_runtime.lat_fused_g = 0.0f;
 
@@ -1848,6 +1936,58 @@ static int16_t BIKE_DYN_GetRuntimeAutoYawTrimDegX10(void)
     return BIKE_DYN_RoundFloatToS16X10(BIKE_DYN_ClampF(s_bike_runtime.mount_auto_yaw_deg * 10.0f,
                                                        -300.0f,
                                                         300.0f));
+}
+
+static bool BIKE_DYN_GetFrozenZeroHints(float *out_fwd_x,
+                                        float *out_fwd_y,
+                                        float *out_fwd_z,
+                                        float *out_left_x,
+                                        float *out_left_y,
+                                        float *out_left_z,
+                                        float *out_up_x,
+                                        float *out_up_y,
+                                        float *out_up_z)
+{
+    if ((out_fwd_x == 0) || (out_fwd_y == 0) || (out_fwd_z == 0) ||
+        (out_left_x == 0) || (out_left_y == 0) || (out_left_z == 0) ||
+        (out_up_x == 0) || (out_up_y == 0) || (out_up_z == 0))
+    {
+        return false;
+    }
+
+    if (s_bike_runtime.zero_valid == false)
+    {
+        return false;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  stored zero basis -> validated frozen canonical basis               */
+    /*                                                                    */
+    /*  zero capture 시 저장된 축을 그대로 복사만 하지 않고,                 */
+    /*  현재 저장값을 다시 한 번 직교/정규화해서 내보낸다.                  */
+    /*                                                                    */
+    /*  이렇게 하면 floating-point 누적 오차나 부분적인 state 손상에도      */
+    /*  bank sign path 가 최대한 deterministic 하게 유지된다.               */
+    /* ------------------------------------------------------------------ */
+    return BIKE_DYN_BuildAxesFromUpAndHints(s_bike_runtime.zero_up_x_s,
+                                            s_bike_runtime.zero_up_y_s,
+                                            s_bike_runtime.zero_up_z_s,
+                                            s_bike_runtime.zero_fwd_x_s,
+                                            s_bike_runtime.zero_fwd_y_s,
+                                            s_bike_runtime.zero_fwd_z_s,
+                                            s_bike_runtime.zero_left_x_s,
+                                            s_bike_runtime.zero_left_y_s,
+                                            s_bike_runtime.zero_left_z_s,
+                                            0,
+                                            out_fwd_x,
+                                            out_fwd_y,
+                                            out_fwd_z,
+                                            out_left_x,
+                                            out_left_y,
+                                            out_left_z,
+                                            out_up_x,
+                                            out_up_y,
+                                            out_up_z);
 }
 
 static bool BIKE_DYN_GetCorrectedZeroHints(float *out_fwd_x,
@@ -1874,34 +2014,27 @@ static bool BIKE_DYN_GetCorrectedZeroHints(float *out_fwd_x,
     float rot_fwd_z;
     float angle_rad;
 
-    if ((out_fwd_x == 0) || (out_fwd_y == 0) || (out_fwd_z == 0) ||
-        (out_left_x == 0) || (out_left_y == 0) || (out_left_z == 0) ||
-        (out_up_x == 0) || (out_up_y == 0) || (out_up_z == 0))
+    if (BIKE_DYN_GetFrozenZeroHints(&fwd_x,
+                                    &fwd_y,
+                                    &fwd_z,
+                                    &left_x,
+                                    &left_y,
+                                    &left_z,
+                                    &up_x,
+                                    &up_y,
+                                    &up_z) == false)
     {
         return false;
     }
-
-    if (s_bike_runtime.zero_valid == false)
-    {
-        return false;
-    }
-
-    fwd_x = s_bike_runtime.zero_fwd_x_s;
-    fwd_y = s_bike_runtime.zero_fwd_y_s;
-    fwd_z = s_bike_runtime.zero_fwd_z_s;
-    left_x = s_bike_runtime.zero_left_x_s;
-    left_y = s_bike_runtime.zero_left_y_s;
-    left_z = s_bike_runtime.zero_left_z_s;
-    up_x = s_bike_runtime.zero_up_x_s;
-    up_y = s_bike_runtime.zero_up_y_s;
-    up_z = s_bike_runtime.zero_up_z_s;
 
     /* ------------------------------------------------------------------ */
-    /*  online yaw mount self-cal 적용                                       */
-    /*                                                                      */
-    /*  zero capture는 static up + mount axis로 roll/pitch 기준을 잡는다.   */
-    /*  남는 장착 오차는 주로 vertical axis 주위 yaw trim 이므로,            */
-    /*  주행 중 학습된 runtime yaw trim 을 zero hints 에만 추가 회전한다.   */
+    /*  projection-only runtime yaw candidate 적용                         */
+    /*                                                                    */
+    /*  매우 중요                                                          */
+    /*  - 이 helper는 lon/lat projection / observer compensation 같이      */
+    /*    'yaw decoupling 이득' 이 있는 내부 경로에서만 사용한다.            */
+    /*  - bank/grade sign-critical canonical output 은                     */
+    /*    BIKE_DYN_GetFrozenZeroHints() 를 사용해야 한다.                  */
     /* ------------------------------------------------------------------ */
     if (fabsf(s_bike_runtime.mount_auto_yaw_deg) > 0.01f)
     {
@@ -1943,6 +2076,82 @@ static bool BIKE_DYN_GetCorrectedZeroHints(float *out_fwd_x,
     *out_up_y = up_y;
     *out_up_z = up_z;
     return true;
+}
+
+static bool BIKE_DYN_BuildCurrentCanonicalLevelAxes(float *out_fwd_x,
+                                                    float *out_fwd_y,
+                                                    float *out_fwd_z,
+                                                    float *out_left_x,
+                                                    float *out_left_y,
+                                                    float *out_left_z)
+{
+    float up_x;
+    float up_y;
+    float up_z;
+    float hint_fwd_x;
+    float hint_fwd_y;
+    float hint_fwd_z;
+    float hint_left_x;
+    float hint_left_y;
+    float hint_left_z;
+    float hint_up_x;
+    float hint_up_y;
+    float hint_up_z;
+    float discard_up_x;
+    float discard_up_y;
+    float discard_up_z;
+
+    if ((out_fwd_x == 0) || (out_fwd_y == 0) || (out_fwd_z == 0) ||
+        (out_left_x == 0) || (out_left_y == 0) || (out_left_z == 0))
+    {
+        return false;
+    }
+
+    if ((s_bike_runtime.gravity_valid == false) || (s_bike_runtime.zero_valid == false))
+    {
+        return false;
+    }
+
+    if (BIKE_DYN_GetFrozenZeroHints(&hint_fwd_x,
+                                    &hint_fwd_y,
+                                    &hint_fwd_z,
+                                    &hint_left_x,
+                                    &hint_left_y,
+                                    &hint_left_z,
+                                    &hint_up_x,
+                                    &hint_up_y,
+                                    &hint_up_z) == false)
+    {
+        return false;
+    }
+
+    (void)hint_up_x;
+    (void)hint_up_y;
+    (void)hint_up_z;
+
+    up_x = s_bike_runtime.gravity_est_x_s;
+    up_y = s_bike_runtime.gravity_est_y_s;
+    up_z = s_bike_runtime.gravity_est_z_s;
+
+    return BIKE_DYN_BuildAxesFromUpAndHints(up_x,
+                                            up_y,
+                                            up_z,
+                                            hint_fwd_x,
+                                            hint_fwd_y,
+                                            hint_fwd_z,
+                                            hint_left_x,
+                                            hint_left_y,
+                                            hint_left_z,
+                                            0,
+                                            out_fwd_x,
+                                            out_fwd_y,
+                                            out_fwd_z,
+                                            out_left_x,
+                                            out_left_y,
+                                            out_left_z,
+                                            &discard_up_x,
+                                            &discard_up_y,
+                                            &discard_up_z);
 }
 
 static bool BIKE_DYN_BuildCurrentLevelAxes(float *out_fwd_x,
@@ -2820,12 +3029,18 @@ static void BIKE_DYN_UpdateOutputsFromCurrentImu(const app_bike_settings_t *sett
     float up_bz;
     float bank_rad;
     float grade_rad;
-    float level_fwd_x;
-    float level_fwd_y;
-    float level_fwd_z;
-    float level_left_x;
-    float level_left_y;
-    float level_left_z;
+    float canonical_fwd_x;
+    float canonical_fwd_y;
+    float canonical_fwd_z;
+    float canonical_left_x;
+    float canonical_left_y;
+    float canonical_left_z;
+    float projection_fwd_x;
+    float projection_fwd_y;
+    float projection_fwd_z;
+    float projection_left_x;
+    float projection_left_y;
+    float projection_left_z;
     float zero_hint_fwd_x;
     float zero_hint_fwd_y;
     float zero_hint_fwd_z;
@@ -2840,7 +3055,8 @@ static void BIKE_DYN_UpdateOutputsFromCurrentImu(const app_bike_settings_t *sett
     float dyn_z_s;
     float lon_raw_g;
     float lat_raw_g;
-    bool  level_axes_valid;
+    bool  canonical_axes_valid;
+    bool  projection_axes_valid;
 
     if ((settings == 0) ||
         (s_bike_runtime.gravity_valid == false))
@@ -2849,27 +3065,29 @@ static void BIKE_DYN_UpdateOutputsFromCurrentImu(const app_bike_settings_t *sett
     }
 
     dt_s = BIKE_DYN_ClampF(s_bike_runtime.last_dt_s, BIKE_DYN_MIN_DT_S, BIKE_DYN_MAX_IMU_DT_S);
-    level_axes_valid = false;
+    canonical_axes_valid = false;
+    projection_axes_valid = false;
 
     if (s_bike_runtime.zero_valid != false)
     {
         /* ------------------------------------------------------------------ */
-        /*  zero 기준이 유효한 뒤에는 bank/grade/rate 모두 canonical basis를    */
+        /*  sign-critical rider-facing bank / grade 는 frozen canonical basis 를 */
         /*  사용한다.                                                           */
         /*                                                                    */
-        /*  단, canonical basis 자체에도 runtime yaw self-cal 을 반영해서      */
-        /*  mounting yaw 오차 때문에 bank 와 grade 가 서로 섞이는 현상을      */
-        /*  완화한다.                                                           */
+        /*  매우 중요                                                          */
+        /*  - zero capture 이후 left/right 부호 기준은 움직이면 안 된다.        */
+        /*  - runtime yaw self-cal candidate 는 projection 경로에는 쓸 수 있어도 */
+        /*    bank/grade 부호 계산에는 직접 개입하지 못한다.                   */
         /* ------------------------------------------------------------------ */
-        if (BIKE_DYN_GetCorrectedZeroHints(&zero_hint_fwd_x,
-                                           &zero_hint_fwd_y,
-                                           &zero_hint_fwd_z,
-                                           &zero_hint_left_x,
-                                           &zero_hint_left_y,
-                                           &zero_hint_left_z,
-                                           &zero_hint_up_x,
-                                           &zero_hint_up_y,
-                                           &zero_hint_up_z) == false)
+        if (BIKE_DYN_GetFrozenZeroHints(&zero_hint_fwd_x,
+                                        &zero_hint_fwd_y,
+                                        &zero_hint_fwd_z,
+                                        &zero_hint_left_x,
+                                        &zero_hint_left_y,
+                                        &zero_hint_left_z,
+                                        &zero_hint_up_x,
+                                        &zero_hint_up_y,
+                                        &zero_hint_up_z) == false)
         {
             return;
         }
@@ -2881,36 +3099,50 @@ static void BIKE_DYN_UpdateOutputsFromCurrentImu(const app_bike_settings_t *sett
         up_bz = BIKE_DYN_Dot3(zero_hint_up_x,   zero_hint_up_y,   zero_hint_up_z,
                               s_bike_runtime.gravity_est_x_s, s_bike_runtime.gravity_est_y_s, s_bike_runtime.gravity_est_z_s);
 
-        level_axes_valid = BIKE_DYN_BuildCurrentLevelAxes(&level_fwd_x,
-                                                          &level_fwd_y,
-                                                          &level_fwd_z,
-                                                          &level_left_x,
-                                                          &level_left_y,
-                                                          &level_left_z);
+        canonical_axes_valid = BIKE_DYN_BuildCurrentCanonicalLevelAxes(&canonical_fwd_x,
+                                                                       &canonical_fwd_y,
+                                                                       &canonical_fwd_z,
+                                                                       &canonical_left_x,
+                                                                       &canonical_left_y,
+                                                                       &canonical_left_z);
+
+        /* ------------------------------------------------------------------ */
+        /*  lon/lat projection 경로는 runtime yaw candidate 를 보조적으로       */
+        /*  사용할 수 있다.                                                     */
+        /*                                                                    */
+        /*  - accel/decel / lateral G 분해에서 yaw decoupling 이점을 유지한다. */
+        /*  - 그러나 이 경로의 변화가 bank sign 을 뒤집지는 못한다.            */
+        /* ------------------------------------------------------------------ */
+        projection_axes_valid = BIKE_DYN_BuildCurrentLevelAxes(&projection_fwd_x,
+                                                               &projection_fwd_y,
+                                                               &projection_fwd_z,
+                                                               &projection_left_x,
+                                                               &projection_left_y,
+                                                               &projection_left_z);
 
         bank_rad  = atan2f(-up_by, BIKE_DYN_ClampF(up_bz, -1.0f, 1.0f));
         grade_rad = atan2f(-up_bx, BIKE_DYN_SafeSqrtF((up_by * up_by) + (up_bz * up_bz)));
 
-        s_bike_runtime.bank_imu_deg  = bank_rad  * BIKE_DYN_RAD2DEG;
+        s_bike_runtime.bank_imu_deg   = bank_rad  * BIKE_DYN_RAD2DEG;
         s_bike_runtime.bank_coord_deg = s_bike_runtime.bank_imu_deg;
-        s_bike_runtime.bank_raw_deg  = s_bike_runtime.bank_imu_deg;
-        s_bike_runtime.grade_raw_deg = grade_rad * BIKE_DYN_RAD2DEG;
+        s_bike_runtime.bank_raw_deg   = s_bike_runtime.bank_imu_deg;
+        s_bike_runtime.grade_raw_deg  = grade_rad * BIKE_DYN_RAD2DEG;
 
-        if (level_axes_valid != false)
+        if (canonical_axes_valid != false)
         {
             s_bike_runtime.bank_rate_dps  = -BIKE_DYN_Dot3(s_bike_runtime.last_gx_dps,
                                                            s_bike_runtime.last_gy_dps,
                                                            s_bike_runtime.last_gz_dps,
-                                                           level_fwd_x,
-                                                           level_fwd_y,
-                                                           level_fwd_z);
+                                                           canonical_fwd_x,
+                                                           canonical_fwd_y,
+                                                           canonical_fwd_z);
 
             s_bike_runtime.grade_rate_dps = -BIKE_DYN_Dot3(s_bike_runtime.last_gx_dps,
                                                            s_bike_runtime.last_gy_dps,
                                                            s_bike_runtime.last_gz_dps,
-                                                           level_left_x,
-                                                           level_left_y,
-                                                           level_left_z);
+                                                           canonical_left_x,
+                                                           canonical_left_y,
+                                                           canonical_left_z);
         }
         else
         {
@@ -2947,16 +3179,16 @@ static void BIKE_DYN_UpdateOutputsFromCurrentImu(const app_bike_settings_t *sett
         /*  - zero capture 직후 bias 재기준화                                   */
         /*  에 필요한 최소 내부 상태는 유지한다.                                */
         /* ------------------------------------------------------------------ */
-        level_axes_valid = BIKE_DYN_BuildMountLevelAxes(settings,
-                                                        s_bike_runtime.gravity_est_x_s,
-                                                        s_bike_runtime.gravity_est_y_s,
-                                                        s_bike_runtime.gravity_est_z_s,
-                                                        &level_fwd_x,
-                                                        &level_fwd_y,
-                                                        &level_fwd_z,
-                                                        &level_left_x,
-                                                        &level_left_y,
-                                                        &level_left_z);
+        projection_axes_valid = BIKE_DYN_BuildMountLevelAxes(settings,
+                                                             s_bike_runtime.gravity_est_x_s,
+                                                             s_bike_runtime.gravity_est_y_s,
+                                                             s_bike_runtime.gravity_est_z_s,
+                                                             &projection_fwd_x,
+                                                             &projection_fwd_y,
+                                                             &projection_fwd_z,
+                                                             &projection_left_x,
+                                                             &projection_left_y,
+                                                             &projection_left_z);
 
         s_bike_runtime.bank_raw_deg      = 0.0f;
         s_bike_runtime.grade_raw_deg     = 0.0f;
@@ -2972,12 +3204,12 @@ static void BIKE_DYN_UpdateOutputsFromCurrentImu(const app_bike_settings_t *sett
     dyn_y_s = s_bike_runtime.last_ay_g - s_bike_runtime.gravity_est_y_s;
     dyn_z_s = s_bike_runtime.last_az_g - s_bike_runtime.gravity_est_z_s;
 
-    if (level_axes_valid != false)
+    if (projection_axes_valid != false)
     {
         lon_raw_g = BIKE_DYN_Dot3(dyn_x_s, dyn_y_s, dyn_z_s,
-                                  level_fwd_x, level_fwd_y, level_fwd_z);
+                                  projection_fwd_x, projection_fwd_y, projection_fwd_z);
         lat_raw_g = BIKE_DYN_Dot3(dyn_x_s, dyn_y_s, dyn_z_s,
-                                  level_left_x, level_left_y, level_left_z);
+                                  projection_left_x, projection_left_y, projection_left_z);
     }
     else
     {
@@ -2995,6 +3227,7 @@ static void BIKE_DYN_UpdateOutputsFromCurrentImu(const app_bike_settings_t *sett
                                                   dt_s);
 }
 
+
 /* -------------------------------------------------------------------------- */
 /*  external references                                                         */
 /* -------------------------------------------------------------------------- */
@@ -3009,6 +3242,7 @@ static void BIKE_DYN_UpdateExternalReferences(const app_bike_settings_t *setting
     const gps_fix_basic_t  *fix;
     const app_bike_state_t *bike;
     float dt_s;
+    float task_dt_s;
     float derivative_g;
     float heading_deg;
     float heading_delta_deg;
@@ -3016,6 +3250,8 @@ static void BIKE_DYN_UpdateExternalReferences(const app_bike_settings_t *setting
     float current_speed_mps;
     uint32_t current_gnss_ms;
     uint32_t current_obd_ms;
+    bool lon_ref_updated;
+    bool lat_slow_updated;
 
     (void)now_ms;
 
@@ -3029,11 +3265,14 @@ static void BIKE_DYN_UpdateExternalReferences(const app_bike_settings_t *setting
 
     current_gnss_ms = fix->last_update_ms;
     current_obd_ms  = bike->obd_input_last_update_ms;
+    task_dt_s       = BIKE_DYN_ClampF(s_bike_runtime.last_dt_s, BIKE_DYN_MIN_DT_S, BIKE_DYN_MAX_IMU_DT_S);
+    lon_ref_updated = false;
+    lat_slow_updated = false;
 
     /* ---------------------------------------------------------------------- */
     /*  longitudinal reference                                                  */
     /*  - 반드시 실제 producer timestamp 차이로 dt를 계산한다.                  */
-    /*  - 기존처럼 0.1 s 로 강제 clamp 해서 과대가속이 튀지 않도록 한다.        */
+    /*  - producer update가 없으면 stale reference를 천천히 0으로 감쇠시킨다.   */
     /* ---------------------------------------------------------------------- */
     if ((speed_source == (uint8_t)APP_BIKE_SPEED_SOURCE_OBD) &&
         (obd_speed_valid != false) &&
@@ -3056,6 +3295,15 @@ static void BIKE_DYN_UpdateExternalReferences(const app_bike_settings_t *setting
                                                           derivative_g,
                                                           BIKE_DYN_REFERENCE_LPF_TAU_MS,
                                                           dt_s);
+            lon_ref_updated = true;
+        }
+        else
+        {
+            /* -------------------------------------------------------------- */
+            /*  첫 유효 샘플에서는 derivative를 만들 수 없으므로                */
+            /*  reference를 바로 튀기지 않고, 이후 샘플부터 사용한다.          */
+            /* -------------------------------------------------------------- */
+            lon_ref_updated = true;
         }
 
         s_bike_runtime.prev_obd_speed_valid = true;
@@ -3083,6 +3331,11 @@ static void BIKE_DYN_UpdateExternalReferences(const app_bike_settings_t *setting
                                                           derivative_g,
                                                           BIKE_DYN_REFERENCE_LPF_TAU_MS,
                                                           dt_s);
+            lon_ref_updated = true;
+        }
+        else
+        {
+            lon_ref_updated = true;
         }
 
         s_bike_runtime.prev_gnss_speed_valid = true;
@@ -3090,10 +3343,18 @@ static void BIKE_DYN_UpdateExternalReferences(const app_bike_settings_t *setting
         s_bike_runtime.prev_gnss_speed_ms    = current_gnss_ms;
     }
 
+    if (lon_ref_updated == false)
+    {
+        s_bike_runtime.lon_ref_g = BIKE_DYN_LpfUpdate(s_bike_runtime.lon_ref_g,
+                                                      0.0f,
+                                                      BIKE_DYN_REFERENCE_DECAY_TAU_MS,
+                                                      task_dt_s);
+    }
+
     /* ---------------------------------------------------------------------- */
     /*  slow lateral reference                                                  */
     /*  - GNSS heading derivative 기반                                          */
-    /*  - lat_ref_fast_g 는 IMU update 후 별도로 계산한다.                      */
+    /*  - fresh update가 없거나 저속/무효 상태면 stale 값을 0으로 감쇠한다.      */
     /* ---------------------------------------------------------------------- */
     current_speed_mps = ((float)BIKE_DYN_SpeedAbsMmps(selected_speed_mmps)) * 0.001f;
 
@@ -3124,11 +3385,26 @@ static void BIKE_DYN_UpdateExternalReferences(const app_bike_settings_t *setting
                                  BIKE_DYN_MAX_REFERENCE_ABS_G),
                 BIKE_DYN_REFERENCE_LPF_TAU_MS,
                 dt_s);
+            lat_slow_updated = true;
+        }
+        else
+        {
+            lat_slow_updated = true;
         }
 
         s_bike_runtime.prev_gnss_heading_valid = true;
         s_bike_runtime.prev_gnss_heading_deg   = heading_deg;
         s_bike_runtime.prev_gnss_heading_ms    = current_gnss_ms;
+    }
+
+    if ((lat_slow_updated == false) ||
+        (current_speed_mps <= 0.5f) ||
+        (gnss_heading_valid == false))
+    {
+        s_bike_runtime.lat_ref_slow_g = BIKE_DYN_LpfUpdate(s_bike_runtime.lat_ref_slow_g,
+                                                           0.0f,
+                                                           BIKE_DYN_REFERENCE_DECAY_TAU_MS,
+                                                           task_dt_s);
     }
 
     s_bike_runtime.lon_ref_quality_permille =
@@ -3139,11 +3415,23 @@ static void BIKE_DYN_UpdateExternalReferences(const app_bike_settings_t *setting
         (gnss_heading_valid != false) ? (1000.0f * BIKE_DYN_CalcGnssHeadingQuality01(fix, settings, now_ms)) :
         ((speed_source != (uint8_t)APP_BIKE_SPEED_SOURCE_IMU_FALLBACK) ? 600.0f : 0.0f);
 
+    /* ---------------------------------------------------------------------- */
+    /*  정차/저속 safety gate                                                   */
+    /*                                                                        */
+    /*  GNSS/OBD source가 살아 있더라도 매우 낮은 속도에서는 coordinated bank    */
+    /*  와 online self-cal reference 신뢰도를 낮추는 편이 상용기에서 안전하다. */
+    /* ---------------------------------------------------------------------- */
+    if (BIKE_DYN_SpeedAbsMmps(selected_speed_mmps) < BIKE_DYN_COORD_MIN_SPEED_MMPS)
+    {
+        s_bike_runtime.lat_ref_quality_permille = 0.0f;
+    }
+
     if (current_gnss_ms != 0u)
     {
         s_bike_runtime.last_gnss_fix_update_ms = current_gnss_ms;
     }
 }
+
 
 static void BIKE_DYN_UpdateMotionReferenceBlend(uint8_t speed_source,
                                                 bool gnss_heading_valid,
@@ -3214,6 +3502,18 @@ static float BIKE_DYN_CalcCoordinatedBankBlend01(const app_bike_settings_t *sett
         return 0.0f;
     }
 
+    /* ------------------------------------------------------------------ */
+    /*  저속/정차에서는 coordinated bank 가 sign anchor 역할을 해서는 안 된다. */
+    /*                                                                    */
+    /*  실제 바이크는 아주 저속에서 steer balance / hand input 영향이 커서    */
+    /*  tan(bank) ≈ lat/g 가 잘 성립하지 않는다.                             */
+    /*  bench test 안정성을 위해서도 이 gate 가 필요하다.                    */
+    /* ------------------------------------------------------------------ */
+    if (BIKE_DYN_SpeedAbsMmps(selected_speed_mmps) < BIKE_DYN_COORD_MIN_SPEED_MMPS)
+    {
+        return 0.0f;
+    }
+
     lat_abs_g = fabsf(s_bike_runtime.lat_ref_g);
     lon_abs_g = fabsf(s_bike_runtime.lon_ref_g);
     if (lat_abs_g < BIKE_DYN_COORD_MIN_LAT_G)
@@ -3265,6 +3565,8 @@ static void BIKE_DYN_UpdateOnlineMountSelfCalibration(const app_bike_settings_t 
     float quality01;
     float jerk_limit_mg_per_s;
     float trust_floor;
+    float bank_ref_deg;
+    float bank_diff_deg;
 
     if (settings == 0)
     {
@@ -3280,6 +3582,19 @@ static void BIKE_DYN_UpdateOnlineMountSelfCalibration(const app_bike_settings_t 
     }
 
     if (BIKE_DYN_SpeedAbsMmps(selected_speed_mmps) < BIKE_DYN_MOUNT_SELF_CAL_MIN_SPEED_MMPS)
+    {
+        return;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /*  zero 직후 holdoff                                                   */
+    /*                                                                    */
+    /*  zero를 막 수행한 직후에는 기준이 막 바뀐 상태이므로                   */
+    /*  residual yaw를 곧바로 적분하면 방금 잡은 기준을 다시 흔들 수 있다.    */
+    /* ------------------------------------------------------------------ */
+    if ((s_bike_runtime.last_zero_capture_ms != 0u) &&
+        (s_bike_runtime.last_imu_timestamp_ms >= s_bike_runtime.last_zero_capture_ms) &&
+        ((s_bike_runtime.last_imu_timestamp_ms - s_bike_runtime.last_zero_capture_ms) < BIKE_DYN_MOUNT_SELF_CAL_HOLDOFF_MS))
     {
         return;
     }
@@ -3324,6 +3639,36 @@ static void BIKE_DYN_UpdateOnlineMountSelfCalibration(const app_bike_settings_t 
     }
 
     /* ------------------------------------------------------------------ */
+    /*  coordinated bank 와 IMU bank 가 대체로 같은 방향을 가리킬 때만 학습   */
+    /*                                                                    */
+    /*  이유                                                               */
+    /*  - external ref가 순간적으로 틀렸거나 stale 인데도                    */
+    /*    self-cal이 그 오차를 mounting yaw 로 오인해 적분하면                */
+    /*    런타임 trim candidate 가 엉뚱한 방향으로 누적될 수 있다.           */
+    /*  - 따라서 bank sign / magnitude agreement gate 를 한 번 더 건다.      */
+    /* ------------------------------------------------------------------ */
+    bank_ref_deg = atanf(BIKE_DYN_ClampF(ref_lat_g,
+                                         -BIKE_DYN_MAX_DYNAMIC_COMP_ABS_G,
+                                          BIKE_DYN_MAX_DYNAMIC_COMP_ABS_G)) * BIKE_DYN_RAD2DEG;
+
+    if ((fabsf(bank_ref_deg) < BIKE_DYN_MOUNT_SELF_CAL_MIN_BANK_DEG) ||
+        (fabsf(s_bike_runtime.bank_imu_deg) < BIKE_DYN_MOUNT_SELF_CAL_MIN_BANK_DEG))
+    {
+        return;
+    }
+
+    if ((bank_ref_deg * s_bike_runtime.bank_imu_deg) < 0.0f)
+    {
+        return;
+    }
+
+    bank_diff_deg = fabsf(bank_ref_deg - s_bike_runtime.bank_imu_deg);
+    if (bank_diff_deg > BIKE_DYN_MOUNT_SELF_CAL_MAX_BANK_DIFF_DEG)
+    {
+        return;
+    }
+
+    /* ------------------------------------------------------------------ */
     /*  small-angle yaw residual estimator                                   */
     /*                                                                      */
     /*  reference vector r = [lon_ref, lat_ref]                              */
@@ -3333,7 +3678,7 @@ static void BIKE_DYN_UpdateOnlineMountSelfCalibration(const app_bike_settings_t 
     /*      yaw_err ≈ (r_x * m_y - r_y * m_x) / |r|^2                        */
     /*                                                                      */
     /*  여기서 얻은 residual yaw 를 반대 방향으로 천천히 적분해서             */
-    /*  mounting yaw trim 을 추정한다.                                       */
+    /*  mounting yaw trim candidate 를 추정한다.                             */
     /* ------------------------------------------------------------------ */
     residual_yaw_rad = ((ref_lon_g * s_bike_runtime.lat_imu_g) -
                         (ref_lat_g * s_bike_runtime.lon_imu_g)) /
@@ -3352,6 +3697,7 @@ static void BIKE_DYN_UpdateOnlineMountSelfCalibration(const app_bike_settings_t 
                                                         -BIKE_DYN_MOUNT_SELF_CAL_MAX_ABS_YAW_DEG,
                                                          BIKE_DYN_MOUNT_SELF_CAL_MAX_ABS_YAW_DEG);
 }
+
 
 static void BIKE_DYN_UpdateCoordinatedBankEstimate(const app_bike_settings_t *settings,
                                                    uint8_t bank_calc_mode,
@@ -3385,6 +3731,7 @@ static void BIKE_DYN_UpdateCoordinatedBankEstimate(const app_bike_settings_t *se
     }
     else if (((bank_calc_mode == (uint8_t)APP_BIKE_BANK_CALC_MODE_OBD) ||
               (bank_calc_mode == (uint8_t)APP_BIKE_BANK_CALC_MODE_GNSS)) &&
+             (BIKE_DYN_SpeedAbsMmps(selected_speed_mmps) >= BIKE_DYN_COORD_MIN_SPEED_MMPS) &&
              (fabsf(s_bike_runtime.lat_ref_g) >= BIKE_DYN_COORD_MIN_LAT_G) &&
              (s_bike_runtime.lat_ref_quality_permille >= 500.0f))
     {
@@ -3945,7 +4292,7 @@ static void BIKE_DYN_PublishState(uint32_t now_ms,
 
     if ((s_bike_runtime.zero_valid != false) &&
         (s_bike_runtime.gravity_valid != false) &&
-        (BIKE_DYN_GetCorrectedZeroHints(&hint_fwd_x,
+        (BIKE_DYN_GetFrozenZeroHints(&hint_fwd_x,
                                         &hint_fwd_y,
                                         &hint_fwd_z,
                                         &hint_left_x,
@@ -4020,7 +4367,6 @@ static void BIKE_DYN_ResetRuntime(uint32_t now_ms)
     float    keep_gyro_bias_x_dps;
     float    keep_gyro_bias_y_dps;
     float    keep_gyro_bias_z_dps;
-    float    keep_mount_auto_yaw_deg;
     uint32_t keep_gyro_bias_cal_success_count;
     uint32_t keep_last_gyro_bias_cal_ms;
     bool     keep_gyro_bias_cal_last_success;
@@ -4029,7 +4375,6 @@ static void BIKE_DYN_ResetRuntime(uint32_t now_ms)
     keep_gyro_bias_x_dps              = s_bike_runtime.gyro_bias_x_dps;
     keep_gyro_bias_y_dps              = s_bike_runtime.gyro_bias_y_dps;
     keep_gyro_bias_z_dps              = s_bike_runtime.gyro_bias_z_dps;
-    keep_mount_auto_yaw_deg           = s_bike_runtime.mount_auto_yaw_deg;
     keep_gyro_bias_cal_success_count  = s_bike_runtime.gyro_bias_cal_success_count;
     keep_last_gyro_bias_cal_ms        = s_bike_runtime.last_gyro_bias_cal_ms;
     keep_gyro_bias_cal_last_success   = s_bike_runtime.gyro_bias_cal_last_success;
@@ -4042,11 +4387,18 @@ static void BIKE_DYN_ResetRuntime(uint32_t now_ms)
     s_bike_runtime.zero_capture_settle_until_ms = now_ms + BIKE_DYN_ZERO_CAPTURE_SETTLE_MS;
     s_bike_runtime.zero_capture_start_ms        = now_ms;
 
+    /* ------------------------------------------------------------------ */
+    /*  hard rezero / runtime reset 시에는 learned yaw candidate 를 유지하지 */
+    /*  않는다.                                                            */
+    /*                                                                    */
+    /*  판매용 안정성 기준에서는 reset 경계가 '새 세션의 시작' 이다.         */
+    /*  gyro bias 는 보존해도 되지만, yaw candidate 는 새 기준에서 다시      */
+    /*  학습하는 편이 상태오염에 강하다.                                     */
+    /* ------------------------------------------------------------------ */
     s_bike_runtime.gyro_bias_valid            = keep_gyro_bias_valid;
     s_bike_runtime.gyro_bias_x_dps            = keep_gyro_bias_x_dps;
     s_bike_runtime.gyro_bias_y_dps            = keep_gyro_bias_y_dps;
     s_bike_runtime.gyro_bias_z_dps            = keep_gyro_bias_z_dps;
-    s_bike_runtime.mount_auto_yaw_deg          = keep_mount_auto_yaw_deg;
     s_bike_runtime.gyro_bias_cal_success_count = keep_gyro_bias_cal_success_count;
     s_bike_runtime.last_gyro_bias_cal_ms      = keep_last_gyro_bias_cal_ms;
     s_bike_runtime.gyro_bias_cal_last_success = keep_gyro_bias_cal_last_success;
