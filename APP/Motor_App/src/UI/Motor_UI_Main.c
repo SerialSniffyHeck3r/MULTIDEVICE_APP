@@ -18,6 +18,14 @@
 #define MOTOR_MAIN_FONT_LARGE             u8g2_font_logisoso24_tn
 #endif
 
+#ifndef MOTOR_MAIN_FONT_SPEED_LARGE
+#define MOTOR_MAIN_FONT_SPEED_LARGE       MOTOR_MAIN_FONT_LARGE
+#endif
+
+#ifndef MOTOR_MAIN_FONT_ANGLE_LARGE
+#define MOTOR_MAIN_FONT_ANGLE_LARGE       u8g2_font_logisoso26_tn
+#endif
+
 #ifndef MOTOR_MAIN_TOP_GAUGE_H
 #define MOTOR_MAIN_TOP_GAUGE_H            18
 #endif
@@ -34,16 +42,28 @@
 #define MOTOR_MAIN_INNER_GAP_X             6
 #endif
 
+#ifndef MOTOR_MAIN_TOP_GAUGE_MAJOR_TICK_H
+#define MOTOR_MAIN_TOP_GAUGE_MAJOR_TICK_H 14
+#endif
+
+#ifndef MOTOR_MAIN_TOP_GAUGE_MINOR_TICK_H
+#define MOTOR_MAIN_TOP_GAUGE_MINOR_TICK_H  9
+#endif
+
+#ifndef MOTOR_MAIN_TOP_GAUGE_BAR_TOP_DY
+#define MOTOR_MAIN_TOP_GAUGE_BAR_TOP_DY    1
+#endif
+
 #ifndef MOTOR_MAIN_TOP_GAUGE_BAR_H
-#define MOTOR_MAIN_TOP_GAUGE_BAR_H         5
+#define MOTOR_MAIN_TOP_GAUGE_BAR_H         8
 #endif
 
 #ifndef MOTOR_MAIN_LEFT_SCALE_H
-#define MOTOR_MAIN_LEFT_SCALE_H           14
+#define MOTOR_MAIN_LEFT_SCALE_H           12
 #endif
 
 #ifndef MOTOR_MAIN_LEFT_BOTTOM_GAUGE_H
-#define MOTOR_MAIN_LEFT_BOTTOM_GAUGE_H    14
+#define MOTOR_MAIN_LEFT_BOTTOM_GAUGE_H    12
 #endif
 
 #ifndef MOTOR_MAIN_SIDE_BAR_TOP_W
@@ -76,6 +96,70 @@
 
 #ifndef MOTOR_MAIN_ANGLE_MINOR_STEP_X10
 #define MOTOR_MAIN_ANGLE_MINOR_STEP_X10   75
+#endif
+
+#ifndef MOTOR_MAIN_ANGLE_GAUGE_MAJOR_TICK_H
+#define MOTOR_MAIN_ANGLE_GAUGE_MAJOR_TICK_H 12
+#endif
+
+#ifndef MOTOR_MAIN_ANGLE_GAUGE_MINOR_TICK_H
+#define MOTOR_MAIN_ANGLE_GAUGE_MINOR_TICK_H 7
+#endif
+
+#ifndef MOTOR_MAIN_ANGLE_GAUGE_BAR_H
+#define MOTOR_MAIN_ANGLE_GAUGE_BAR_H       7
+#endif
+
+#ifndef MOTOR_MAIN_ANGLE_GAUGE_CENTER_TICK_W
+#define MOTOR_MAIN_ANGLE_GAUGE_CENTER_TICK_W 3
+#endif
+
+#ifndef MOTOR_MAIN_LAT_G_MAX_MG
+#define MOTOR_MAIN_LAT_G_MAX_MG         1000
+#endif
+
+#ifndef MOTOR_MAIN_LAT_G_MAJOR_STEP_MG
+#define MOTOR_MAIN_LAT_G_MAJOR_STEP_MG   250
+#endif
+
+#ifndef MOTOR_MAIN_LAT_G_MINOR_STEP_MG
+#define MOTOR_MAIN_LAT_G_MINOR_STEP_MG   125
+#endif
+
+#ifndef MOTOR_MAIN_GRADE_GAUGE_W
+#define MOTOR_MAIN_GRADE_GAUGE_W          14
+#endif
+
+#ifndef MOTOR_MAIN_GRADE_GAUGE_GAP_X
+#define MOTOR_MAIN_GRADE_GAUGE_GAP_X       4
+#endif
+
+#ifndef MOTOR_MAIN_GRADE_MAX_X10
+#define MOTOR_MAIN_GRADE_MAX_X10         200
+#endif
+
+#ifndef MOTOR_MAIN_GRADE_MAJOR_STEP_X10
+#define MOTOR_MAIN_GRADE_MAJOR_STEP_X10   50
+#endif
+
+#ifndef MOTOR_MAIN_GRADE_MINOR_STEP_X10
+#define MOTOR_MAIN_GRADE_MINOR_STEP_X10   25
+#endif
+
+#ifndef MOTOR_MAIN_VERTICAL_GAUGE_MAJOR_TICK_W
+#define MOTOR_MAIN_VERTICAL_GAUGE_MAJOR_TICK_W 12
+#endif
+
+#ifndef MOTOR_MAIN_VERTICAL_GAUGE_MINOR_TICK_W
+#define MOTOR_MAIN_VERTICAL_GAUGE_MINOR_TICK_W 7
+#endif
+
+#ifndef MOTOR_MAIN_VERTICAL_GAUGE_BAR_W
+#define MOTOR_MAIN_VERTICAL_GAUGE_BAR_W   7
+#endif
+
+#ifndef MOTOR_MAIN_VERTICAL_GAUGE_CENTER_TICK_H
+#define MOTOR_MAIN_VERTICAL_GAUGE_CENTER_TICK_H 3
 #endif
 
 #ifndef MOTOR_MAIN_GAUGE_MAJOR_TICK_H
@@ -141,6 +225,29 @@ static int32_t motor_main_clamp_i32(int32_t value, int32_t lo, int32_t hi)
         return hi;
     }
     return value;
+}
+
+static int16_t motor_main_scale_to_span(int32_t value, int32_t max_value, int16_t span_px)
+{
+    int32_t scaled;
+
+    if ((value <= 0) || (max_value <= 0) || (span_px <= 0))
+    {
+        return 0;
+    }
+
+    value = motor_main_clamp_i32(value, 0, max_value);
+    scaled = ((value * (int32_t)span_px) + (max_value / 2)) / max_value;
+    if ((scaled == 0) && (value > 0))
+    {
+        scaled = 1;
+    }
+    if (scaled > (int32_t)span_px)
+    {
+        scaled = span_px;
+    }
+
+    return (int16_t)scaled;
 }
 
 static uint16_t motor_main_measure_text(u8g2_t *u8g2, const uint8_t *font, const char *text)
@@ -699,49 +806,44 @@ static void motor_main_draw_unipolar_top_gauge(u8g2_t *u8g2,
                                                int32_t major_step,
                                                int32_t minor_step)
 {
-    int16_t bar_y;
-    int16_t tick_y;
     int16_t major_h;
     int16_t minor_h;
+    int16_t bar_y;
+    int16_t bar_h;
     int16_t fill_w;
     int32_t step;
 
-    if ((u8g2 == 0) || (w < 20) || (h <= MOTOR_MAIN_TOP_GAUGE_BAR_H) || (max_value <= 0))
+    if ((u8g2 == 0) || (w < 20) || (h <= 0) || (max_value <= 0))
     {
         return;
     }
 
     value = motor_main_clamp_i32(value, 0, max_value);
-    bar_y = y;
-    tick_y = (int16_t)(y + MOTOR_MAIN_TOP_GAUGE_BAR_H);
-    major_h = (int16_t)(h - MOTOR_MAIN_TOP_GAUGE_BAR_H);
-    if (major_h > MOTOR_MAIN_GAUGE_MAJOR_TICK_H)
+    major_h = (h < MOTOR_MAIN_TOP_GAUGE_MAJOR_TICK_H) ? h : MOTOR_MAIN_TOP_GAUGE_MAJOR_TICK_H;
+    minor_h = (h < MOTOR_MAIN_TOP_GAUGE_MINOR_TICK_H) ? h : MOTOR_MAIN_TOP_GAUGE_MINOR_TICK_H;
+    if (minor_h > major_h)
     {
-        major_h = MOTOR_MAIN_GAUGE_MAJOR_TICK_H;
+        minor_h = major_h;
     }
-    if (major_h < 4)
+    if (minor_h < 1)
     {
-        major_h = (int16_t)(h - MOTOR_MAIN_TOP_GAUGE_BAR_H);
-    }
-
-    minor_h = major_h;
-    if (minor_h > MOTOR_MAIN_GAUGE_MINOR_TICK_H)
-    {
-        minor_h = MOTOR_MAIN_GAUGE_MINOR_TICK_H;
-    }
-    if (minor_h < 2)
-    {
-        minor_h = 2;
+        minor_h = 1;
     }
 
-    fill_w = (int16_t)((value * w) / max_value);
-    if (fill_w > w)
+    bar_y = (int16_t)(y + MOTOR_MAIN_TOP_GAUGE_BAR_TOP_DY);
+    if (bar_y < y)
     {
-        fill_w = w;
+        bar_y = y;
     }
-    if (fill_w > 0)
+
+    bar_h = MOTOR_MAIN_TOP_GAUGE_BAR_H;
+    if ((bar_y + bar_h) > (y + major_h))
     {
-        u8g2_DrawBox(u8g2, x, bar_y, (uint8_t)fill_w, MOTOR_MAIN_TOP_GAUGE_BAR_H);
+        bar_h = (int16_t)((y + major_h) - bar_y);
+    }
+    if (bar_h < 1)
+    {
+        bar_h = 1;
     }
 
     if ((minor_step > 0) && (minor_step < max_value))
@@ -755,8 +857,8 @@ static void motor_main_draw_unipolar_top_gauge(u8g2_t *u8g2,
                 continue;
             }
 
-            tick_x = (int16_t)(x + ((step * (int32_t)(w - 1)) / max_value));
-            u8g2_DrawVLine(u8g2, tick_x, tick_y, (uint8_t)minor_h);
+            tick_x = (int16_t)(x + motor_main_scale_to_span(step, max_value, (int16_t)(w - 1)));
+            u8g2_DrawVLine(u8g2, tick_x, y, (uint8_t)minor_h);
         }
     }
 
@@ -766,9 +868,15 @@ static void motor_main_draw_unipolar_top_gauge(u8g2_t *u8g2,
         {
             int16_t tick_x;
 
-            tick_x = (int16_t)(x + ((step * (int32_t)(w - 1)) / max_value));
-            u8g2_DrawVLine(u8g2, tick_x, tick_y, (uint8_t)major_h);
+            tick_x = (int16_t)(x + motor_main_scale_to_span(step, max_value, (int16_t)(w - 1)));
+            u8g2_DrawVLine(u8g2, tick_x, y, (uint8_t)major_h);
         }
+    }
+
+    fill_w = motor_main_scale_to_span(value, max_value, w);
+    if (fill_w > 0)
+    {
+        u8g2_DrawBox(u8g2, x, bar_y, (uint8_t)fill_w, (uint8_t)bar_h);
     }
 }
 
@@ -780,73 +888,44 @@ static void motor_main_draw_bipolar_gauge(u8g2_t *u8g2,
                                           int32_t value,
                                           int32_t max_abs_value,
                                           int32_t major_step,
-                                          int32_t minor_step)
+                                          int32_t minor_step,
+                                          int16_t major_tick_h,
+                                          int16_t minor_tick_h,
+                                          int16_t bar_h,
+                                          int16_t center_tick_w)
 {
-    int16_t bar_y;
-    int16_t tick_y;
     int16_t center_x;
     int16_t half_span_px;
-    int16_t fill_px;
     int16_t major_h;
     int16_t minor_h;
+    int16_t box_h;
+    int16_t fill_px;
+    int16_t i;
     int32_t clamped_value;
+    int32_t abs_value;
     int32_t step;
 
-    if ((u8g2 == 0) || (w < 24) || (h <= MOTOR_MAIN_TOP_GAUGE_BAR_H) || (max_abs_value <= 0))
+    if ((u8g2 == 0) || (w < 3) || (h <= 0) || (max_abs_value <= 0))
     {
         return;
     }
 
     clamped_value = motor_main_clamp_i32(value, -max_abs_value, max_abs_value);
-    bar_y = y;
-    tick_y = (int16_t)(y + MOTOR_MAIN_TOP_GAUGE_BAR_H);
+    abs_value = motor_main_abs_i32(clamped_value);
     center_x = (int16_t)(x + (w / 2));
-    half_span_px = (int16_t)(w / 2);
+    half_span_px = (int16_t)((w - 1) / 2);
 
-    major_h = (int16_t)(h - MOTOR_MAIN_TOP_GAUGE_BAR_H);
-    if (major_h > MOTOR_MAIN_GAUGE_MAJOR_TICK_H)
+    major_h = (major_tick_h < h) ? major_tick_h : h;
+    minor_h = (minor_tick_h < major_h) ? minor_tick_h : major_h;
+    if (minor_h < 1)
     {
-        major_h = MOTOR_MAIN_GAUGE_MAJOR_TICK_H;
-    }
-    if (major_h < 4)
-    {
-        major_h = (int16_t)(h - MOTOR_MAIN_TOP_GAUGE_BAR_H);
+        minor_h = 1;
     }
 
-    minor_h = major_h;
-    if (minor_h > MOTOR_MAIN_GAUGE_MINOR_TICK_H)
+    box_h = (bar_h < major_h) ? bar_h : major_h;
+    if (box_h < 1)
     {
-        minor_h = MOTOR_MAIN_GAUGE_MINOR_TICK_H;
-    }
-    if (minor_h < 2)
-    {
-        minor_h = 2;
-    }
-
-    fill_px = (int16_t)((motor_main_abs_i32(clamped_value) * half_span_px) / max_abs_value);
-    if (fill_px > half_span_px)
-    {
-        fill_px = half_span_px;
-    }
-
-    if (fill_px > 0)
-    {
-        if (clamped_value >= 0)
-        {
-            u8g2_DrawBox(u8g2,
-                         center_x,
-                         bar_y,
-                         (uint8_t)fill_px,
-                         MOTOR_MAIN_TOP_GAUGE_BAR_H);
-        }
-        else
-        {
-            u8g2_DrawBox(u8g2,
-                         (int16_t)(center_x - fill_px),
-                         bar_y,
-                         (uint8_t)fill_px,
-                         MOTOR_MAIN_TOP_GAUGE_BAR_H);
-        }
+        box_h = 1;
     }
 
     if ((minor_step > 0) && (minor_step < max_abs_value))
@@ -860,9 +939,9 @@ static void motor_main_draw_bipolar_gauge(u8g2_t *u8g2,
                 continue;
             }
 
-            offset_px = (int16_t)((step * (int32_t)(w - 1)) / (2 * max_abs_value));
-            u8g2_DrawVLine(u8g2, (int16_t)(center_x - offset_px), tick_y, (uint8_t)minor_h);
-            u8g2_DrawVLine(u8g2, (int16_t)(center_x + offset_px), tick_y, (uint8_t)minor_h);
+            offset_px = motor_main_scale_to_span(step, max_abs_value, half_span_px);
+            u8g2_DrawVLine(u8g2, (int16_t)(center_x - offset_px), y, (uint8_t)minor_h);
+            u8g2_DrawVLine(u8g2, (int16_t)(center_x + offset_px), y, (uint8_t)minor_h);
         }
     }
 
@@ -872,24 +951,204 @@ static void motor_main_draw_bipolar_gauge(u8g2_t *u8g2,
         {
             int16_t offset_px;
 
-            offset_px = (int16_t)((step * (int32_t)(w - 1)) / (2 * max_abs_value));
-            u8g2_DrawVLine(u8g2, (int16_t)(center_x - offset_px), tick_y, (uint8_t)major_h);
-            u8g2_DrawVLine(u8g2, (int16_t)(center_x + offset_px), tick_y, (uint8_t)major_h);
+            offset_px = motor_main_scale_to_span(step, max_abs_value, half_span_px);
+            u8g2_DrawVLine(u8g2, (int16_t)(center_x - offset_px), y, (uint8_t)major_h);
+            u8g2_DrawVLine(u8g2, (int16_t)(center_x + offset_px), y, (uint8_t)major_h);
         }
     }
 
-    u8g2_DrawVLine(u8g2,
-                   (int16_t)(center_x - 1),
-                   tick_y,
-                   (uint8_t)major_h);
-    u8g2_DrawVLine(u8g2,
-                   center_x,
-                   tick_y,
-                   (uint8_t)major_h);
-    u8g2_DrawVLine(u8g2,
-                   (int16_t)(center_x + 1),
-                   tick_y,
-                   (uint8_t)major_h);
+    if (abs_value > 0)
+    {
+        fill_px = motor_main_scale_to_span(abs_value, max_abs_value, half_span_px);
+        if (fill_px > 0)
+        {
+            int16_t box_x;
+            int16_t box_w;
+
+            box_w = (int16_t)(fill_px + 1);
+            box_x = (clamped_value >= 0)
+                    ? center_x
+                    : (int16_t)(center_x - fill_px);
+
+            if (box_x < x)
+            {
+                box_w = (int16_t)(box_w - (x - box_x));
+                box_x = x;
+            }
+            if ((box_x + box_w) > (x + w))
+            {
+                box_w = (int16_t)((x + w) - box_x);
+            }
+            if (box_w > 0)
+            {
+                u8g2_DrawBox(u8g2, box_x, y, (uint8_t)box_w, (uint8_t)box_h);
+            }
+        }
+    }
+
+    if (center_tick_w < 1)
+    {
+        center_tick_w = 1;
+    }
+
+    for (i = 0; i < center_tick_w; i++)
+    {
+        int16_t line_x;
+
+        line_x = (int16_t)(center_x - (center_tick_w / 2) + i);
+        if ((line_x >= x) && (line_x < (x + w)))
+        {
+            u8g2_DrawVLine(u8g2, line_x, y, (uint8_t)major_h);
+        }
+    }
+}
+
+static void motor_main_draw_vertical_bipolar_gauge(u8g2_t *u8g2,
+                                                   int16_t x,
+                                                   int16_t y,
+                                                   int16_t w,
+                                                   int16_t h,
+                                                   int32_t value,
+                                                   int32_t max_abs_value,
+                                                   int32_t major_step,
+                                                   int32_t minor_step)
+{
+    int16_t edge_x;
+    int16_t center_y;
+    int16_t half_span_px;
+    int16_t major_w;
+    int16_t minor_w;
+    int16_t bar_w;
+    int16_t fill_px;
+    int16_t i;
+    int32_t clamped_value;
+    int32_t abs_value;
+    int32_t step;
+
+    if ((u8g2 == 0) || (w <= 0) || (h < 3) || (max_abs_value <= 0))
+    {
+        return;
+    }
+
+    clamped_value = motor_main_clamp_i32(value, -max_abs_value, max_abs_value);
+    abs_value = motor_main_abs_i32(clamped_value);
+    edge_x = (int16_t)(x + w - 1);
+    center_y = (int16_t)(y + (h / 2));
+    half_span_px = (int16_t)((h - 1) / 2);
+
+    major_w = (w < MOTOR_MAIN_VERTICAL_GAUGE_MAJOR_TICK_W) ? w : MOTOR_MAIN_VERTICAL_GAUGE_MAJOR_TICK_W;
+    minor_w = (w < MOTOR_MAIN_VERTICAL_GAUGE_MINOR_TICK_W) ? w : MOTOR_MAIN_VERTICAL_GAUGE_MINOR_TICK_W;
+    if (minor_w > major_w)
+    {
+        minor_w = major_w;
+    }
+    if (minor_w < 1)
+    {
+        minor_w = 1;
+    }
+
+    bar_w = (w < MOTOR_MAIN_VERTICAL_GAUGE_BAR_W) ? w : MOTOR_MAIN_VERTICAL_GAUGE_BAR_W;
+    if (bar_w > major_w)
+    {
+        bar_w = major_w;
+    }
+    if (bar_w < 1)
+    {
+        bar_w = 1;
+    }
+
+    if ((minor_step > 0) && (minor_step < max_abs_value))
+    {
+        for (step = minor_step; step < max_abs_value; step += minor_step)
+        {
+            int16_t offset_px;
+
+            if ((major_step > 0) && ((step % major_step) == 0))
+            {
+                continue;
+            }
+
+            offset_px = motor_main_scale_to_span(step, max_abs_value, half_span_px);
+            u8g2_DrawHLine(u8g2,
+                           (int16_t)(edge_x - minor_w + 1),
+                           (int16_t)(center_y - offset_px),
+                           (uint8_t)minor_w);
+            u8g2_DrawHLine(u8g2,
+                           (int16_t)(edge_x - minor_w + 1),
+                           (int16_t)(center_y + offset_px),
+                           (uint8_t)minor_w);
+        }
+    }
+
+    if (major_step > 0)
+    {
+        for (step = major_step; step <= max_abs_value; step += major_step)
+        {
+            int16_t offset_px;
+
+            offset_px = motor_main_scale_to_span(step, max_abs_value, half_span_px);
+            u8g2_DrawHLine(u8g2,
+                           (int16_t)(edge_x - major_w + 1),
+                           (int16_t)(center_y - offset_px),
+                           (uint8_t)major_w);
+            u8g2_DrawHLine(u8g2,
+                           (int16_t)(edge_x - major_w + 1),
+                           (int16_t)(center_y + offset_px),
+                           (uint8_t)major_w);
+        }
+    }
+
+    if (abs_value > 0)
+    {
+        fill_px = motor_main_scale_to_span(abs_value, max_abs_value, half_span_px);
+        if (fill_px > 0)
+        {
+            int16_t box_y;
+            int16_t box_h;
+
+            box_h = (int16_t)(fill_px + 1);
+            box_y = (clamped_value >= 0)
+                    ? (int16_t)(center_y - fill_px)
+                    : center_y;
+            if (box_y < y)
+            {
+                box_h = (int16_t)(box_h - (y - box_y));
+                box_y = y;
+            }
+            if ((box_y + box_h) > (y + h))
+            {
+                box_h = (int16_t)((y + h) - box_y);
+            }
+            if (box_h > 0)
+            {
+                u8g2_DrawBox(u8g2,
+                             (int16_t)(edge_x - bar_w + 1),
+                             box_y,
+                             (uint8_t)bar_w,
+                             (uint8_t)box_h);
+            }
+        }
+    }
+
+    if (MOTOR_MAIN_VERTICAL_GAUGE_CENTER_TICK_H > 0)
+    {
+        int16_t start_y;
+
+        start_y = (int16_t)(center_y - (MOTOR_MAIN_VERTICAL_GAUGE_CENTER_TICK_H / 2));
+        for (i = 0; i < MOTOR_MAIN_VERTICAL_GAUGE_CENTER_TICK_H; i++)
+        {
+            int16_t line_y;
+
+            line_y = (int16_t)(start_y + i);
+            if ((line_y >= y) && (line_y < (y + h)))
+            {
+                u8g2_DrawHLine(u8g2,
+                               (int16_t)(edge_x - major_w + 1),
+                               line_y,
+                               (uint8_t)major_w);
+            }
+        }
+    }
 }
 
 static void motor_main_draw_right_stat_row(u8g2_t *u8g2,
@@ -978,9 +1237,11 @@ static void motor_main_draw_left_section(u8g2_t *u8g2,
     motor_main_left_geometry_t geo;
     int16_t side_y;
     int16_t side_h;
-    int16_t big_h;
+    int16_t angle_h;
     int16_t mid_h;
     int16_t small_h;
+    int16_t lat_gauge_x;
+    int16_t lat_gauge_w;
     int16_t lat_gauge_y;
     int16_t max_row_y;
     int16_t angle_value_y;
@@ -1011,8 +1272,9 @@ static void motor_main_draw_left_section(u8g2_t *u8g2,
 
     angle_value_x10 = motor_main_get_display_bank_x10(state);
     lat_value_mg = motor_main_get_display_lat_mg(state);
-    g_max_mg = motor_main_get_g_scale_max_mg(state);
-    motor_main_get_lat_ticks_mg(g_max_mg, &g_major_step_mg, &g_minor_step_mg);
+    g_max_mg = MOTOR_MAIN_LAT_G_MAX_MG;
+    g_major_step_mg = MOTOR_MAIN_LAT_G_MAJOR_STEP_MG;
+    g_minor_step_mg = MOTOR_MAIN_LAT_G_MINOR_STEP_MG;
 
     brake_value_mg = (state->dyn.lon_accel_mg < 0) ? motor_main_abs_i32(state->dyn.lon_accel_mg) : 0;
     accel_value_mg = (state->dyn.lon_accel_mg > 0) ? state->dyn.lon_accel_mg : 0;
@@ -1035,21 +1297,27 @@ static void motor_main_draw_left_section(u8g2_t *u8g2,
                                     g_max_mg);
 
     motor_main_draw_bipolar_gauge(u8g2,
-                                  geo.content_x,
+                                  x,
                                   y,
-                                  geo.content_w,
+                                  w,
                                   MOTOR_MAIN_LEFT_SCALE_H,
                                   angle_value_x10,
                                   MOTOR_MAIN_ANGLE_MAX_DEG_X10,
                                   MOTOR_MAIN_ANGLE_MAJOR_STEP_X10,
-                                  MOTOR_MAIN_ANGLE_MINOR_STEP_X10);
+                                  MOTOR_MAIN_ANGLE_MINOR_STEP_X10,
+                                  MOTOR_MAIN_ANGLE_GAUGE_MAJOR_TICK_H,
+                                  MOTOR_MAIN_ANGLE_GAUGE_MINOR_TICK_H,
+                                  MOTOR_MAIN_ANGLE_GAUGE_BAR_H,
+                                  MOTOR_MAIN_ANGLE_GAUGE_CENTER_TICK_W);
 
-    big_h = motor_main_get_font_height(u8g2, MOTOR_MAIN_FONT_LARGE);
+    angle_h = motor_main_get_font_height(u8g2, MOTOR_MAIN_FONT_ANGLE_LARGE);
     mid_h = motor_main_get_font_height(u8g2, MOTOR_MAIN_FONT_MEDIUM);
     small_h = motor_main_get_font_height(u8g2, MOTOR_MAIN_FONT_SMALL);
+    lat_gauge_x = (int16_t)(geo.brake_edge_x + MOTOR_MAIN_SIDE_BAR_BOTTOM_W);
+    lat_gauge_w = (int16_t)((geo.accel_edge_x - MOTOR_MAIN_SIDE_BAR_BOTTOM_W) - lat_gauge_x + 1);
     lat_gauge_y = (int16_t)(y + h - MOTOR_MAIN_LEFT_BOTTOM_GAUGE_H);
     max_row_y = (int16_t)(lat_gauge_y - mid_h - 3);
-    angle_value_y = (int16_t)(y + MOTOR_MAIN_LEFT_SCALE_H + ((max_row_y - (y + MOTOR_MAIN_LEFT_SCALE_H) - big_h) / 2));
+    angle_value_y = (int16_t)(y + MOTOR_MAIN_LEFT_SCALE_H + ((max_row_y - (y + MOTOR_MAIN_LEFT_SCALE_H) - angle_h) / 2));
     if (angle_value_y < (int16_t)(y + MOTOR_MAIN_LEFT_SCALE_H + 2))
     {
         angle_value_y = (int16_t)(y + MOTOR_MAIN_LEFT_SCALE_H + 2);
@@ -1060,9 +1328,9 @@ static void motor_main_draw_left_section(u8g2_t *u8g2,
     motor_main_format_abs_deg(right_max_buf, sizeof(right_max_buf), state->dyn.max_right_bank_deg_x10);
 
     motor_main_draw_text_top(u8g2,
-                             MOTOR_MAIN_FONT_LARGE,
+                             MOTOR_MAIN_FONT_ANGLE_LARGE,
                              motor_main_center_text_x(u8g2,
-                                                      MOTOR_MAIN_FONT_LARGE,
+                                                      MOTOR_MAIN_FONT_ANGLE_LARGE,
                                                       geo.content_x,
                                                       geo.content_w,
                                                       current_angle_buf),
@@ -1089,22 +1357,26 @@ static void motor_main_draw_left_section(u8g2_t *u8g2,
                                  MOTOR_MAIN_FONT_SMALL,
                                  motor_main_center_text_x(u8g2,
                                                           MOTOR_MAIN_FONT_SMALL,
-                                                          geo.content_x,
-                                                          geo.content_w,
+                                                          lat_gauge_x,
+                                                          lat_gauge_w,
                                                           "LAT G"),
                                  (int16_t)(lat_gauge_y - small_h - 1),
                                  "LAT G");
     }
 
     motor_main_draw_bipolar_gauge(u8g2,
-                                  geo.content_x,
+                                  lat_gauge_x,
                                   lat_gauge_y,
-                                  geo.content_w,
+                                  lat_gauge_w,
                                   MOTOR_MAIN_LEFT_BOTTOM_GAUGE_H,
                                   lat_value_mg,
                                   g_max_mg,
                                   g_major_step_mg,
-                                  g_minor_step_mg);
+                                  g_minor_step_mg,
+                                  MOTOR_MAIN_ANGLE_GAUGE_MAJOR_TICK_H,
+                                  MOTOR_MAIN_ANGLE_GAUGE_MINOR_TICK_H,
+                                  MOTOR_MAIN_ANGLE_GAUGE_BAR_H,
+                                  MOTOR_MAIN_ANGLE_GAUGE_CENTER_TICK_W);
 }
 
 static void motor_main_draw_right_section(u8g2_t *u8g2,
@@ -1117,6 +1389,7 @@ static void motor_main_draw_right_section(u8g2_t *u8g2,
     int32_t raw_speed_x10;
     int32_t raw_max_speed_x10;
     int32_t alt_value;
+    int32_t grade_value_x10;
     char speed_buf[16];
     char max_buf[24];
     char alt_buf[24];
@@ -1126,6 +1399,8 @@ static void motor_main_draw_right_section(u8g2_t *u8g2,
     int16_t big_h;
     int16_t mid_h;
     int16_t small_h;
+    int16_t content_x;
+    int16_t content_w;
     int16_t top_row_y;
     int16_t bottom_rows_y;
     int16_t speed_y;
@@ -1141,6 +1416,7 @@ static void motor_main_draw_right_section(u8g2_t *u8g2,
 
     raw_speed_x10 = (int32_t)state->nav.speed_kmh_x10;
     raw_max_speed_x10 = (int32_t)state->session.max_speed_kmh_x10;
+    grade_value_x10 = state->snapshot.altitude.grade_noimu_x10;
     speed_unit = "km/h";
     alt_unit = Motor_Units_GetAltitudeSuffix(&state->settings.units);
     alt_value = Motor_Units_ConvertAltitudeCm(state->nav.altitude_cm, &state->settings.units);
@@ -1148,9 +1424,17 @@ static void motor_main_draw_right_section(u8g2_t *u8g2,
     motor_main_format_speed_integer(speed_buf, sizeof(speed_buf), raw_speed_x10);
     (void)snprintf(max_buf, sizeof(max_buf), "MAX %ld", (long)(raw_max_speed_x10 / 10));
     (void)snprintf(alt_buf, sizeof(alt_buf), "%ld", (long)alt_value);
-    motor_main_format_signed_x10(grade_buf, sizeof(grade_buf), state->snapshot.altitude.grade_noimu_x10);
+    motor_main_format_signed_x10(grade_buf, sizeof(grade_buf), grade_value_x10);
 
-    big_h = motor_main_get_font_height(u8g2, MOTOR_MAIN_FONT_LARGE);
+    content_x = (int16_t)(x + MOTOR_MAIN_GRADE_GAUGE_W + MOTOR_MAIN_GRADE_GAUGE_GAP_X);
+    content_w = (int16_t)(w - MOTOR_MAIN_GRADE_GAUGE_W - MOTOR_MAIN_GRADE_GAUGE_GAP_X);
+    if (content_w < 44)
+    {
+        content_x = x;
+        content_w = w;
+    }
+
+    big_h = motor_main_get_font_height(u8g2, MOTOR_MAIN_FONT_SPEED_LARGE);
     mid_h = motor_main_get_font_height(u8g2, MOTOR_MAIN_FONT_MEDIUM);
     small_h = motor_main_get_font_height(u8g2, MOTOR_MAIN_FONT_SMALL);
     top_row_y = y;
@@ -1162,36 +1446,49 @@ static void motor_main_draw_right_section(u8g2_t *u8g2,
     }
 
     unit_w = (int16_t)motor_main_measure_text(u8g2, MOTOR_MAIN_FONT_SMALL, speed_unit);
-    unit_x = (int16_t)(x + w - unit_w);
+    unit_x = (int16_t)(content_x + content_w - unit_w);
     speed_x = motor_main_right_text_x(u8g2,
-                                      MOTOR_MAIN_FONT_LARGE,
+                                      MOTOR_MAIN_FONT_SPEED_LARGE,
                                       (int16_t)(unit_x - MOTOR_MAIN_VALUE_UNIT_GAP_X),
                                       speed_buf);
     unit_y = (int16_t)(speed_y + ((big_h > small_h) ? (big_h - small_h) : 0));
+
+    if (content_x > x)
+    {
+        motor_main_draw_vertical_bipolar_gauge(u8g2,
+                                               x,
+                                               y,
+                                               MOTOR_MAIN_GRADE_GAUGE_W,
+                                               h,
+                                               grade_value_x10,
+                                               MOTOR_MAIN_GRADE_MAX_X10,
+                                               MOTOR_MAIN_GRADE_MAJOR_STEP_X10,
+                                               MOTOR_MAIN_GRADE_MINOR_STEP_X10);
+    }
 
     motor_main_draw_text_top(u8g2,
                              MOTOR_MAIN_FONT_MEDIUM,
                              motor_main_right_text_x(u8g2,
                                                      MOTOR_MAIN_FONT_MEDIUM,
-                                                     (int16_t)(x + w),
+                                                     (int16_t)(content_x + content_w),
                                                      max_buf),
                              top_row_y,
                              max_buf);
 
-    motor_main_draw_text_top(u8g2, MOTOR_MAIN_FONT_LARGE, speed_x, speed_y, speed_buf);
+    motor_main_draw_text_top(u8g2, MOTOR_MAIN_FONT_SPEED_LARGE, speed_x, speed_y, speed_buf);
     motor_main_draw_text_top(u8g2, MOTOR_MAIN_FONT_SMALL, unit_x, unit_y, speed_unit);
 
     motor_main_draw_right_stat_row(u8g2,
-                                   x,
+                                   content_x,
                                    bottom_rows_y,
-                                   w,
+                                   content_w,
                                    "ALT",
                                    alt_buf,
                                    alt_unit);
     motor_main_draw_right_stat_row(u8g2,
-                                   x,
+                                   content_x,
                                    (int16_t)(bottom_rows_y + mid_h + 4),
-                                   w,
+                                   content_w,
                                    "GRADE",
                                    grade_buf,
                                    "%");

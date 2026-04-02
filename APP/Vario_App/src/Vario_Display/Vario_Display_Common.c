@@ -10,7 +10,6 @@
 #include <stdio.h>
 #include <stddef.h>
 #include <string.h>
-#include <ctype.h>
 
 /* -------------------------------------------------------------------------- */
 /* 아이콘 fallback                                                              */
@@ -287,21 +286,6 @@ static const unsigned char vario_icon_vario_led_down_bits[] = {
 #define VARIO_UI_DECIMAL_FRAC_TOP_BIAS_Y           0
 
 /* -------------------------------------------------------------------------- */
-/* Logisoso fixed-slot typography                                             */
-/*                                                                            */
-/* 최신 사용자 요구사항                                                       */
-/* - Logisoso 계열 숫자는 '1' 이 다른 숫자보다 좁아, 동일한 자리라도            */
-/*   문자열 폭 정렬만 사용하면 마지막 자리 위치가 흔들린다.                    */
-/* - 따라서 ALT1 / 큰 GS / 큰 VARIO 는 "문자열 통째 정렬" 대신                 */
-/*   "slot 별 개별 glyph draw" 를 사용한다.                                   */
-/* - 자리 간 pitch 는 기준 숫자 폭보다 1 px 더 가깝게 만든다.                  */
-/* - glyph 자체가 좁은 경우('1', '-') 는 slot 중앙에 배치한다.                 */
-/* -------------------------------------------------------------------------- */
-#define VARIO_UI_LOGISOSO_SLOT_TIGHTEN_X           1
-#define VARIO_UI_LOGISOSO_ALT1_SLOT_COUNT          5u
-#define VARIO_UI_LOGISOSO_SPEED_SLOT_COUNT         2u
-
-/* -------------------------------------------------------------------------- */
 /* Flight average / peak cache                                                 */
 /*                                                                            */
 /* APP_STATE snapshot 구조는 그대로 유지하고,                                  */
@@ -346,6 +330,74 @@ static const unsigned char vario_icon_vario_led_down_bits[] = {
 #define VARIO_UI_FONT_BOTTOM_FRAC                 u8g2_font_7x14B_tf
 #define VARIO_UI_FONT_BOTTOM_MAX_LABEL            u8g2_font_4x6_tf
 #define VARIO_UI_FONT_BOTTOM_MAX_VALUE            u8g2_font_helvB08_tf
+
+/* -------------------------------------------------------------------------- */
+/* Logisoso fixed-slot digit layout                                            */
+/*                                                                            */
+/* u8g2의 logisoso 계열은 숫자 '1' 폭이 다른 숫자보다 좁다.                   */
+/* 따라서 문자열 전체 폭을 매 프레임 계산해서 right-align 하면               */
+/* 411 / 412 / 413 같은 값에서 마지막 자리의 glyph 폭 차이만큼                */
+/* 숫자 블록 전체가 좌우로 흔들려 보인다.                                      */
+/*                                                                            */
+/* 아래 slot count 는 "각 자리의 기준 절대 위치" 를 고정하기 위해             */
+/* 쓴다. 실제 glyph 는 slot 안의 왼쪽에 고정해서, '1' 이 들어와도             */
+/* 같은 자리(column)에 그대로 머물게 만든다.                                 */
+/* -------------------------------------------------------------------------- */
+#define VARIO_UI_LOGISOSO_SLOT_SAMPLE            "0"
+#define VARIO_UI_ALT1_FIXED_SLOT_COUNT           5u
+#define VARIO_UI_SPEED_FIXED_SLOT_COUNT          3u
+/* ---------------------------------------------------------------------- */
+/* bottom big-digit spacing tuning                                        */
+/*                                                                        */
+/* 사용자의 이번 수정 요구사항                                             */
+/* - 큰 숫자와 작은 0.1 digit 이 현재 너무 가까워 보인다.                  */
+/* - bar gauge / other UI 의 절대 위치는 건드리지 않고,                     */
+/*   큰 숫자 쪽만 왼쪽으로 2 px 이동시켜 visual gap 을 늘린다.              */
+/* - 즉 small digit(frac) 은 그대로 두고, main logisoso digits 만         */
+/*   absolute X 를 -2 px 한 값으로 그린다.                                 */
+/* ---------------------------------------------------------------------- */
+#define VARIO_UI_BOTTOM_MAIN_TO_FRAC_EXTRA_GAP_PX 2
+
+/* ---------------------------------------------------------------------- */
+/* ALT2 / ALT3 signed five-slot altitude contract                         */
+/*                                                                        */
+/* 사용자의 최신 요구사항                                                  */
+/* - ALT2 / ALT3 는 unit 종류와 무관하게                                   */
+/*   -9999 ~ 99999 범위 안에서만 그린다.                                   */
+/* - 음수 부호는 항상 가장 왼쪽 sign slot 에 고정한다.                      */
+/* - 양수는 5-slot right align, 음수는 "-1234" 형식으로 slot 고정한다. */
+/* ---------------------------------------------------------------------- */
+#define VARIO_UI_ALT23_SIGNED_MIN_DISPLAY      (-9999L)
+#define VARIO_UI_ALT23_SIGNED_MAX_DISPLAY      (99999L)
+
+/* -------------------------------------------------------------------------- */
+/* ALT1 signed five-slot Logisoso contract                                      */
+/*                                                                            */
+/* 사용자가 이전에 지정한 고도 계약을 ALT1 큰 숫자에도 그대로 적용한다.      */
+/* - 표시 범위 : -9999 ~ 99999                                                */
+/* - 전체 열(column)은 5개 고정                                               */
+/* - 음수 부호는 항상 가장 왼쪽 sign slot 에 고정                             */
+/* - 양수는 5-digit right align                                               */
+/*                                                                            */
+/* 이번 수정에서는 음수 고도에서 큰 숫자가 깨지는 버그를 바로 이 계약으로      */
+/* 해결한다.                                                                  */
+/* -------------------------------------------------------------------------- */
+#define VARIO_UI_ALT1_SIGNED_MIN_DISPLAY       (-9999L)
+#define VARIO_UI_ALT1_SIGNED_MAX_DISPLAY       (99999L)
+
+/* -------------------------------------------------------------------------- */
+/* ALT1 Logisoso fixed-slot numeric area X shift                              */
+/*                                                                            */
+/* 사용자의 최신 요구사항: 고정 폭 고정 숫자 고도 영역을 X축 기준 4 px 왼쪽으로 */
+/* 이동한다.                                                                  */
+/*                                                                            */
+/* 구현 방침                                                                   */
+/* - 단위(unit) 텍스트의 절대 위치는 그대로 둔다.                             */
+/* - ALT1 숫자 박스의 left edge 만 4 px 왼쪽으로 이동한다.                    */
+/* - 즉 value_x 계산 후 별도 런타임 shift 로직을 두지 않고,                   */
+/*   최종 절대 좌표에 상수 오프셋을 직접 반영한다.                             */
+/* -------------------------------------------------------------------------- */
+#define VARIO_UI_ALT1_FIXED_VALUE_X_SHIFT_PX   4
 
 #define VARIO_UI_FONT_STUB_TITLE                  u8g2_font_10x20_mf
 #define VARIO_UI_FONT_STUB_SUB                    u8g2_font_6x12_mf
@@ -410,6 +462,24 @@ typedef struct
     uint8_t  altitude_graph_shrink_votes;
     float    altitude_graph_center_m;
     float    altitude_graph_span_m;
+
+    /* ------------------------------------------------------------------ */
+    /* display-local flight distance accumulator                           */
+    /*                                                                    */
+    /* 이번 요구사항에서는 좌하단 glide block 의 target slot 이 비었을 때   */
+    /* 동일한 위치에 "지금까지 비행한 거리" 를 보여 준다.                 */
+    /*                                                                    */
+    /* runtime struct 에 새 public field 를 추가하지 않고,                 */
+    /* display layer 가 이미 보유한 publish cadence sample 을 이용해        */
+    /* ground distance 를 적분한다.                                        */
+    /*                                                                    */
+    /* - accumulated_flight_distance_m : 현재 비행 누적 거리               */
+    /* - last_distance_sample_ms       : 마지막 적분 sample 시각           */
+    /* - last_distance_speed_kmh       : trapezoid 적분용 이전 속도        */
+    /* ------------------------------------------------------------------ */
+    float    accumulated_flight_distance_m;
+    uint32_t last_distance_sample_ms;
+    float    last_distance_speed_kmh;
 } vario_display_dynamic_t;
 
 typedef struct
@@ -742,6 +812,610 @@ static void vario_display_split_decimal_value(const char *value_text,
 
 }
 
+static bool vario_display_runtime_has_usable_gps_fix(const vario_runtime_t *rt)
+{
+    /* ------------------------------------------------------------------ */
+    /* display 계층이 보는 GPS usable 판정                                */
+    /*                                                                    */
+    /* Vario_State 가 만든 runtime.gps_valid 를 1차 게이트로 쓰고,         */
+    /* trail / nav / speed block 이 동일한 기준을 보게 하려고              */
+    /* 좌표 범위와 3D fix 조건을 한 번 더 방어적으로 확인한다.             */
+    /* ------------------------------------------------------------------ */
+    if (rt == NULL)
+    {
+        return false;
+    }
+
+    if ((rt->gps_valid == false) ||
+        (rt->gps.fix.valid == false) ||
+        (rt->gps.fix.fixOk == false) ||
+        (rt->gps.fix.fixType < 3u))
+    {
+        return false;
+    }
+
+    if ((rt->gps.fix.lat > 900000000) || (rt->gps.fix.lat < -900000000) ||
+        (rt->gps.fix.lon > 1800000000) || (rt->gps.fix.lon < -1800000000) ||
+        ((rt->gps.fix.lat == 0) && (rt->gps.fix.lon == 0)))
+    {
+        return false;
+    }
+
+    return true;
+}
+
+static void vario_display_draw_checker_dither_box(u8g2_t *u8g2,
+                                                  int16_t x,
+                                                  int16_t y,
+                                                  int16_t w,
+                                                  int16_t h)
+{
+    int16_t px;
+    int16_t py;
+
+    if ((u8g2 == NULL) || (w <= 0) || (h <= 0))
+    {
+        return;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* GPS INOP 패턴                                                        */
+    /*                                                                    */
+    /* 사용자가 지정한 방식 그대로                                         */
+    /* - 홀수 X column 에서는 홀수 Y pixel 만 찍는다.                      */
+    /* - 짝수 X column 에서는 짝수 Y pixel 만 찍는다.                      */
+    /*                                                                    */
+    /* 즉, x/y parity 가 같은 점만 찍는 checker dither 로                 */
+    /* 우측 두꺼운 GS instant lane 을 약한 회색처럼 보이게 만든다.         */
+    /* ------------------------------------------------------------------ */
+    for (py = y; py < (int16_t)(y + h); ++py)
+    {
+        for (px = x; px < (int16_t)(x + w); ++px)
+        {
+            if (((px ^ py) & 0x01) == 0)
+            {
+                u8g2_DrawPixel(u8g2, px, py);
+            }
+        }
+    }
+}
+
+static bool vario_display_text_is_unsigned_digits(const char *text)
+{
+    size_t i;
+
+    if ((text == NULL) || (text[0] == '\0'))
+    {
+        return false;
+    }
+
+    for (i = 0u; text[i] != '\0'; ++i)
+    {
+        if ((text[i] < '0') || (text[i] > '9'))
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool vario_display_text_is_decimal_unsigned(const char *whole, const char *frac)
+{
+    if ((whole == NULL) || (frac == NULL))
+    {
+        return false;
+    }
+
+    if ((frac[0] == '\0') || (frac[1] != '\0'))
+    {
+        return false;
+    }
+
+    if ((frac[0] < '0') || (frac[0] > '9'))
+    {
+        return false;
+    }
+
+    return vario_display_text_is_unsigned_digits(whole);
+}
+
+static void vario_display_draw_logisoso_slots(u8g2_t *u8g2,
+                                              const uint8_t *font,
+                                              int16_t box_x,
+                                              int16_t top_y,
+                                              int16_t box_w,
+                                              vario_ui_align_t align,
+                                              const char *digits,
+                                              uint8_t slot_count)
+{
+    int16_t digit_slot_w;
+    int16_t draw_x;
+    int16_t total_w;
+    size_t  digit_len;
+    uint8_t start_slot;
+    uint8_t i;
+    char    digit_ch[2];
+
+    if ((u8g2 == NULL) || (font == NULL) || (digits == NULL) || (slot_count == 0u))
+    {
+        return;
+    }
+
+    digit_len = strlen(digits);
+    if ((digit_len == 0u) || (digit_len > slot_count) ||
+        (vario_display_text_is_unsigned_digits(digits) == false))
+    {
+        vario_display_draw_text_box_top(u8g2,
+                                        box_x,
+                                        top_y,
+                                        box_w,
+                                        align,
+                                        font,
+                                        digits);
+        return;
+    }
+
+    digit_slot_w = vario_display_measure_text(u8g2, font, VARIO_UI_LOGISOSO_SLOT_SAMPLE);
+    if (digit_slot_w <= 0)
+    {
+        vario_display_draw_text_box_top(u8g2,
+                                        box_x,
+                                        top_y,
+                                        box_w,
+                                        align,
+                                        font,
+                                        digits);
+        return;
+    }
+
+    total_w = (int16_t)((int16_t)slot_count * digit_slot_w);
+    switch (align)
+    {
+        case VARIO_UI_ALIGN_LEFT:
+            draw_x = box_x;
+            break;
+
+        case VARIO_UI_ALIGN_CENTER:
+            draw_x = (int16_t)(box_x + ((box_w - total_w) / 2));
+            break;
+
+        case VARIO_UI_ALIGN_RIGHT:
+        default:
+            draw_x = (int16_t)(box_x + box_w - total_w);
+            break;
+    }
+
+    if (draw_x < box_x)
+    {
+        draw_x = box_x;
+    }
+
+    start_slot = (uint8_t)(slot_count - (uint8_t)digit_len);
+    digit_ch[1] = '\0';
+
+    u8g2_SetFontPosTop(u8g2);
+    u8g2_SetFont(u8g2, font);
+    for (i = 0u; i < digit_len; ++i)
+    {
+        digit_ch[0] = digits[i];
+        u8g2_DrawStr(u8g2,
+                     (int16_t)(draw_x + ((int16_t)(start_slot + i) * digit_slot_w)),
+                     top_y,
+                     digit_ch);
+    }
+    u8g2_SetFontPosBaseline(u8g2);
+}
+
+static void vario_display_draw_logisoso_integer_value(u8g2_t *u8g2,
+                                                      int16_t box_x,
+                                                      int16_t top_y,
+                                                      int16_t box_w,
+                                                      vario_ui_align_t align,
+                                                      const char *digits,
+                                                      uint8_t slot_count)
+{
+    vario_display_draw_logisoso_slots(u8g2,
+                                      VARIO_UI_FONT_ALT1_VALUE,
+                                      box_x,
+                                      top_y,
+                                      box_w,
+                                      align,
+                                      digits,
+                                      slot_count);
+}
+
+static void vario_display_draw_logisoso_signed_altitude_value(u8g2_t *u8g2,
+                                                              int16_t box_x,
+                                                              int16_t top_y,
+                                                              int16_t box_w,
+                                                              vario_ui_align_t align,
+                                                              const char *value_text,
+                                                              uint8_t slot_count)
+{
+    int16_t digit_slot_w;
+    int16_t draw_x;
+    int16_t total_w;
+    size_t  text_len;
+    size_t  digit_len;
+    uint8_t start_slot;
+    uint8_t i;
+    char    digit_ch[2];
+    const char *digits;
+    bool    negative;
+
+    if ((u8g2 == NULL) || (value_text == NULL) || (slot_count == 0u))
+    {
+        return;
+    }
+
+    text_len = strlen(value_text);
+    if (text_len == 0u)
+    {
+        return;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* ALT1 전용 signed fixed-slot renderer                                */
+    /*                                                                    */
+    /* 기대 입력                                                            */
+    /* - 양수 : "    0" ~ "99999"                                        */
+    /* - 음수 : "-   1" ~ "-9999"                                        */
+    /*                                                                    */
+    /* 즉, 문자열은 이미 formatter 단계에서 5-column 계약을 만족한다고       */
+    /* 가정한다. 여기서는 sign slot 과 digit slot 의 X 기준만 고정한다.     */
+    /* ------------------------------------------------------------------ */
+    negative = (value_text[0] == '-');
+    digits = negative ? (value_text + 1) : value_text;
+
+    while ((*digits == ' ') && (*digits != '\0'))
+    {
+        ++digits;
+    }
+
+    digit_len = strlen(digits);
+
+    if ((digit_len == 0u) || (digit_len > slot_count) ||
+        (vario_display_text_is_unsigned_digits(digits) == false))
+    {
+        vario_display_draw_text_box_top(u8g2,
+                                        box_x,
+                                        top_y,
+                                        box_w,
+                                        align,
+                                        VARIO_UI_FONT_ALT1_VALUE,
+                                        value_text);
+        return;
+    }
+
+    digit_slot_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_ALT1_VALUE, VARIO_UI_LOGISOSO_SLOT_SAMPLE);
+    if (digit_slot_w <= 0)
+    {
+        vario_display_draw_text_box_top(u8g2,
+                                        box_x,
+                                        top_y,
+                                        box_w,
+                                        align,
+                                        VARIO_UI_FONT_ALT1_VALUE,
+                                        value_text);
+        return;
+    }
+
+    total_w = (int16_t)((int16_t)slot_count * digit_slot_w);
+
+    switch (align)
+    {
+        case VARIO_UI_ALIGN_LEFT:
+            draw_x = box_x;
+            break;
+
+        case VARIO_UI_ALIGN_CENTER:
+            draw_x = (int16_t)(box_x + ((box_w - total_w) / 2));
+            break;
+
+        case VARIO_UI_ALIGN_RIGHT:
+        default:
+            draw_x = (int16_t)(box_x + box_w - total_w);
+            break;
+    }
+
+    if (draw_x < box_x)
+    {
+        draw_x = box_x;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* slot 배치 규칙                                                       */
+    /* - 음수 부호는 항상 slot 0 에 고정                                    */
+    /* - 나머지 digit 은 항상 오른쪽 정렬                                    */
+    /* ------------------------------------------------------------------ */
+    if (negative != false)
+    {
+        start_slot = (uint8_t)(slot_count - (uint8_t)digit_len);
+        if (start_slot == 0u)
+        {
+            /* 보호: -99999 같은 불가능 조합은 formatter 단계에서 오지 않지만, */
+            /* 혹시 와도 sign slot 하나를 보존한다.                           */
+            start_slot = 1u;
+        }
+    }
+    else
+    {
+        start_slot = (uint8_t)(slot_count - (uint8_t)digit_len);
+    }
+
+    digit_ch[1] = '\0';
+
+    u8g2_SetFontPosTop(u8g2);
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_ALT1_VALUE);
+
+    if (negative != false)
+    {
+        digit_ch[0] = '-';
+        u8g2_DrawStr(u8g2, draw_x, top_y, digit_ch);
+    }
+
+    for (i = 0u; i < digit_len; ++i)
+    {
+        digit_ch[0] = digits[i];
+        u8g2_DrawStr(u8g2,
+                     (int16_t)(draw_x + ((int16_t)(start_slot + i) * digit_slot_w)),
+                     top_y,
+                     digit_ch);
+    }
+
+    u8g2_SetFontPosBaseline(u8g2);
+}
+
+static void vario_display_draw_fixed_speed_value(u8g2_t *u8g2,
+                                                 int16_t box_x,
+                                                 int16_t box_y,
+                                                 int16_t box_w,
+                                                 int16_t box_h,
+                                                 vario_ui_align_t align,
+                                                 const char *value_text)
+{
+    char    sign[4];
+    char    whole[16];
+    char    frac[4];
+    char    digit_ch[2];
+    size_t  whole_len;
+    int16_t digit_slot_w;
+    int16_t frac_w;
+    int16_t main_h;
+    int16_t frac_h;
+    int16_t whole_top;
+    int16_t frac_top;
+    int16_t draw_x;
+    int16_t total_w;
+    int16_t frac_x;
+    uint8_t start_slot;
+    uint8_t i;
+
+    if ((u8g2 == NULL) || (value_text == NULL))
+    {
+        return;
+    }
+
+    memset(sign, 0, sizeof(sign));
+    memset(whole, 0, sizeof(whole));
+    memset(frac, 0, sizeof(frac));
+    memset(digit_ch, 0, sizeof(digit_ch));
+
+    vario_display_split_decimal_value(value_text,
+                                      sign,
+                                      sizeof(sign),
+                                      whole,
+                                      sizeof(whole),
+                                      frac,
+                                      sizeof(frac));
+
+    if ((sign[0] != '\0') ||
+        (vario_display_text_is_decimal_unsigned(whole, frac) == false) ||
+        (strlen(whole) > VARIO_UI_SPEED_FIXED_SLOT_COUNT))
+    {
+        vario_display_draw_decimal_value(u8g2,
+                                         box_x,
+                                         box_y,
+                                         box_w,
+                                         box_h,
+                                         align,
+                                         VARIO_UI_FONT_BOTTOM_MAIN,
+                                         VARIO_UI_FONT_BOTTOM_FRAC,
+                                         value_text);
+        return;
+    }
+
+    digit_slot_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_BOTTOM_MAIN, VARIO_UI_LOGISOSO_SLOT_SAMPLE);
+    frac_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_BOTTOM_FRAC, frac);
+    if ((digit_slot_w <= 0) || (frac_w <= 0))
+    {
+        vario_display_draw_decimal_value(u8g2,
+                                         box_x,
+                                         box_y,
+                                         box_w,
+                                         box_h,
+                                         align,
+                                         VARIO_UI_FONT_BOTTOM_MAIN,
+                                         VARIO_UI_FONT_BOTTOM_FRAC,
+                                         value_text);
+        return;
+    }
+
+    total_w = (int16_t)((VARIO_UI_SPEED_FIXED_SLOT_COUNT * digit_slot_w) +
+                        VARIO_UI_DECIMAL_FRAC_GAP_X + frac_w);
+    switch (align)
+    {
+        case VARIO_UI_ALIGN_LEFT:
+            draw_x = box_x;
+            break;
+
+        case VARIO_UI_ALIGN_CENTER:
+            draw_x = (int16_t)(box_x + ((box_w - total_w) / 2));
+            break;
+
+        case VARIO_UI_ALIGN_RIGHT:
+        default:
+            draw_x = (int16_t)(box_x + box_w - total_w);
+            break;
+    }
+
+    if (draw_x < box_x)
+    {
+        draw_x = box_x;
+    }
+
+    main_h = vario_display_get_font_height(u8g2, VARIO_UI_FONT_BOTTOM_MAIN);
+    frac_h = vario_display_get_font_height(u8g2, VARIO_UI_FONT_BOTTOM_FRAC);
+    if (main_h <= 0)
+    {
+        main_h = box_h;
+    }
+    if (frac_h <= 0)
+    {
+        frac_h = box_h;
+    }
+
+    whole_top = box_y;
+    if (box_h > main_h)
+    {
+        whole_top = (int16_t)(box_y + ((box_h - main_h) / 2));
+    }
+    frac_top = (int16_t)(whole_top + VARIO_UI_DECIMAL_FRAC_TOP_BIAS_Y);
+    frac_x = (int16_t)(draw_x + (VARIO_UI_SPEED_FIXED_SLOT_COUNT * digit_slot_w) + VARIO_UI_DECIMAL_FRAC_GAP_X);
+
+    whole_len = strlen(whole);
+    start_slot = (uint8_t)(VARIO_UI_SPEED_FIXED_SLOT_COUNT - (uint8_t)whole_len);
+    digit_ch[1] = '\0';
+
+    /* ------------------------------------------------------------------ */
+    /* 큰 속도 숫자는 작은 0.1 digit 과의 시각 간격을 늘리기 위해            */
+    /* whole digit 쪽만 2 px 왼쪽으로 이동시킨다.                           */
+    /*                                                                    */
+    /* 또한 speed format 단계에서 이미 999.9 로 clamp 했으므로,              */
+    /* 100~999 km/h 의 3-digit whole 도 이 fixed-slot 경로를 그대로 탄다.  */
+    /* ------------------------------------------------------------------ */
+    if ((draw_x - VARIO_UI_BOTTOM_MAIN_TO_FRAC_EXTRA_GAP_PX) >= box_x)
+    {
+        draw_x = (int16_t)(draw_x - VARIO_UI_BOTTOM_MAIN_TO_FRAC_EXTRA_GAP_PX);
+    }
+    else
+    {
+        draw_x = box_x;
+    }
+
+    u8g2_SetFontPosTop(u8g2);
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_BOTTOM_MAIN);
+    for (i = 0u; i < whole_len; ++i)
+    {
+        digit_ch[0] = whole[i];
+        u8g2_DrawStr(u8g2,
+                     (int16_t)(draw_x + ((int16_t)(start_slot + i) * digit_slot_w)),
+                     whole_top,
+                     digit_ch);
+    }
+
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_BOTTOM_FRAC);
+    u8g2_DrawStr(u8g2, frac_x, frac_top, frac);
+    u8g2_SetFontPosBaseline(u8g2);
+}
+
+static void vario_display_draw_speed_inop_value(u8g2_t *u8g2,
+                                                int16_t box_x,
+                                                int16_t box_y,
+                                                int16_t box_w,
+                                                int16_t box_h,
+                                                vario_ui_align_t align)
+{
+    int16_t digit_slot_w;
+    int16_t frac_w;
+    int16_t main_h;
+    int16_t frac_h;
+    int16_t total_w;
+    int16_t draw_x;
+    int16_t frac_base_x;
+    int16_t whole_top;
+    int16_t frac_top;
+    int16_t frac_x;
+
+    if (u8g2 == NULL)
+    {
+        return;
+    }
+
+    digit_slot_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_BOTTOM_MAIN, VARIO_UI_LOGISOSO_SLOT_SAMPLE);
+    frac_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_BOTTOM_FRAC, "-");
+    if ((digit_slot_w <= 0) || (frac_w <= 0))
+    {
+        vario_display_draw_decimal_value(u8g2,
+                                         box_x,
+                                         box_y,
+                                         box_w,
+                                         box_h,
+                                         align,
+                                         VARIO_UI_FONT_BOTTOM_MAIN,
+                                         VARIO_UI_FONT_BOTTOM_FRAC,
+                                         "--.-");
+        return;
+    }
+
+    total_w = (int16_t)((VARIO_UI_SPEED_FIXED_SLOT_COUNT * digit_slot_w) +
+                        VARIO_UI_DECIMAL_FRAC_GAP_X + frac_w);
+    switch (align)
+    {
+        case VARIO_UI_ALIGN_LEFT:
+            draw_x = box_x;
+            break;
+
+        case VARIO_UI_ALIGN_CENTER:
+            draw_x = (int16_t)(box_x + ((box_w - total_w) / 2));
+            break;
+
+        case VARIO_UI_ALIGN_RIGHT:
+        default:
+            draw_x = (int16_t)(box_x + box_w - total_w);
+            break;
+    }
+
+    frac_base_x = draw_x;
+    if ((draw_x - VARIO_UI_BOTTOM_MAIN_TO_FRAC_EXTRA_GAP_PX) >= box_x)
+    {
+        draw_x = (int16_t)(draw_x - VARIO_UI_BOTTOM_MAIN_TO_FRAC_EXTRA_GAP_PX);
+    }
+    else if (draw_x < box_x)
+    {
+        draw_x = box_x;
+    }
+
+    main_h = vario_display_get_font_height(u8g2, VARIO_UI_FONT_BOTTOM_MAIN);
+    frac_h = vario_display_get_font_height(u8g2, VARIO_UI_FONT_BOTTOM_FRAC);
+    if (main_h <= 0)
+    {
+        main_h = box_h;
+    }
+    if (frac_h <= 0)
+    {
+        frac_h = box_h;
+    }
+
+    whole_top = box_y;
+    if (box_h > main_h)
+    {
+        whole_top = (int16_t)(box_y + ((box_h - main_h) / 2));
+    }
+    frac_top = (int16_t)(whole_top + VARIO_UI_DECIMAL_FRAC_TOP_BIAS_Y);
+    frac_x = (int16_t)(frac_base_x + (VARIO_UI_SPEED_FIXED_SLOT_COUNT * digit_slot_w) + VARIO_UI_DECIMAL_FRAC_GAP_X);
+
+    u8g2_SetFontPosTop(u8g2);
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_BOTTOM_MAIN);
+    u8g2_DrawStr(u8g2, (int16_t)(draw_x + digit_slot_w), whole_top, "-");
+    u8g2_DrawStr(u8g2, (int16_t)(draw_x + (digit_slot_w * 2)), whole_top, "-");
+
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_BOTTOM_FRAC);
+    u8g2_DrawStr(u8g2, frac_x, frac_top, "-");
+    u8g2_SetFontPosBaseline(u8g2);
+}
+
 static void vario_display_draw_xbm(u8g2_t *u8g2,
                                    int16_t x,
                                    int16_t y,
@@ -999,6 +1673,8 @@ static void vario_display_format_filtered_selected_altitude(char *buf,
                                                             const vario_runtime_t *rt,
                                                             vario_alt_unit_t unit)
 {
+    long display_value;
+
     if ((buf == NULL) || (buf_len == 0u) || (rt == NULL))
     {
         return;
@@ -1013,26 +1689,31 @@ static void vario_display_format_filtered_selected_altitude(char *buf,
     /* - 하지만 화면에 보이는 큰 숫자만은 upper layer의 단순 필터/hysteresis   */
     /*   결과를 사용해서 과도한 떨림 없이 읽기 쉽게 만든다.                    */
     /* - feet/meter 환산은 기존 helper를 그대로 사용한다.                      */
+    /*                                                                        */
+    /* 추가 계약                                                               */
+    /* - ALT1 큰 숫자도 이전에 사용자가 지정한 고도 표기 범위를 그대로 따른다. */
+    /* - 즉 -9999 ~ 99999 범위에서만 표시하며,                                 */
+    /*   음수일 때는 sign slot 고정 경로가 동작하도록 문자열 자체를             */
+    /*   5-column signed format 으로 만든다.                                   */
     /* ---------------------------------------------------------------------- */
+    display_value = (long)Vario_Settings_AltitudeMetersToDisplayRoundedWithUnit(rt->baro_altitude_m, unit);
+
+    if (display_value > VARIO_UI_ALT1_SIGNED_MAX_DISPLAY)
     {
-        long display_value;
+        display_value = VARIO_UI_ALT1_SIGNED_MAX_DISPLAY;
+    }
+    if (display_value < VARIO_UI_ALT1_SIGNED_MIN_DISPLAY)
+    {
+        display_value = VARIO_UI_ALT1_SIGNED_MIN_DISPLAY;
+    }
 
-        /* ------------------------------------------------------------------ */
-        /* ALT1 큰 숫자 계약                                                   */
-        /* - 표시 범위는 -9999 ~ 99999 로 clamp 한다.                          */
-        /* - 이후 fixed-slot renderer 가 5개 column 안에 값을 안정적으로 배치한다.*/
-        /* ------------------------------------------------------------------ */
-        display_value = (long)Vario_Settings_AltitudeMetersToDisplayRoundedWithUnit(rt->baro_altitude_m, unit);
-        if (display_value > 99999L)
-        {
-            display_value = 99999L;
-        }
-        if (display_value < -9999L)
-        {
-            display_value = -9999L;
-        }
-
-        snprintf(buf, buf_len, "%ld", display_value);
+    if (display_value < 0L)
+    {
+        snprintf(buf, buf_len, "-%4ld", (long)(-display_value));
+    }
+    else
+    {
+        snprintf(buf, buf_len, "%5ld", display_value);
     }
 }
 
@@ -1046,6 +1727,16 @@ static void vario_display_format_speed_value(char *buf, size_t buf_len, float sp
     }
 
     display_value = Vario_Settings_SpeedKmhToDisplayFloat(speed_kmh);
+
+    /* ------------------------------------------------------------------ */
+    /* speed big/small numeric contract                                    */
+    /*                                                                    */
+    /* 사용자가 speed 큰 숫자 fixed-slot 을 999.9 까지 보장해 달라고 했으므로 */
+    /* format 단계에서 먼저 범위를 clamp 한다.                              */
+    /* 이렇게 하면 3자리 whole digit(100~999) 도 항상 같은 renderer 경로를  */
+    /* 탄다.                                                                */
+    /* ------------------------------------------------------------------ */
+    display_value = vario_display_clampf(display_value, 0.0f, 999.9f);
     snprintf(buf, buf_len, "%.1f", (double)display_value);
 }
 
@@ -1079,6 +1770,16 @@ static void vario_display_format_speed_small(char *buf, size_t buf_len, float sp
     }
 
     display_value = Vario_Settings_SpeedKmhToDisplayFloat(speed_kmh);
+
+    /* ------------------------------------------------------------------ */
+    /* speed big/small numeric contract                                    */
+    /*                                                                    */
+    /* 사용자가 speed 큰 숫자 fixed-slot 을 999.9 까지 보장해 달라고 했으므로 */
+    /* format 단계에서 먼저 범위를 clamp 한다.                              */
+    /* 이렇게 하면 3자리 whole digit(100~999) 도 항상 같은 renderer 경로를  */
+    /* 탄다.                                                                */
+    /* ------------------------------------------------------------------ */
+    display_value = vario_display_clampf(display_value, 0.0f, 999.9f);
     snprintf(buf, buf_len, "%.1f", (double)display_value);
 }
 
@@ -1294,6 +1995,9 @@ static void vario_display_reset_sample_buffer_only(void)
     s_vario_ui_dynamic.last_displayed_glide_update_ms = 0u;
     s_vario_ui_dynamic.fast_average_glide_valid = false;
     s_vario_ui_dynamic.fast_average_glide_ratio = 0.0f;
+    s_vario_ui_dynamic.accumulated_flight_distance_m = 0.0f;
+    s_vario_ui_dynamic.last_distance_sample_ms = 0u;
+    s_vario_ui_dynamic.last_distance_speed_kmh = 0.0f;
 }
 
 static void vario_display_update_dynamic_metrics(const vario_runtime_t *rt,
@@ -1338,10 +2042,66 @@ static void vario_display_update_dynamic_metrics(const vario_runtime_t *rt,
 update_peak_only:
     if ((rt->flight_active != false) || (rt->flight_time_s > 0u) || (rt->trail_count > 0u))
     {
+        /* ------------------------------------------------------------------ */
+        /* display-local flight distance integration                           */
+        /*                                                                    */
+        /* 좌하단 target-less slot 에서 "FLT" 값을 보여 주기 위해,         */
+        /* GPS usable 시점의 ground speed 를 publish cadence 기준으로 적분한다.*/
+        /*                                                                    */
+        /* 설계 원칙                                                           */
+        /* - high-level display 는 runtime 이 만든 gps usability gate 만 본다.*/
+        /* - GPS fix 가 끊기면 적분 시계열을 끊어, 나중에 복귀했을 때          */
+        /*   gap 전체를 한 번에 먹지 않게 한다.                               */
+        /* - 적분은 trapezoid 방식으로 이전/현재 speed 평균을 사용한다.        */
+        /* - 표시 전 clamp 는 draw 단계에서만 수행하고, 내부 누적값은          */
+        /*   raw meter float 로 유지한다.                                      */
+        /* ------------------------------------------------------------------ */
+        if ((sample_ms != 0u) && (vario_display_runtime_has_usable_gps_fix(rt) != false))
+        {
+            float current_speed_kmh;
+
+            current_speed_kmh = rt->ground_speed_kmh;
+            if (current_speed_kmh < 0.0f)
+            {
+                current_speed_kmh = 0.0f;
+            }
+
+            if ((s_vario_ui_dynamic.last_distance_sample_ms != 0u) &&
+                (sample_ms > s_vario_ui_dynamic.last_distance_sample_ms))
+            {
+                uint32_t dt_ms;
+                float    avg_speed_kmh;
+
+                dt_ms = sample_ms - s_vario_ui_dynamic.last_distance_sample_ms;
+                avg_speed_kmh = (s_vario_ui_dynamic.last_distance_speed_kmh + current_speed_kmh) * 0.5f;
+
+                /* km/h * ms / 3600 = meters */
+                s_vario_ui_dynamic.accumulated_flight_distance_m +=
+                    avg_speed_kmh * ((float)dt_ms / 3600.0f);
+            }
+
+            s_vario_ui_dynamic.last_distance_sample_ms = sample_ms;
+            s_vario_ui_dynamic.last_distance_speed_kmh = current_speed_kmh;
+        }
+        else
+        {
+            /* -------------------------------------------------------------- */
+            /* GPS usable 하지 않은 구간은 distance integration 을 끊는다.     */
+            /* 다음 valid sample 에서는 그 시점부터 다시 이어 붙인다.         */
+            /* -------------------------------------------------------------- */
+            s_vario_ui_dynamic.last_distance_sample_ms = 0u;
+            s_vario_ui_dynamic.last_distance_speed_kmh = 0.0f;
+        }
+
         if (rt->gs_bar_speed_kmh > s_vario_ui_dynamic.top_speed_kmh)
         {
             s_vario_ui_dynamic.top_speed_kmh = rt->gs_bar_speed_kmh;
         }
+    }
+    else
+    {
+        s_vario_ui_dynamic.last_distance_sample_ms = 0u;
+        s_vario_ui_dynamic.last_distance_speed_kmh = 0.0f;
     }
 }
 
@@ -1425,31 +2185,50 @@ static void vario_display_update_slow_number_caches(const vario_runtime_t *rt)
     }
 
     now_ms = (rt->last_task_ms != 0u) ? rt->last_task_ms : rt->last_publish_ms;
-    target_speed_kmh = rt->filtered_ground_speed_kmh;
-    if (target_speed_kmh < 0.0f)
-    {
-        target_speed_kmh = 0.0f;
-    }
 
     /* ------------------------------------------------------------------ */
-    /* 큰 GS 숫자만 느리게 보이게 만든다.                                  */
+    /* GPS usable 여부를 display 계층에서도 다시 본다.                     */
     /*                                                                    */
-    /* - source : Vario_State 가 10 Hz GPS 샘플로 만든 filtered GS        */
-    /* - cadence: display layer 에서는 1초에 1번만 latch 한다.            */
-    /* - trainer mode 도 같은 runtime.filtered_ground_speed_kmh 경로를   */
-    /*   사용하므로 별도 분기 없이 trainer synthetic speed 가 표시된다.   */
+    /* 이유                                                               */
+    /* - trainer 종료 직후나 GPS 재획득 경계에서 stale GS 숫자가          */
+    /*   한 번 더 남는 것을 막는다.                                       */
+    /* - usable fix 가 아니면 큰 GS 숫자 latch 자체를 invalid 로 돌려     */
+    /*   렌더러가 "--.-" / dither lane 을 그리게 만든다.                 */
     /* ------------------------------------------------------------------ */
-    if ((s_vario_ui_dynamic.displayed_speed_valid == false) ||
-        (s_vario_ui_dynamic.last_display_smoothing_ms == 0u))
+    if (vario_display_runtime_has_usable_gps_fix(rt) == false)
     {
-        s_vario_ui_dynamic.displayed_speed_valid = true;
-        s_vario_ui_dynamic.displayed_speed_kmh = target_speed_kmh;
-        s_vario_ui_dynamic.last_display_smoothing_ms = now_ms;
+        s_vario_ui_dynamic.displayed_speed_valid = false;
+        s_vario_ui_dynamic.displayed_speed_kmh = 0.0f;
+        s_vario_ui_dynamic.last_display_smoothing_ms = 0u;
     }
-    else if ((now_ms - s_vario_ui_dynamic.last_display_smoothing_ms) >= 1000u)
+    else
     {
-        s_vario_ui_dynamic.displayed_speed_kmh = target_speed_kmh;
-        s_vario_ui_dynamic.last_display_smoothing_ms = now_ms;
+        target_speed_kmh = rt->filtered_ground_speed_kmh;
+        if (target_speed_kmh < 0.0f)
+        {
+            target_speed_kmh = 0.0f;
+        }
+
+        /* ------------------------------------------------------------------ */
+        /* 큰 GS 숫자만 느리게 보이게 만든다.                                  */
+        /*                                                                    */
+        /* - source : Vario_State 가 10 Hz GPS 샘플로 만든 filtered GS        */
+        /* - cadence: display layer 에서는 1초에 1번만 latch 한다.            */
+        /* - trainer mode 도 같은 runtime.filtered_ground_speed_kmh 경로를   */
+        /*   사용하므로 별도 분기 없이 trainer synthetic speed 가 표시된다.   */
+        /* ------------------------------------------------------------------ */
+        if ((s_vario_ui_dynamic.displayed_speed_valid == false) ||
+            (s_vario_ui_dynamic.last_display_smoothing_ms == 0u))
+        {
+            s_vario_ui_dynamic.displayed_speed_valid = true;
+            s_vario_ui_dynamic.displayed_speed_kmh = target_speed_kmh;
+            s_vario_ui_dynamic.last_display_smoothing_ms = now_ms;
+        }
+        else if ((now_ms - s_vario_ui_dynamic.last_display_smoothing_ms) >= 1000u)
+        {
+            s_vario_ui_dynamic.displayed_speed_kmh = target_speed_kmh;
+            s_vario_ui_dynamic.last_display_smoothing_ms = now_ms;
+        }
     }
 
     if (s_vario_ui_dynamic.fast_average_glide_valid == false)
@@ -2153,512 +2932,7 @@ static int16_t vario_display_get_marker_top_y(int16_t center_y,
     return top_y;
 }
 
-static int16_t vario_display_get_compact_digit_slot_width(u8g2_t *u8g2,
-                                                           const uint8_t *font)
-{
-    static const char *const k_samples[] = {"0", "2", "3", "4", "5", "6", "7", "8", "9"};
-    int16_t max_w;
-    uint32_t i;
-
-    if ((u8g2 == NULL) || (font == NULL))
-    {
-        return 0;
-    }
-
-    max_w = 0;
-    for (i = 0u; i < (sizeof(k_samples) / sizeof(k_samples[0])); ++i)
-    {
-        int16_t w;
-
-        /* ------------------------------------------------------------------ */
-        /* Logisoso24_tn 계열의 넓은 숫자 폭을 실제로 측정한다.                 */
-        /* - 1 은 의도적으로 기준폭에서 제외한다.                              */
-        /* - 이렇게 해야 1 이 들어와도 slot 자체는 흔들리지 않는다.            */
-        /* ------------------------------------------------------------------ */
-        w = vario_display_measure_text(u8g2, font, k_samples[i]);
-        if (w > max_w)
-        {
-            max_w = w;
-        }
-    }
-
-    return max_w;
-}
-
-static int16_t vario_display_get_compact_digit_pitch(u8g2_t *u8g2,
-                                                     const uint8_t *font)
-{
-    int16_t slot_w;
-    int16_t pitch;
-
-    slot_w = vario_display_get_compact_digit_slot_width(u8g2, font);
-    if (slot_w <= 0)
-    {
-        return 0;
-    }
-
-    /* ---------------------------------------------------------------------- */
-    /* 자리 간격을 1 px 좁혀, 사용자가 요구한 "숫자들이 1px 더 가깝게" 를 반영한다.*/
-    /* ---------------------------------------------------------------------- */
-    pitch = (int16_t)(slot_w - VARIO_UI_LOGISOSO_SLOT_TIGHTEN_X);
-    if (pitch < 1)
-    {
-        pitch = 1;
-    }
-
-    return pitch;
-}
-
-static int16_t vario_display_get_compact_digit_area_w(u8g2_t *u8g2,
-                                                      const uint8_t *font,
-                                                      uint8_t slot_count)
-{
-    int16_t slot_w;
-    int16_t pitch;
-
-    if ((u8g2 == NULL) || (font == NULL) || (slot_count == 0u))
-    {
-        return 0;
-    }
-
-    slot_w = vario_display_get_compact_digit_slot_width(u8g2, font);
-    pitch = vario_display_get_compact_digit_pitch(u8g2, font);
-    if ((slot_w <= 0) || (pitch <= 0))
-    {
-        return 0;
-    }
-
-    return (int16_t)(slot_w + ((int16_t)(slot_count - 1u) * pitch));
-}
-
-static void vario_display_draw_compact_slot_char(u8g2_t *u8g2,
-                                                 const uint8_t *font,
-                                                 int16_t slot_x,
-                                                 int16_t slot_w,
-                                                 int16_t top_y,
-                                                 char draw_char)
-{
-    char    text[2];
-    int16_t glyph_w;
-    int16_t glyph_x;
-
-    if ((u8g2 == NULL) || (font == NULL) || (draw_char == ' ') || (draw_char == ' '))
-    {
-        return;
-    }
-
-    text[0] = draw_char;
-    text[1] = ' ';
-
-    glyph_w = vario_display_measure_text(u8g2, font, text);
-    glyph_x = slot_x;
-
-    /* ---------------------------------------------------------------------- */
-    /* 1 과 '-' 는 다른 숫자보다 좁다.                                        */
-    /* slot 중앙으로 넣어야 tens / ones / 5th altitude slot 이 완전히 고정된다.*/
-    /* ---------------------------------------------------------------------- */
-    if ((glyph_w > 0) && (glyph_w < slot_w))
-    {
-        glyph_x = (int16_t)(slot_x + ((slot_w - glyph_w) / 2));
-    }
-
-    u8g2_SetFont(u8g2, font);
-    u8g2_DrawStr(u8g2, glyph_x, top_y, text);
-}
-
-static bool vario_display_parse_fixed_decimal_text(const char *value_text,
-                                                   char *whole_buf,
-                                                   size_t whole_len,
-                                                   char *frac_buf,
-                                                   size_t frac_len)
-{
-    const char *dot_pos;
-    size_t      copy_len;
-    size_t      i;
-    size_t      out_i;
-
-    if ((value_text == NULL) || (whole_buf == NULL) || (frac_buf == NULL) ||
-        (whole_len == 0u) || (frac_len == 0u))
-    {
-        return false;
-    }
-
-    whole_buf[0] = ' ';
-    frac_buf[0] = ' ';
-
-    dot_pos = strchr(value_text, '.');
-    if (dot_pos == NULL)
-    {
-        return false;
-    }
-
-    copy_len = (size_t)(dot_pos - value_text);
-    if (copy_len >= whole_len)
-    {
-        copy_len = whole_len - 1u;
-    }
-
-    out_i = 0u;
-    for (i = 0u; i < copy_len; ++i)
-    {
-        const char ch = value_text[i];
-
-        if (ch == ' ')
-        {
-            continue;
-        }
-
-        /* ------------------------------------------------------------------ */
-        /* GPS no-fix 속도 "--.-" 는 두 개의 dash 가 모두 whole slot 이다.    */
-        /* sign 문법으로 처리하지 않고 그대로 복사해야 두 dash 가 동일하게 보인다.*/
-        /* ------------------------------------------------------------------ */
-        if (out_i < (whole_len - 1u))
-        {
-            whole_buf[out_i++] = ch;
-        }
-    }
-    whole_buf[out_i] = ' ';
-
-    if (*(dot_pos + 1) != ' ')
-    {
-        frac_buf[0] = *(dot_pos + 1);
-        frac_buf[1] = ' ';
-        return true;
-    }
-
-    return false;
-}
-
-static bool vario_display_parse_fixed_altitude_text(const char *value_text,
-                                                    char *digits_buf,
-                                                    size_t digits_len,
-                                                    bool *negative,
-                                                    bool *all_dash)
-{
-    size_t i;
-    size_t digit_count;
-    size_t dash_count;
-
-    if ((value_text == NULL) || (digits_buf == NULL) || (digits_len == 0u) ||
-        (negative == NULL) || (all_dash == NULL))
-    {
-        return false;
-    }
-
-    digits_buf[0] = ' ';
-    *negative = false;
-    *all_dash = false;
-    digit_count = 0u;
-    dash_count = 0u;
-
-    for (i = 0u; value_text[i] != ' '; ++i)
-    {
-        const unsigned char ch = (unsigned char)value_text[i];
-
-        if (ch == ' ')
-        {
-            continue;
-        }
-
-        if (ch == '-')
-        {
-            *negative = true;
-            ++dash_count;
-            continue;
-        }
-
-        if (isdigit(ch) != 0)
-        {
-            if (digit_count < (digits_len - 1u))
-            {
-                digits_buf[digit_count++] = (char)ch;
-            }
-            continue;
-        }
-    }
-
-    digits_buf[digit_count] = ' ';
-
-    if ((digit_count == 0u) && (dash_count >= VARIO_UI_LOGISOSO_ALT1_SLOT_COUNT))
-    {
-        *all_dash = true;
-        *negative = false;
-        return true;
-    }
-
-    return (digit_count > 0u);
-}
-
-static void vario_display_draw_fixed_alt1_value(u8g2_t *u8g2,
-                                                int16_t box_x,
-                                                int16_t box_y,
-                                                int16_t box_w,
-                                                int16_t box_h,
-                                                const char *value_text)
-{
-    char    digits[8];
-    bool    negative;
-    bool    all_dash;
-    int16_t slot_w;
-    int16_t pitch;
-    int16_t cluster_w;
-    int16_t main_h;
-    int16_t top_y;
-    int16_t draw_x;
-    size_t  digit_count;
-    char    slot_char[VARIO_UI_LOGISOSO_ALT1_SLOT_COUNT];
-    int16_t slot_i;
-
-    if ((u8g2 == NULL) || (value_text == NULL))
-    {
-        return;
-    }
-
-    memset(digits, 0, sizeof(digits));
-    memset(slot_char, 0, sizeof(slot_char));
-
-    if (vario_display_parse_fixed_altitude_text(value_text,
-                                                digits,
-                                                sizeof(digits),
-                                                &negative,
-                                                &all_dash) == false)
-    {
-        vario_display_draw_text_box_top(u8g2,
-                                        box_x,
-                                        box_y,
-                                        box_w,
-                                        VARIO_UI_ALIGN_RIGHT,
-                                        VARIO_UI_FONT_ALT1_VALUE,
-                                        value_text);
-        return;
-    }
-
-    slot_w = vario_display_get_compact_digit_slot_width(u8g2, VARIO_UI_FONT_ALT1_VALUE);
-    pitch = vario_display_get_compact_digit_pitch(u8g2, VARIO_UI_FONT_ALT1_VALUE);
-    cluster_w = vario_display_get_compact_digit_area_w(u8g2,
-                                                       VARIO_UI_FONT_ALT1_VALUE,
-                                                       VARIO_UI_LOGISOSO_ALT1_SLOT_COUNT);
-    if ((slot_w <= 0) || (pitch <= 0) || (cluster_w <= 0) || (cluster_w > box_w))
-    {
-        vario_display_draw_text_box_top(u8g2,
-                                        box_x,
-                                        box_y,
-                                        box_w,
-                                        VARIO_UI_ALIGN_RIGHT,
-                                        VARIO_UI_FONT_ALT1_VALUE,
-                                        value_text);
-        return;
-    }
-
-    main_h = vario_display_get_font_height(u8g2, VARIO_UI_FONT_ALT1_VALUE);
-    if (main_h <= 0)
-    {
-        main_h = box_h;
-    }
-
-    top_y = box_y;
-    if (box_h > main_h)
-    {
-        top_y = (int16_t)(box_y + ((box_h - main_h) / 2));
-    }
-
-    /* ---------------------------------------------------------------------- */
-    /* ALT1 value box 의 시작 X 는 유지한다.                                   */
-    /* 이 상태에서 자리 간격만 1 px 좁히면, unit X 를 안 건드려도 숫자 덩어리가  */
-    /* 조금 왼쪽으로 물러나면서 겹침을 줄일 수 있다.                           */
-    /* ---------------------------------------------------------------------- */
-    draw_x = box_x;
-
-    if (all_dash != false)
-    {
-        for (slot_i = 0; slot_i < (int16_t)VARIO_UI_LOGISOSO_ALT1_SLOT_COUNT; ++slot_i)
-        {
-            slot_char[slot_i] = '-';
-        }
-    }
-    else
-    {
-        size_t src_i;
-
-        digit_count = strlen(digits);
-        if (((negative != false) && (digit_count > 4u)) ||
-            ((negative == false) && (digit_count > 5u)))
-        {
-            vario_display_draw_text_box_top(u8g2,
-                                            box_x,
-                                            box_y,
-                                            box_w,
-                                            VARIO_UI_ALIGN_RIGHT,
-                                            VARIO_UI_FONT_ALT1_VALUE,
-                                            value_text);
-            return;
-        }
-
-        if (negative != false)
-        {
-            slot_char[0] = '-';
-        }
-
-        for (src_i = 0u; src_i < digit_count; ++src_i)
-        {
-            slot_char[VARIO_UI_LOGISOSO_ALT1_SLOT_COUNT - (int16_t)digit_count + (int16_t)src_i] = digits[src_i];
-        }
-    }
-
-    u8g2_SetFontPosTop(u8g2);
-    for (slot_i = 0; slot_i < (int16_t)VARIO_UI_LOGISOSO_ALT1_SLOT_COUNT; ++slot_i)
-    {
-        vario_display_draw_compact_slot_char(u8g2,
-                                             VARIO_UI_FONT_ALT1_VALUE,
-                                             (int16_t)(draw_x + (slot_i * pitch)),
-                                             slot_w,
-                                             top_y,
-                                             slot_char[slot_i]);
-    }
-    u8g2_SetFontPosBaseline(u8g2);
-}
-
-static void vario_display_draw_fixed_speed_current_value(u8g2_t *u8g2,
-                                                         int16_t box_x,
-                                                         int16_t box_y,
-                                                         int16_t box_w,
-                                                         int16_t box_h,
-                                                         const char *value_text)
-{
-    char    whole[8];
-    char    frac[4];
-    size_t  whole_len;
-    int16_t slot_w;
-    int16_t pitch;
-    int16_t frac_w;
-    int16_t gap_to_frac;
-    int16_t total_w;
-    int16_t draw_x;
-    int16_t main_h;
-    int16_t frac_h;
-    int16_t whole_top;
-    int16_t frac_top;
-    int16_t tens_x;
-    int16_t ones_x;
-    int16_t frac_x;
-
-    if ((u8g2 == NULL) || (value_text == NULL))
-    {
-        return;
-    }
-
-    memset(whole, 0, sizeof(whole));
-    memset(frac, 0, sizeof(frac));
-
-    if (vario_display_parse_fixed_decimal_text(value_text,
-                                               whole,
-                                               sizeof(whole),
-                                               frac,
-                                               sizeof(frac)) == false)
-    {
-        vario_display_draw_decimal_value(u8g2,
-                                         box_x,
-                                         box_y,
-                                         box_w,
-                                         box_h,
-                                         VARIO_UI_ALIGN_RIGHT,
-                                         VARIO_UI_FONT_BOTTOM_MAIN,
-                                         VARIO_UI_FONT_BOTTOM_FRAC,
-                                         value_text);
-        return;
-    }
-
-    whole_len = strlen(whole);
-    if ((whole_len == 0u) || (whole_len > VARIO_UI_LOGISOSO_SPEED_SLOT_COUNT) || (frac[0] == ' '))
-    {
-        vario_display_draw_decimal_value(u8g2,
-                                         box_x,
-                                         box_y,
-                                         box_w,
-                                         box_h,
-                                         VARIO_UI_ALIGN_RIGHT,
-                                         VARIO_UI_FONT_BOTTOM_MAIN,
-                                         VARIO_UI_FONT_BOTTOM_FRAC,
-                                         value_text);
-        return;
-    }
-
-    slot_w = vario_display_get_compact_digit_slot_width(u8g2, VARIO_UI_FONT_BOTTOM_MAIN);
-    pitch = vario_display_get_compact_digit_pitch(u8g2, VARIO_UI_FONT_BOTTOM_MAIN);
-    frac_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_BOTTOM_FRAC, frac);
-    gap_to_frac = (int16_t)(VARIO_UI_DECIMAL_FRAC_GAP_X - VARIO_UI_LOGISOSO_SLOT_TIGHTEN_X);
-    if (gap_to_frac < 0)
-    {
-        gap_to_frac = 0;
-    }
-
-    if ((slot_w <= 0) || (pitch <= 0) || (frac_w <= 0))
-    {
-        vario_display_draw_decimal_value(u8g2,
-                                         box_x,
-                                         box_y,
-                                         box_w,
-                                         box_h,
-                                         VARIO_UI_ALIGN_RIGHT,
-                                         VARIO_UI_FONT_BOTTOM_MAIN,
-                                         VARIO_UI_FONT_BOTTOM_FRAC,
-                                         value_text);
-        return;
-    }
-
-    total_w = (int16_t)(slot_w + pitch + gap_to_frac + frac_w);
-    draw_x = (int16_t)(box_x + box_w - total_w);
-    if (draw_x < box_x)
-    {
-        draw_x = box_x;
-    }
-
-    main_h = vario_display_get_font_height(u8g2, VARIO_UI_FONT_BOTTOM_MAIN);
-    frac_h = vario_display_get_font_height(u8g2, VARIO_UI_FONT_BOTTOM_FRAC);
-    if (main_h <= 0)
-    {
-        main_h = box_h;
-    }
-    if (frac_h <= 0)
-    {
-        frac_h = box_h;
-    }
-
-    whole_top = box_y;
-    if (box_h > main_h)
-    {
-        whole_top = (int16_t)(box_y + ((box_h - main_h) / 2));
-    }
-    frac_top = (int16_t)(whole_top + VARIO_UI_DECIMAL_FRAC_TOP_BIAS_Y);
-
-    tens_x = draw_x;
-    ones_x = (int16_t)(draw_x + pitch);
-    frac_x = (int16_t)(ones_x + slot_w + gap_to_frac);
-
-    u8g2_SetFontPosTop(u8g2);
-    if (whole_len >= 2u)
-    {
-        vario_display_draw_compact_slot_char(u8g2,
-                                             VARIO_UI_FONT_BOTTOM_MAIN,
-                                             tens_x,
-                                             slot_w,
-                                             whole_top,
-                                             whole[0]);
-    }
-
-    vario_display_draw_compact_slot_char(u8g2,
-                                         VARIO_UI_FONT_BOTTOM_MAIN,
-                                         ones_x,
-                                         slot_w,
-                                         whole_top,
-                                         whole[whole_len - 1u]);
-
-    u8g2_SetFont(u8g2, VARIO_UI_FONT_BOTTOM_FRAC);
-    u8g2_DrawStr(u8g2, frac_x, frac_top, frac);
-    u8g2_SetFontPosBaseline(u8g2);
-}
-
- void vario_display_draw_decimal_value(u8g2_t *u8g2,
+void vario_display_draw_decimal_value(u8g2_t *u8g2,
                                              int16_t box_x,
                                              int16_t box_y,
                                              int16_t box_w,
@@ -2810,9 +3084,9 @@ static void vario_display_draw_fixed_vario_current_value(u8g2_t *u8g2,
     char    sign[4];
     char    whole[16];
     char    frac[4];
+    char    digit_ch[2];
     size_t  whole_len;
     int16_t digit_w;
-    int16_t pitch;
     int16_t frac_w;
     int16_t main_h;
     int16_t frac_h;
@@ -2829,6 +3103,7 @@ static void vario_display_draw_fixed_vario_current_value(u8g2_t *u8g2,
     memset(sign, 0, sizeof(sign));
     memset(whole, 0, sizeof(whole));
     memset(frac, 0, sizeof(frac));
+    memset(digit_ch, 0, sizeof(digit_ch));
 
     vario_display_split_decimal_value(value_text,
                                       sign,
@@ -2878,10 +3153,9 @@ static void vario_display_draw_fixed_vario_current_value(u8g2_t *u8g2,
         return;
     }
 
-    digit_w = vario_display_get_compact_digit_slot_width(u8g2, VARIO_UI_FONT_BOTTOM_MAIN);
-    pitch = vario_display_get_compact_digit_pitch(u8g2, VARIO_UI_FONT_BOTTOM_MAIN);
+    digit_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_BOTTOM_MAIN, "0");
     frac_w = vario_display_measure_text(u8g2, VARIO_UI_FONT_BOTTOM_FRAC, frac);
-    if ((digit_w <= 0) || (pitch <= 0) || (frac_w <= 0))
+    if ((digit_w <= 0) || (frac_w <= 0))
     {
         vario_display_draw_decimal_value(u8g2,
                                          box_x,
@@ -2913,32 +3187,37 @@ static void vario_display_draw_fixed_vario_current_value(u8g2_t *u8g2,
         whole_top = (int16_t)(box_y + ((box_h - main_h) / 2));
     }
     frac_top = (int16_t)(whole_top + VARIO_UI_DECIMAL_FRAC_TOP_BIAS_Y);
-    frac_x = (int16_t)(draw_x + pitch + digit_w + (VARIO_UI_DECIMAL_FRAC_GAP_X - VARIO_UI_LOGISOSO_SLOT_TIGHTEN_X));
-    if (frac_x < (int16_t)(draw_x + pitch + digit_w))
+    frac_x = (int16_t)(draw_x + (digit_w * 2) + VARIO_UI_DECIMAL_FRAC_GAP_X);
+
+    /* ------------------------------------------------------------------ */
+    /* current VARIO 큰 숫자도 speed block 과 동일하게,                     */
+    /* whole digit 만 2 px 왼쪽으로 이동시켜 frac digit 과의 간격을 벌린다.*/
+    /* frac / LED / bar gauge 의 절대 위치는 유지한다.                      */
+    /* ------------------------------------------------------------------ */
+    if ((draw_x - VARIO_UI_BOTTOM_MAIN_TO_FRAC_EXTRA_GAP_PX) >= box_x)
     {
-        frac_x = (int16_t)(draw_x + pitch + digit_w);
+        draw_x = (int16_t)(draw_x - VARIO_UI_BOTTOM_MAIN_TO_FRAC_EXTRA_GAP_PX);
+    }
+    else
+    {
+        draw_x = box_x;
     }
 
     u8g2_SetFontPosTop(u8g2);
+    u8g2_SetFont(u8g2, VARIO_UI_FONT_BOTTOM_MAIN);
 
     /* tens slot: 10 이상일 때만 그림. 1.x / 0.x 에서는 빈칸만 예약해 둔다. */
     if (whole_len >= 2u)
     {
-        vario_display_draw_compact_slot_char(u8g2,
-                                             VARIO_UI_FONT_BOTTOM_MAIN,
-                                             draw_x,
-                                             digit_w,
-                                             whole_top,
-                                             whole[0]);
+        digit_ch[0] = whole[0];
+        digit_ch[1] = '\0';
+        u8g2_DrawStr(u8g2, draw_x, whole_top, digit_ch);
     }
 
     /* ones slot: 0.x 일 때도 반드시 '0' 을 보여야 하므로 항상 마지막 digit 을 그림. */
-    vario_display_draw_compact_slot_char(u8g2,
-                                         VARIO_UI_FONT_BOTTOM_MAIN,
-                                         (int16_t)(draw_x + pitch),
-                                         digit_w,
-                                         whole_top,
-                                         whole[whole_len - 1u]);
+    digit_ch[0] = whole[whole_len - 1u];
+    digit_ch[1] = '\0';
+    u8g2_DrawStr(u8g2, (int16_t)(draw_x + digit_w), whole_top, digit_ch);
 
     u8g2_SetFont(u8g2, VARIO_UI_FONT_BOTTOM_FRAC);
     u8g2_DrawStr(u8g2, frac_x, frac_top, frac);
@@ -3442,6 +3721,110 @@ static void vario_display_format_arrival_height_value(char *buf,
 
 
 
+static void vario_display_format_signed_altitude_5slot(char *buf,
+                                                       size_t buf_len,
+                                                       bool valid,
+                                                       long display_value)
+{
+    if ((buf == NULL) || (buf_len == 0u))
+    {
+        return;
+    }
+
+    if (valid == false)
+    {
+        snprintf(buf, buf_len, "-----");
+        return;
+    }
+
+    if (display_value > VARIO_UI_ALT23_SIGNED_MAX_DISPLAY)
+    {
+        display_value = VARIO_UI_ALT23_SIGNED_MAX_DISPLAY;
+    }
+    if (display_value < VARIO_UI_ALT23_SIGNED_MIN_DISPLAY)
+    {
+        display_value = VARIO_UI_ALT23_SIGNED_MIN_DISPLAY;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* ALT2 / ALT3 signed five-slot formatter                              */
+    /*                                                                    */
+    /* 사용자의 최신 요구사항 그대로, 음수 부호는 항상 가장 왼쪽 sign slot   */
+    /* 에 고정한다. 양수는 5-column right align 으로 출력한다.               */
+    /* ------------------------------------------------------------------ */
+    if (display_value < 0L)
+    {
+        snprintf(buf, buf_len, "-%4ld", (long)(-display_value));
+    }
+    else
+    {
+        snprintf(buf, buf_len, "%5ld", display_value);
+    }
+}
+
+static void vario_display_format_signed_altitude_5slot_from_unit_bank(char *buf,
+                                                                      size_t buf_len,
+                                                                      bool valid,
+                                                                      const app_altitude_linear_units_t *units,
+                                                                      vario_alt_unit_t unit)
+{
+    long display_value;
+
+    if ((buf == NULL) || (buf_len == 0u))
+    {
+        return;
+    }
+
+    if ((valid == false) || (units == NULL))
+    {
+        snprintf(buf, buf_len, "-----");
+        return;
+    }
+
+    display_value = (long)vario_display_select_altitude_from_unit_bank(units, unit);
+    vario_display_format_signed_altitude_5slot(buf, buf_len, true, display_value);
+}
+
+static void vario_display_format_signed_altitude_5slot_from_meters(char *buf,
+                                                                   size_t buf_len,
+                                                                   bool valid,
+                                                                   float altitude_m,
+                                                                   vario_alt_unit_t unit)
+{
+    long display_value;
+
+    if ((buf == NULL) || (buf_len == 0u))
+    {
+        return;
+    }
+
+    if (valid == false)
+    {
+        snprintf(buf, buf_len, "-----");
+        return;
+    }
+
+    display_value = (long)Vario_Settings_AltitudeMetersToDisplayRoundedWithUnit(altitude_m, unit);
+    vario_display_format_signed_altitude_5slot(buf, buf_len, true, display_value);
+}
+
+static void vario_display_format_flight_distance_value(char *buf,
+                                                       size_t buf_len,
+                                                       float distance_m)
+{
+    float display_distance;
+
+    if ((buf == NULL) || (buf_len == 0u))
+    {
+        return;
+    }
+
+    display_distance = Vario_Settings_NavDistanceMetersToDisplayFloat(distance_m);
+    display_distance = vario_display_clampf(display_distance, 0.0f, 999.9f);
+    snprintf(buf, buf_len, "%.1f", (double)display_distance);
+}
+
+
 static void vario_display_format_lower_left_context_label(char *buf,
                                                           size_t buf_len,
                                                           const vario_runtime_t *rt)
@@ -3666,86 +4049,122 @@ static void vario_display_draw_lower_left_glide_computer(u8g2_t *u8g2,
         display_distance = Vario_Settings_NavDistanceMetersToDisplayFloat(rt->target_distance_m);
         display_distance = vario_display_clampf(display_distance, 0.0f, 999.9f);
         snprintf(distance_text, sizeof(distance_text), "%.1f", (double)display_distance);
+
+        if (context_label[0] != '\0')
+        {
+            vario_display_draw_text_box_top(u8g2,
+                                            context_x,
+                                            context_y,
+                                            context_box_w,
+                                            VARIO_UI_ALIGN_LEFT,
+                                            VARIO_UI_FONT_ALT2_UNIT,
+                                            context_label);
+        }
+
+        /* -------------------------------------------------------------- */
+        /* slot #1                                                        */
+        /* - 목적지가 설정된 경우, 기존 glide computer 3중 세트를           */
+        /*   그대로 표시한다.                                              */
+        /* -------------------------------------------------------------- */
+        vario_display_draw_xbm(u8g2,
+                               (int16_t)(icon_x + ((icon_lane_w - VARIO_ICON_FINAL_GLIDE_WIDTH) / 2)),
+                               (int16_t)(row0_y + ((row_h - VARIO_ICON_FINAL_GLIDE_HEIGHT) / 2)),
+                               VARIO_ICON_FINAL_GLIDE_WIDTH,
+                               VARIO_ICON_FINAL_GLIDE_HEIGHT,
+                               vario_icon_final_glide_bits);
+        vario_display_draw_text_box_top(u8g2,
+                                        value_x,
+                                        (int16_t)(row0_y + ((row_h - value_h) / 2)),
+                                        value_box_w,
+                                        VARIO_UI_ALIGN_RIGHT,
+                                        VARIO_UI_FONT_ALT2_VALUE,
+                                        final_glide_text);
+        vario_display_draw_text_box_top(u8g2,
+                                        unit_x,
+                                        (int16_t)(row0_y + ((row_h - unit_h) / 2)),
+                                        unit_box_w,
+                                        VARIO_UI_ALIGN_LEFT,
+                                        VARIO_UI_FONT_ALT2_UNIT,
+                                        ":1");
+
+        vario_display_draw_xbm(u8g2,
+                               (int16_t)(icon_x + ((icon_lane_w - VARIO_ICON_ARRIVAL_HEIGHT_WIDTH) / 2)),
+                               (int16_t)(row1_y + ((row_h - VARIO_ICON_ARRIVAL_HEIGHT_HEIGHT) / 2)),
+                               VARIO_ICON_ARRIVAL_HEIGHT_WIDTH,
+                               VARIO_ICON_ARRIVAL_HEIGHT_HEIGHT,
+                               vario_icon_arrival_height_bits);
+        vario_display_draw_text_box_top(u8g2,
+                                        value_x,
+                                        (int16_t)(row1_y + ((row_h - value_h) / 2)),
+                                        value_box_w,
+                                        VARIO_UI_ALIGN_RIGHT,
+                                        VARIO_UI_FONT_ALT2_VALUE,
+                                        arrival_text);
+        vario_display_draw_text_box_top(u8g2,
+                                        unit_x,
+                                        (int16_t)(row1_y + ((row_h - unit_h) / 2)),
+                                        unit_box_w,
+                                        VARIO_UI_ALIGN_LEFT,
+                                        VARIO_UI_FONT_ALT2_UNIT,
+                                        alt_unit);
+
+        vario_display_draw_text_box_top(u8g2,
+                                        icon_x,
+                                        (int16_t)(row2_y + ((row_h - unit_h) / 2)),
+                                        icon_lane_w,
+                                        VARIO_UI_ALIGN_LEFT,
+                                        VARIO_UI_FONT_ALT2_UNIT,
+                                        distance_label);
+        vario_display_draw_text_box_top(u8g2,
+                                        value_x,
+                                        (int16_t)(row2_y + ((row_h - value_h) / 2)),
+                                        value_box_w,
+                                        VARIO_UI_ALIGN_RIGHT,
+                                        VARIO_UI_FONT_ALT2_VALUE,
+                                        distance_text);
+        vario_display_draw_text_box_top(u8g2,
+                                        unit_x,
+                                        (int16_t)(row2_y + ((row_h - unit_h) / 2)),
+                                        unit_box_w,
+                                        VARIO_UI_ALIGN_LEFT,
+                                        VARIO_UI_FONT_ALT2_UNIT,
+                                        distance_unit);
     }
     else
     {
-        snprintf(distance_text, sizeof(distance_text), "---.-");
-    }
+        /* -------------------------------------------------------------- */
+        /* slot #2                                                        */
+        /* - 목적지가 설정되지 않은 경우, 같은 DIST row 위치에               */
+        /*   "지금까지 비행한 거리" 만 표시한다.                           */
+        /* - 요청사항대로 Final Glide / Arr H / context label 은            */
+        /*   전혀 그리지 않는다.                                            */
+        /* -------------------------------------------------------------- */
+        vario_display_format_flight_distance_value(distance_text,
+                                                   sizeof(distance_text),
+                                                   s_vario_ui_dynamic.accumulated_flight_distance_m);
 
-    if (context_label[0] != '\0')
-    {
         vario_display_draw_text_box_top(u8g2,
-                                        context_x,
-                                        context_y,
-                                        context_box_w,
+                                        icon_x,
+                                        (int16_t)(row2_y + ((row_h - unit_h) / 2)),
+                                        icon_lane_w,
                                         VARIO_UI_ALIGN_LEFT,
                                         VARIO_UI_FONT_ALT2_UNIT,
-                                        context_label);
+                                        "FLT");
+        vario_display_draw_text_box_top(u8g2,
+                                        value_x,
+                                        (int16_t)(row2_y + ((row_h - value_h) / 2)),
+                                        value_box_w,
+                                        VARIO_UI_ALIGN_RIGHT,
+                                        VARIO_UI_FONT_ALT2_VALUE,
+                                        distance_text);
+        vario_display_draw_text_box_top(u8g2,
+                                        unit_x,
+                                        (int16_t)(row2_y + ((row_h - unit_h) / 2)),
+                                        unit_box_w,
+                                        VARIO_UI_ALIGN_LEFT,
+                                        VARIO_UI_FONT_ALT2_UNIT,
+                                        distance_unit);
     }
-
-    vario_display_draw_xbm(u8g2,
-                           (int16_t)(icon_x + ((icon_lane_w - VARIO_ICON_FINAL_GLIDE_WIDTH) / 2)),
-                           (int16_t)(row0_y + ((row_h - VARIO_ICON_FINAL_GLIDE_HEIGHT) / 2)),
-                           VARIO_ICON_FINAL_GLIDE_WIDTH,
-                           VARIO_ICON_FINAL_GLIDE_HEIGHT,
-                           vario_icon_final_glide_bits);
-    vario_display_draw_text_box_top(u8g2,
-                                    value_x,
-                                    (int16_t)(row0_y + ((row_h - value_h) / 2)),
-                                    value_box_w,
-                                    VARIO_UI_ALIGN_RIGHT,
-                                    VARIO_UI_FONT_ALT2_VALUE,
-                                    final_glide_text);
-    vario_display_draw_text_box_top(u8g2,
-                                    unit_x,
-                                    (int16_t)(row0_y + ((row_h - unit_h) / 2)),
-                                    unit_box_w,
-                                    VARIO_UI_ALIGN_LEFT,
-                                    VARIO_UI_FONT_ALT2_UNIT,
-                                    ":1");
-
-    vario_display_draw_xbm(u8g2,
-                           (int16_t)(icon_x + ((icon_lane_w - VARIO_ICON_ARRIVAL_HEIGHT_WIDTH) / 2)),
-                           (int16_t)(row1_y + ((row_h - VARIO_ICON_ARRIVAL_HEIGHT_HEIGHT) / 2)),
-                           VARIO_ICON_ARRIVAL_HEIGHT_WIDTH,
-                           VARIO_ICON_ARRIVAL_HEIGHT_HEIGHT,
-                           vario_icon_arrival_height_bits);
-    vario_display_draw_text_box_top(u8g2,
-                                    value_x,
-                                    (int16_t)(row1_y + ((row_h - value_h) / 2)),
-                                    value_box_w,
-                                    VARIO_UI_ALIGN_RIGHT,
-                                    VARIO_UI_FONT_ALT2_VALUE,
-                                    arrival_text);
-    vario_display_draw_text_box_top(u8g2,
-                                    unit_x,
-                                    (int16_t)(row1_y + ((row_h - unit_h) / 2)),
-                                    unit_box_w,
-                                    VARIO_UI_ALIGN_LEFT,
-                                    VARIO_UI_FONT_ALT2_UNIT,
-                                    alt_unit);
-
-    vario_display_draw_text_box_top(u8g2,
-                                    icon_x,
-                                    (int16_t)(row2_y + ((row_h - unit_h) / 2)),
-                                    icon_lane_w,
-                                    VARIO_UI_ALIGN_LEFT,
-                                    VARIO_UI_FONT_ALT2_UNIT,
-                                    distance_label);
-    vario_display_draw_text_box_top(u8g2,
-                                    value_x,
-                                    (int16_t)(row2_y + ((row_h - value_h) / 2)),
-                                    value_box_w,
-                                    VARIO_UI_ALIGN_RIGHT,
-                                    VARIO_UI_FONT_ALT2_VALUE,
-                                    distance_text);
-    vario_display_draw_text_box_top(u8g2,
-                                    unit_x,
-                                    (int16_t)(row2_y + ((row_h - unit_h) / 2)),
-                                    unit_box_w,
-                                    VARIO_UI_ALIGN_LEFT,
-                                    VARIO_UI_FONT_ALT2_UNIT,
-                                    distance_unit);
 }
 
 
@@ -3804,10 +4223,11 @@ static void vario_display_format_alt2_text(char *value_buf,
             /* 현재 Alt1은 legal/competition용 barometric path로 고정이므로        */
             /* 여기서는 그 숫자를 그대로 복제해서 보여 주기만 한다.              */
             /* ------------------------------------------------------------------ */
-            vario_display_format_filtered_selected_altitude(value_buf,
-                                                            value_len,
-                                                            rt,
-                                                            settings->alt2_unit);
+            vario_display_format_signed_altitude_5slot_from_meters(value_buf,
+                                                                   value_len,
+                                                                   true,
+                                                                   rt->baro_altitude_m,
+                                                                   settings->alt2_unit);
             snprintf(unit_buf,
                      unit_len,
                      "%s",
@@ -3821,10 +4241,11 @@ static void vario_display_format_alt2_text(char *value_buf,
             smart_fuse_units = vario_display_select_smart_fuse_units(rt);
             if (smart_fuse_units != NULL)
             {
-                vario_display_format_altitude_from_unit_bank(value_buf,
-                                                             value_len,
-                                                             smart_fuse_units,
-                                                             settings->alt2_unit);
+                vario_display_format_signed_altitude_5slot_from_unit_bank(value_buf,
+                                                                              value_len,
+                                                                              true,
+                                                                              smart_fuse_units,
+                                                                              settings->alt2_unit);
             }
             else
             {
@@ -3840,10 +4261,11 @@ static void vario_display_format_alt2_text(char *value_buf,
         case VARIO_ALT2_MODE_GPS:
             if (rt->gps_valid != false)
             {
-                vario_display_format_altitude_from_unit_bank(value_buf,
-                                                             value_len,
-                                                             gps_units,
-                                                             settings->alt2_unit);
+                vario_display_format_signed_altitude_5slot_from_unit_bank(value_buf,
+                                                                              value_len,
+                                                                              true,
+                                                                              gps_units,
+                                                                              settings->alt2_unit);
             }
             else
             {
@@ -3879,10 +4301,11 @@ static void vario_display_format_alt2_text(char *value_buf,
             /*  centimeter 해상도로 계산해 두었기 때문에                           */
             /*  여기서 feet로 변환해도 1m 계단 해상도에 묶이지 않는다.             */
             /* ------------------------------------------------------------------ */
-            vario_display_format_altitude_with_unit(value_buf,
-                                                    value_len,
-                                                    rt->alt2_relative_m,
-                                                    settings->alt2_unit);
+            vario_display_format_signed_altitude_5slot_from_meters(value_buf,
+                                                                   value_len,
+                                                                   true,
+                                                                   rt->alt2_relative_m,
+                                                                   settings->alt2_unit);
             snprintf(unit_buf,
                      unit_len,
                      "%s",
@@ -3937,7 +4360,11 @@ static void vario_display_draw_top_right_altitudes(u8g2_t *u8g2,
                                                     rt,
                                                     settings->altitude_unit);
     vario_display_format_alt2_text(alt2_text, sizeof(alt2_text), alt2_unit_buf, sizeof(alt2_unit_buf), rt, settings);
-    vario_display_format_altitude_with_unit(alt3_text, sizeof(alt3_text), rt->alt3_accum_gain_m, settings->altitude_unit);
+    vario_display_format_signed_altitude_5slot_from_meters(alt3_text,
+                                                       sizeof(alt3_text),
+                                                       true,
+                                                       rt->alt3_accum_gain_m,
+                                                       settings->altitude_unit);
     alt1_unit = Vario_Settings_GetAltitudeUnitTextForUnit(settings->altitude_unit);
     alt2_unit = alt2_unit_buf;
     alt3_unit = Vario_Settings_GetAltitudeUnitTextForUnit(settings->altitude_unit);
@@ -4000,13 +4427,25 @@ static void vario_display_draw_top_right_altitudes(u8g2_t *u8g2,
     alt3_top_y = (int16_t)(alt2_top_y + alt23_row_h + VARIO_UI_ALT_ROW_GAP_Y);
 
     unit_x = (int16_t)(right_limit_x - unit_box_w);
-    value_x = (int16_t)(unit_x - VARIO_UI_TOP_ALT1_VALUE_UNIT_GAP - alt1_value_box_w);
-    vario_display_draw_fixed_alt1_value(u8g2,
-                                        value_x,
-                                        (int16_t)(alt1_top_y + ((alt1_row_h - alt1_value_h) / 2)),
-                                        alt1_value_box_w,
-                                        alt1_value_h,
-                                        alt1_text);
+    value_x = (int16_t)(unit_x - VARIO_UI_TOP_ALT1_VALUE_UNIT_GAP - alt1_value_box_w - VARIO_UI_ALT1_FIXED_VALUE_X_SHIFT_PX);
+    /* ------------------------------------------------------------------ */
+    /* ALT1 큰 숫자 fixed-slot render                                       */
+    /*                                                                    */
+    /* 최신 요구사항                                                         */
+    /* 1) 음수 고도에서도 5-column 계약이 깨지지 않게 한다.                  */
+    /* 2) 고정 폭 고정 숫자 표시 영역 자체를 X축 기준 4 px 왼쪽으로 뺀다.     */
+    /*    단위(unit) absolute position 은 그대로 둔다.                      */
+    /*                                                                    */
+    /* 따라서 ALT1은 unsigned-only helper 가 아니라                          */
+    /* signed altitude 전용 slot renderer 로 그린다.                         */
+    /* ------------------------------------------------------------------ */
+    vario_display_draw_logisoso_signed_altitude_value(u8g2,
+                                                      value_x,
+                                                      (int16_t)(alt1_top_y + ((alt1_row_h - alt1_value_h) / 2)),
+                                                      alt1_value_box_w,
+                                                      VARIO_UI_ALIGN_RIGHT,
+                                                      alt1_text,
+                                                      VARIO_UI_ALT1_FIXED_SLOT_COUNT);
     vario_display_draw_text_box_top(u8g2,
                                     unit_x,
                                     (int16_t)(alt1_top_y + ((alt1_row_h - unit_h) / 2)),
@@ -4213,6 +4652,7 @@ static void vario_display_draw_gs_side_bar(u8g2_t *u8g2,
     uint16_t                tick_count;
     uint8_t                 tick_w;
     int16_t                 tick_x;
+    bool                    gps_fix_usable;
 
     if ((u8g2 == NULL) || (v == NULL))
     {
@@ -4228,6 +4668,7 @@ static void vario_display_draw_gs_side_bar(u8g2_t *u8g2,
     right_bar_x = (int16_t)(v->x + v->w - VARIO_UI_SIDE_BAR_W);
     instant_x = (int16_t)(right_bar_x + 5);
     avg_icon_x = right_bar_x;
+    gps_fix_usable = vario_display_runtime_has_usable_gps_fix(rt);
 
     for (tick_index = 1u; tick_index <= tick_count; ++tick_index)
     {
@@ -4257,7 +4698,22 @@ static void vario_display_draw_gs_side_bar(u8g2_t *u8g2,
     }
 
     clamped_speed = vario_display_clampf(instant_speed_kmh, 0.0f, gs_top_kmh);
-    if (clamped_speed > 0.0f)
+    if (gps_fix_usable == false)
+    {
+        /* ------------------------------------------------------------------ */
+        /* GPS INOP 시에는 실속도 instant lane 전체를 checker dither 로 채운다. */
+        /*                                                                    */
+        /* 사용자가 요구한 영역은 "실제 GS instant bar 가 plot 되는 정확한    */
+        /* X lane" 이므로, 기존 instant_x / width 를 그대로 사용하고         */
+        /* viewport Y 전 높이를 꽉 채운다.                                     */
+        /* ------------------------------------------------------------------ */
+        vario_display_draw_checker_dither_box(u8g2,
+                                              instant_x,
+                                              v->y,
+                                              VARIO_UI_GAUGE_INSTANT_W,
+                                              v->h);
+    }
+    else if (clamped_speed > 0.0f)
     {
         fill_h = vario_display_scale_value_to_fill_px(clamped_speed,
                                                       gs_top_kmh,
@@ -4282,7 +4738,7 @@ static void vario_display_draw_gs_side_bar(u8g2_t *u8g2,
     /* 평균 속도 marker 는 기존과 동일하게 speed bar 의 좌측 lane 을 쓴다.     */
     /* ---------------------------------------------------------------------- */
     clamped_avg_speed = vario_display_clampf(average_speed_kmh, 0.0f, gs_top_kmh);
-    if (clamped_avg_speed > 0.0f)
+    if ((gps_fix_usable != false) && (clamped_avg_speed > 0.0f))
     {
         avg_center_y = vario_display_get_gs_value_center_y(v,
                                                            clamped_avg_speed,
@@ -4533,23 +4989,17 @@ static void vario_display_draw_speed_value_block(u8g2_t *u8g2,
     /* ------------------------------------------------------------------ */
     value_box_y = (int16_t)(v->y + v->h - value_box_h);
 
-    if (rt->gps_valid == false)
-    {
-        /* ------------------------------------------------------------------ */
-        /* GPS no-fix speed 표시 계약                                          */
-        /* - 큰 10의 자리: main Logisoso '-'                                   */
-        /* - 큰 1의 자리 : main Logisoso '-'                                   */
-        /* - 작은 0.1 자리: frac font '-'                                      */
-        /* ------------------------------------------------------------------ */
-        snprintf(value_text, sizeof(value_text), "--.-");
-    }
-    else
+    if (vario_display_runtime_has_usable_gps_fix(rt) != false)
     {
         vario_display_format_speed_value(value_text,
                                          sizeof(value_text),
                                          (s_vario_ui_dynamic.displayed_speed_valid != false) ?
                                              s_vario_ui_dynamic.displayed_speed_kmh :
                                              rt->ground_speed_kmh);
+    }
+    else
+    {
+        snprintf(value_text, sizeof(value_text), "--.-");
     }
     vario_display_format_peak_speed(max_text, sizeof(max_text), s_vario_ui_dynamic.top_speed_kmh);
     vario_display_format_optional_speed(mc_text,
@@ -4606,12 +5056,25 @@ static void vario_display_draw_speed_value_block(u8g2_t *u8g2,
                                     VARIO_UI_FONT_BOTTOM_MAX_VALUE,
                                     max_text);
 
-    vario_display_draw_fixed_speed_current_value(u8g2,
-                                                 value_box_x,
-                                                 value_box_y,
-                                                 VARIO_UI_BOTTOM_BOX_W,
-                                                 value_box_h,
-                                                 value_text);
+    if (vario_display_runtime_has_usable_gps_fix(rt) != false)
+    {
+        vario_display_draw_fixed_speed_value(u8g2,
+                                             value_box_x,
+                                             value_box_y,
+                                             VARIO_UI_BOTTOM_BOX_W,
+                                             value_box_h,
+                                             VARIO_UI_ALIGN_RIGHT,
+                                             value_text);
+    }
+    else
+    {
+        vario_display_draw_speed_inop_value(u8g2,
+                                            value_box_x,
+                                            value_box_y,
+                                            VARIO_UI_BOTTOM_BOX_W,
+                                            value_box_h,
+                                            VARIO_UI_ALIGN_RIGHT);
+    }
 }
 
 
