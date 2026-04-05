@@ -1,0 +1,17 @@
+This project is the shared APP CubeMX / HAL authority.
+
+Use this project when you need to:
+1. edit the APP IOC
+2. regenerate CubeMX APP code
+3. update shared Core / Drivers / FATFS / Firmware / Middlewares content
+
+Do not use this project as a production firmware target.
+
+Production APP images must be built from:
+- C:\Users\com\STM32CubeIDE\workspace_1.18.1_backup2\MULTI_DEVICE_MOTOR_VER0.0.1.0
+- C:\Users\com\STM32CubeIDE\workspace_1.18.1_backup2\MULTI_DEVICE_VARIO_VER0.0.1.0
+
+Reason:
+- MOTOR and VARIO own different application-layer behavior and product policy.
+- This common project intentionally builds only an IOC-safe fallback shell.
+- Flashing the common project is not recommended.
