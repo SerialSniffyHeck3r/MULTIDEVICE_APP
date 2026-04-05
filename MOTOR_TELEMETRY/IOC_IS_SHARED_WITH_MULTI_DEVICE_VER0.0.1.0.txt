@@ -1,0 +1,12 @@
+This project no longer owns its own APP CubeMX IOC.
+
+APP hardware / peripheral generation is managed only in:
+C:\Users\com\STM32CubeIDE\workspace_1.18.1_backup2\MULTI_DEVICE_VER0.0.1.0
+
+When you need to change pins, clocks, DMA, interrupts, or Cube-generated APP code:
+1. Open the APP common project above.
+2. Edit its IOC.
+3. Regenerate code there.
+4. Rebuild MOTOR_APP and VARIO_APP.
+
+This MOTOR project keeps only product-specific application code and policy.

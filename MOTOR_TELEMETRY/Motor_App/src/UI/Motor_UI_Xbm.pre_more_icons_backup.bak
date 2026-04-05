@@ -1,0 +1,46 @@
+#ifndef MOTOR_UI_XBM_H
+#define MOTOR_UI_XBM_H
+
+#define MOTOR_UI_XBM_SPEED_AVG_MARK_W 5
+#define MOTOR_UI_XBM_SPEED_AVG_MARK_H 5
+static const unsigned char motor_ui_xbm_speed_avg_mark_bits[] = {
+ 0xe4,0xee,0xff,0xfb,0xf1
+};
+
+#define MOTOR_UI_XBM_SPEED_MAX_MARK_W 5
+#define MOTOR_UI_XBM_SPEED_MAX_MARK_H 5
+static const unsigned char motor_ui_xbm_speed_max_mark_bits[] = {
+ 0xe4,0xee,0xff,0xee,0xe4
+};
+
+#define MOTOR_UI_XBM_BREADCRUMB_SPEED_AVG_W 5
+#define MOTOR_UI_XBM_BREADCRUMB_SPEED_AVG_H 5
+static const unsigned char motor_ui_xbm_breadcrumb_speed_avg_bits[] = {
+ 0xe7,0xee,0xfc,0xee,0xe7
+};
+
+#define MOTOR_UI_XBM_INFO_AVG_W 7
+#define MOTOR_UI_XBM_INFO_AVG_H 7
+static const unsigned char motor_ui_xbm_info_avg_bits[] = {
+ 0xdc,0xa2,0xd1,0xc9,0xc5,0xa2,0x9d
+};
+
+#define MOTOR_UI_XBM_INFO_MAX_W 7
+#define MOTOR_UI_XBM_INFO_MAX_H 7
+static const unsigned char motor_ui_xbm_info_max_bits[] = {
+ 0x80,0x88,0x9c,0xbe,0xff,0x80,0x80
+};
+
+#define MOTOR_UI_XBM_INFO_TIME_W 7
+#define MOTOR_UI_XBM_INFO_TIME_H 7
+static const unsigned char motor_ui_xbm_info_time_bits[] = {
+ 0x9c,0xaa,0xc9,0xf9,0xc1,0xa2,0x9c
+};
+
+#define MOTOR_UI_XBM_ALTITUDE_W 7
+#define MOTOR_UI_XBM_ALTITUDE_H 7
+static const unsigned char motor_ui_xbm_altitude_bits[] = {
+ 0x88,0x94,0xa2,0x80,0x94,0xbe,0xff
+};
+
+#endif

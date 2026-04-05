@@ -1,0 +1,486 @@
+#include "Motor_UI_Internal.h"
+#include "Motor_UI_Breadcrumb_Xbm.h"
+
+#include <math.h>
+#include <stdio.h>
+
+#define MOTOR_BREADCRUMB_FONT_SPEED_LARGE u8g2_font_logisoso26_tn
+#define MOTOR_BREADCRUMB_FONT_VALUE_LARGE u8g2_font_logisoso24_tn
+#define MOTOR_BREADCRUMB_FONT_SMALL       u8g2_font_5x7_tf
+#define MOTOR_BREADCRUMB_SIDE_BAR_W       14
+#define MOTOR_BREADCRUMB_SIDE_BAR_INST_W   8
+#define MOTOR_BREADCRUMB_SIDE_BAR_AVG_W    4
+#define MOTOR_BREADCRUMB_TOP_H            12
+#define MOTOR_BREADCRUMB_LONG_MAX_MG    1000
+
+static const uint16_t s_motor_breadcrumb_scale_presets_m[] = { 100u, 250u, 500u, 750u, 1000u };
+
+typedef struct
+{
+    uint8_t init;
+    uint8_t scale_idx;
+    uint8_t heading_up;
+    int32_t avg_long_mg_x10;
+} motor_breadcrumb_ui_t;
+
+static motor_breadcrumb_ui_t s_motor_breadcrumb_ui;
+
+static void motor_breadcrumb_init(void)
+{
+    if (s_motor_breadcrumb_ui.init != 0u)
+    {
+        return;
+    }
+    s_motor_breadcrumb_ui.init = 1u;
+    s_motor_breadcrumb_ui.scale_idx = 1u;
+}
+
+void Motor_UI_Breadcrumb_CycleScale(void)
+{
+    motor_breadcrumb_init();
+    s_motor_breadcrumb_ui.scale_idx =
+        (uint8_t)((s_motor_breadcrumb_ui.scale_idx + 1u) %
+                  (sizeof(s_motor_breadcrumb_scale_presets_m) / sizeof(s_motor_breadcrumb_scale_presets_m[0])));
+}
+
+void Motor_UI_Breadcrumb_ToggleHeadingUpMode(void)
+{
+    motor_breadcrumb_init();
+    s_motor_breadcrumb_ui.heading_up = (s_motor_breadcrumb_ui.heading_up == 0u) ? 1u : 0u;
+}
+
+uint16_t Motor_UI_Breadcrumb_GetScaleMeters(void)
+{
+    motor_breadcrumb_init();
+    return s_motor_breadcrumb_scale_presets_m[s_motor_breadcrumb_ui.scale_idx];
+}
+
+uint8_t Motor_UI_Breadcrumb_IsHeadingUpMode(void)
+{
+    motor_breadcrumb_init();
+    return s_motor_breadcrumb_ui.heading_up;
+}
+
+static int32_t motor_breadcrumb_clamp_i32(int32_t v, int32_t lo, int32_t hi)
+{
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+static int32_t motor_breadcrumb_abs_i32(int32_t v)
+{
+    return (v < 0) ? -v : v;
+}
+
+static int16_t motor_breadcrumb_font_h(u8g2_t *u8g2, const uint8_t *font)
+{
+    u8g2_SetFont(u8g2, font);
+    return (int16_t)(u8g2_GetAscent(u8g2) - u8g2_GetDescent(u8g2));
+}
+
+static uint16_t motor_breadcrumb_text_w(u8g2_t *u8g2, const uint8_t *font, const char *text)
+{
+    u8g2_SetFont(u8g2, font);
+    return u8g2_GetStrWidth(u8g2, text);
+}
+
+static void motor_breadcrumb_text_top(u8g2_t *u8g2, const uint8_t *font, int16_t x, int16_t y, const char *text)
+{
+    u8g2_SetFontPosTop(u8g2);
+    u8g2_SetFont(u8g2, font);
+    u8g2_DrawStr(u8g2, x, y, text);
+    u8g2_SetFontPosBaseline(u8g2);
+}
+
+static int32_t motor_breadcrumb_avg_speed_x10(const motor_state_t *state)
+{
+    uint64_t scaled_distance;
+    uint32_t seconds;
+
+    seconds = state->session.moving_seconds;
+    if (seconds == 0u) seconds = state->session.ride_seconds;
+    if (seconds == 0u) return 0;
+    scaled_distance = ((uint64_t)state->session.distance_m * 36ull) + ((uint64_t)seconds / 2ull);
+    return (int32_t)(scaled_distance / (uint64_t)seconds);
+}
+
+static int32_t motor_breadcrumb_speed_scale_max_x10(const motor_state_t *state)
+{
+    switch ((motor_main_speed_scale_t)state->settings.display.main_speed_scale)
+    {
+    case MOTOR_MAIN_SPEED_SCALE_100: return 1000;
+    case MOTOR_MAIN_SPEED_SCALE_300: return 3000;
+    case MOTOR_MAIN_SPEED_SCALE_200:
+    default: return 2000;
+    }
+}
+
+static void motor_breadcrumb_speed_tick_steps(const motor_state_t *state, float *minor_kmh, float *major_kmh)
+{
+    switch ((motor_main_speed_scale_t)state->settings.display.main_speed_scale)
+    {
+    case MOTOR_MAIN_SPEED_SCALE_100: *minor_kmh = 10.0f; *major_kmh = 20.0f; break;
+    case MOTOR_MAIN_SPEED_SCALE_300: *minor_kmh = 25.0f; *major_kmh = 50.0f; break;
+    case MOTOR_MAIN_SPEED_SCALE_200:
+    default: *minor_kmh = 20.0f; *major_kmh = 50.0f; break;
+    }
+}
+
+static int32_t motor_breadcrumb_avg_long_mg(const motor_state_t *state)
+{
+    int32_t current_x10;
+
+    motor_breadcrumb_init();
+    current_x10 = state->dyn.lon_accel_mg * 10;
+    if (s_motor_breadcrumb_ui.avg_long_mg_x10 == 0)
+    {
+        s_motor_breadcrumb_ui.avg_long_mg_x10 = current_x10;
+    }
+    else
+    {
+        s_motor_breadcrumb_ui.avg_long_mg_x10 +=
+            ((current_x10 - s_motor_breadcrumb_ui.avg_long_mg_x10) / 8);
+    }
+    return s_motor_breadcrumb_ui.avg_long_mg_x10 / 10;
+}
+
+static void motor_breadcrumb_format_signed_g(char *out, size_t out_size, int32_t mg)
+{
+    int32_t abs_mg = motor_breadcrumb_abs_i32(mg);
+    (void)snprintf(out, out_size, "%c%ld.%01ldG",
+                   (mg < 0) ? '-' : '+',
+                   (long)(abs_mg / 1000),
+                   (long)((abs_mg % 1000) / 100));
+}
+
+static float motor_breadcrumb_bank_ratio(float deg_abs)
+{
+    if (deg_abs <= 35.0f) return (deg_abs / 35.0f) * 0.60f;
+    if (deg_abs <= 50.0f) return 0.60f + (((deg_abs - 35.0f) / 15.0f) * 0.30f);
+    if (deg_abs <= 60.0f) return 0.90f + (((deg_abs - 50.0f) / 10.0f) * 0.10f);
+    return 1.0f;
+}
+
+static int16_t motor_breadcrumb_bank_x(int32_t bank_deg_x10, int16_t cx, int16_t half_w)
+{
+    float deg_abs = ((float)motor_breadcrumb_abs_i32(bank_deg_x10)) * 0.1f;
+    int16_t dx;
+    if (deg_abs > 60.0f) deg_abs = 60.0f;
+    dx = (int16_t)lroundf(motor_breadcrumb_bank_ratio(deg_abs) * (float)half_w);
+    return (bank_deg_x10 < 0) ? (int16_t)(cx - dx) : (int16_t)(cx + dx);
+}
+
+static uint8_t motor_breadcrumb_get_origin(const motor_state_t *state, int32_t *lat_e7, int32_t *lon_e7)
+{
+    int32_t i;
+    if (state->nav.valid != false)
+    {
+        *lat_e7 = state->nav.lat_e7;
+        *lon_e7 = state->nav.lon_e7;
+        return 1u;
+    }
+    for (i = (int32_t)state->breadcrumb.count - 1; i >= 0; --i)
+    {
+        uint16_t idx = (uint16_t)((state->breadcrumb.head + MOTOR_BREADCRUMB_POINT_COUNT -
+                                   state->breadcrumb.count + (uint16_t)i) % MOTOR_BREADCRUMB_POINT_COUNT);
+        const motor_breadcrumb_point_t *p = &state->breadcrumb.points[idx];
+        if (p->valid != 0u)
+        {
+            *lat_e7 = p->lat_e7;
+            *lon_e7 = p->lon_e7;
+            return 1u;
+        }
+    }
+    return 0u;
+}
+
+static uint8_t motor_breadcrumb_project(int32_t org_lat_e7, int32_t org_lon_e7,
+                                        int32_t lat_e7, int32_t lon_e7,
+                                        uint8_t head_up, float heading_deg,
+                                        int16_t cx, int16_t cy, float m_per_px,
+                                        int16_t *out_x, int16_t *out_y)
+{
+    float org_lat_deg = ((float)org_lat_e7) * 1.0e-7f;
+    float org_lon_deg = ((float)org_lon_e7) * 1.0e-7f;
+    float lat_deg = ((float)lat_e7) * 1.0e-7f;
+    float lon_deg = ((float)lon_e7) * 1.0e-7f;
+    float mean_lat_rad = ((org_lat_deg + lat_deg) * 0.5f) * (3.14159265358979323846f / 180.0f);
+    float dx_m = (lon_deg - org_lon_deg) * (111319.5f * cosf(mean_lat_rad));
+    float dy_m = (lat_deg - org_lat_deg) * 111132.0f;
+    float px_m = dx_m;
+    float py_m = dy_m;
+    if (head_up != 0u)
+    {
+        float rad = heading_deg * (3.14159265358979323846f / 180.0f);
+        px_m = (dx_m * cosf(rad)) - (dy_m * sinf(rad));
+        py_m = (dx_m * sinf(rad)) + (dy_m * cosf(rad));
+    }
+    *out_x = (int16_t)lroundf((float)cx + (px_m / m_per_px));
+    *out_y = (int16_t)lroundf((float)cy - (py_m / m_per_px));
+    return 1u;
+}
+
+static void motor_breadcrumb_draw_arrow(u8g2_t *u8g2, int16_t cx, int16_t cy, float heading_deg)
+{
+    float rad = heading_deg * (3.14159265358979323846f / 180.0f);
+    int16_t tip_x = (int16_t)lroundf((float)cx + (sinf(rad) * 5.0f));
+    int16_t tip_y = (int16_t)lroundf((float)cy - (cosf(rad) * 5.0f));
+    int16_t left_x = (int16_t)lroundf((float)cx + (sinf(rad + 2.5f) * 3.0f));
+    int16_t left_y = (int16_t)lroundf((float)cy - (cosf(rad + 2.5f) * 3.0f));
+    int16_t right_x = (int16_t)lroundf((float)cx + (sinf(rad - 2.5f) * 3.0f));
+    int16_t right_y = (int16_t)lroundf((float)cy - (cosf(rad - 2.5f) * 3.0f));
+    u8g2_DrawLine(u8g2, tip_x, tip_y, left_x, left_y);
+    u8g2_DrawLine(u8g2, tip_x, tip_y, right_x, right_y);
+    u8g2_DrawLine(u8g2, left_x, left_y, right_x, right_y);
+}
+
+static void motor_breadcrumb_draw_top_angle(u8g2_t *u8g2, const ui_rect_t *v, const motor_state_t *state, ui_rect_t *trail_v)
+{
+    int16_t x = (int16_t)(v->x + MOTOR_BREADCRUMB_SIDE_BAR_W + 4);
+    int16_t y = v->y;
+    int16_t w = (int16_t)(v->w - (MOTOR_BREADCRUMB_SIDE_BAR_W * 2) - 8);
+    int16_t h = MOTOR_BREADCRUMB_TOP_H;
+    int16_t cx = (int16_t)(x + (w / 2));
+    int16_t half_w = (int16_t)((w - 2) / 2);
+    int16_t deg;
+    int16_t mx = motor_breadcrumb_bank_x((int32_t)state->dyn.bank_deg_x10, cx, half_w);
+    char scale_buf[16];
+    const char *mode_text = (Motor_UI_Breadcrumb_IsHeadingUpMode() != 0u) ? "HEAD UP" : "NORTH UP";
+
+    for (deg = 10; deg < 60; deg += 10)
+    {
+        int16_t dx = (int16_t)lroundf(motor_breadcrumb_bank_ratio((float)deg) * (float)half_w);
+        u8g2_DrawVLine(u8g2, (int16_t)(cx - dx), y + 1, 6);
+        u8g2_DrawVLine(u8g2, (int16_t)(cx + dx), y + 1, 6);
+    }
+    u8g2_DrawVLine(u8g2, cx, y, 9);
+    u8g2_DrawBox(u8g2,
+                 (mx < cx) ? mx : cx,
+                 (int16_t)(y + h - 3),
+                 (uint8_t)(motor_breadcrumb_abs_i32(mx - cx) + 1),
+                 3);
+
+    (void)snprintf(scale_buf, sizeof(scale_buf), "%um", (unsigned)Motor_UI_Breadcrumb_GetScaleMeters());
+    motor_breadcrumb_text_top(u8g2, MOTOR_BREADCRUMB_FONT_SMALL, x, 2, scale_buf);
+    motor_breadcrumb_text_top(u8g2,
+                              MOTOR_BREADCRUMB_FONT_SMALL,
+                              (int16_t)(x + w - (int16_t)motor_breadcrumb_text_w(u8g2, MOTOR_BREADCRUMB_FONT_SMALL, mode_text)),
+                              2,
+                              mode_text);
+
+    trail_v->x = (int16_t)(v->x + MOTOR_BREADCRUMB_SIDE_BAR_W);
+    trail_v->y = (int16_t)(y + h + 3);
+    trail_v->w = (int16_t)(v->w - (MOTOR_BREADCRUMB_SIDE_BAR_W * 2));
+    trail_v->h = (int16_t)(v->h - h - 3);
+}
+
+static void motor_breadcrumb_draw_left_bar(u8g2_t *u8g2, const ui_rect_t *v, const motor_state_t *state)
+{
+    int16_t zero_top = (int16_t)(v->y + ((v->h - 3) / 2));
+    int16_t zero_bottom = (int16_t)(zero_top + 2);
+    int16_t top_span = (int16_t)(zero_top - v->y);
+    int16_t bottom_span = (int16_t)((v->y + v->h - 1) - zero_bottom);
+    int32_t inst = motor_breadcrumb_clamp_i32(state->dyn.lon_accel_mg, -MOTOR_BREADCRUMB_LONG_MAX_MG, MOTOR_BREADCRUMB_LONG_MAX_MG);
+    int32_t avg = motor_breadcrumb_clamp_i32(motor_breadcrumb_avg_long_mg(state), -MOTOR_BREADCRUMB_LONG_MAX_MG, MOTOR_BREADCRUMB_LONG_MAX_MG);
+    int16_t i;
+    char cur_buf[16];
+    char avg_buf[16];
+    int16_t value_x = (int16_t)(v->x + MOTOR_BREADCRUMB_SIDE_BAR_W + 4);
+    int16_t value_y = (int16_t)(v->y + v->h - motor_breadcrumb_font_h(u8g2, MOTOR_BREADCRUMB_FONT_VALUE_LARGE) - 2);
+
+    for (i = 1; i <= 5; ++i)
+    {
+        int16_t up_y = (int16_t)(zero_top - lroundf((((float)i) / 5.0f) * (float)top_span));
+        int16_t down_y = (int16_t)(zero_bottom + lroundf((((float)i) / 5.0f) * (float)bottom_span));
+        u8g2_DrawHLine(u8g2, v->x, up_y, (i == 5) ? 14u : 8u);
+        u8g2_DrawHLine(u8g2, v->x, down_y, (i == 5) ? 14u : 8u);
+    }
+    u8g2_DrawHLine(u8g2, v->x, zero_top, 14u);
+    u8g2_DrawHLine(u8g2, v->x, (int16_t)(zero_top + 1), 14u);
+    u8g2_DrawHLine(u8g2, v->x, zero_bottom, 14u);
+
+    if (inst > 0)
+    {
+        int16_t fill = (int16_t)lroundf((((float)inst) / 1000.0f) * (float)top_span);
+        if (fill > 0) u8g2_DrawBox(u8g2, (int16_t)(v->x + 1), (int16_t)(zero_top - fill + 1), 8u, fill);
+    }
+    else if (inst < 0)
+    {
+        int16_t fill = (int16_t)lroundf((((float)(-inst)) / 1000.0f) * (float)bottom_span);
+        if (fill > 0) u8g2_DrawBox(u8g2, (int16_t)(v->x + 1), zero_bottom, 8u, fill);
+    }
+
+    if (avg > 0)
+    {
+        int16_t fill = (int16_t)lroundf((((float)avg) / 1000.0f) * (float)top_span);
+        if (fill > 0) u8g2_DrawBox(u8g2, (int16_t)(v->x + 10), (int16_t)(zero_top - fill + 1), 4u, fill);
+    }
+    else if (avg < 0)
+    {
+        int16_t fill = (int16_t)lroundf((((float)(-avg)) / 1000.0f) * (float)bottom_span);
+        if (fill > 0) u8g2_DrawBox(u8g2, (int16_t)(v->x + 10), zero_bottom, 4u, fill);
+    }
+
+    motor_breadcrumb_format_signed_g(cur_buf, sizeof(cur_buf), inst);
+    motor_breadcrumb_format_signed_g(avg_buf, sizeof(avg_buf), avg);
+    motor_breadcrumb_text_top(u8g2, MOTOR_BREADCRUMB_FONT_SMALL, value_x,
+                              (int16_t)(value_y - motor_breadcrumb_font_h(u8g2, MOTOR_BREADCRUMB_FONT_SMALL) - 2), avg_buf);
+    motor_breadcrumb_text_top(u8g2, MOTOR_BREADCRUMB_FONT_VALUE_LARGE, value_x, value_y, cur_buf);
+}
+
+static void motor_breadcrumb_draw_right_bar(u8g2_t *u8g2, const ui_rect_t *v, const motor_state_t *state)
+{
+    float minor_kmh;
+    float major_kmh;
+    float scale_top = (float)(motor_breadcrumb_speed_scale_max_x10(state) / 10);
+    float speed_kmh = ((float)motor_breadcrumb_clamp_i32((int32_t)state->nav.speed_kmh_x10, 0, 4000)) * 0.1f;
+    float avg_kmh = ((float)motor_breadcrumb_avg_speed_x10(state)) * 0.1f;
+    uint16_t ticks;
+    uint16_t i;
+    int16_t right_bar_x = v->x;
+    int16_t value_y;
+    int16_t unit_y;
+    char speed_buf[16];
+
+    motor_breadcrumb_speed_tick_steps(state, &minor_kmh, &major_kmh);
+    ticks = (uint16_t)lroundf(scale_top / minor_kmh);
+    for (i = 1u; i <= ticks; ++i)
+    {
+        float tick_val = ((float)i) * minor_kmh;
+        float ratio = tick_val / scale_top;
+        float major_ratio = tick_val / major_kmh;
+        uint8_t tick_w = (fabsf(major_ratio - roundf(major_ratio)) < 0.001f) ? 14u : 8u;
+        int16_t tick_y = (int16_t)(v->y + v->h - 1 - lroundf(ratio * (float)(v->h - 1)));
+        u8g2_DrawHLine(u8g2, (int16_t)(right_bar_x + 14 - tick_w), tick_y, tick_w);
+    }
+
+    if (speed_kmh > 0.0f)
+    {
+        int16_t fill = (int16_t)lroundf((speed_kmh / scale_top) * (float)v->h);
+        if (fill > 0) u8g2_DrawBox(u8g2, (int16_t)(right_bar_x + 5), (int16_t)(v->y + v->h - fill), 8u, fill);
+    }
+    if (avg_kmh > 0.0f)
+    {
+        int16_t cy = (int16_t)(v->y + v->h - 1 - lroundf((avg_kmh / scale_top) * (float)(v->h - 1)));
+        int16_t iy = (int16_t)(cy - (MOTOR_UI_BREADCRUMB_AVG_SPEED_XBM_H / 2));
+        u8g2_DrawXBMP(u8g2, right_bar_x, iy,
+                      MOTOR_UI_BREADCRUMB_AVG_SPEED_XBM_W,
+                      MOTOR_UI_BREADCRUMB_AVG_SPEED_XBM_H,
+                      motor_ui_breadcrumb_avg_speed_xbm_bits);
+    }
+
+    (void)snprintf(speed_buf,
+                   sizeof(speed_buf),
+                   "%ld",
+                   (long)(motor_breadcrumb_clamp_i32((int32_t)state->nav.speed_kmh_x10, 0, 4000) / 10));
+    value_y = (int16_t)(v->y + v->h - motor_breadcrumb_font_h(u8g2, MOTOR_BREADCRUMB_FONT_SPEED_LARGE) - 2);
+    unit_y = (int16_t)(value_y + motor_breadcrumb_font_h(u8g2, MOTOR_BREADCRUMB_FONT_SPEED_LARGE) -
+                       motor_breadcrumb_font_h(u8g2, MOTOR_BREADCRUMB_FONT_SMALL) - 2);
+    motor_breadcrumb_text_top(u8g2,
+                              MOTOR_BREADCRUMB_FONT_SPEED_LARGE,
+                              (int16_t)(v->x - 4 - (int16_t)motor_breadcrumb_text_w(u8g2, MOTOR_BREADCRUMB_FONT_SPEED_LARGE, speed_buf)),
+                              value_y,
+                              speed_buf);
+    motor_breadcrumb_text_top(u8g2,
+                              MOTOR_BREADCRUMB_FONT_SMALL,
+                              (int16_t)(v->x - 4 - (int16_t)motor_breadcrumb_text_w(u8g2, MOTOR_BREADCRUMB_FONT_SMALL, "km/h")),
+                              unit_y,
+                              "km/h");
+}
+
+static void motor_breadcrumb_draw_trail(u8g2_t *u8g2, const ui_rect_t *v, const motor_state_t *state)
+{
+    uint16_t i;
+    uint16_t start_idx;
+    int32_t org_lat_e7;
+    int32_t org_lon_e7;
+    int16_t cx;
+    int16_t cy;
+    float half_w = (float)(v->w / 2);
+    float half_h = (float)(v->h / 2);
+    float m_per_px;
+    float heading_deg = (state->nav.heading_valid != false) ? (((float)state->nav.heading_deg_x10) * 0.1f) : 0.0f;
+    uint8_t have_prev = 0u;
+    int16_t prev_x = 0;
+    int16_t prev_y = 0;
+
+    if (motor_breadcrumb_get_origin(state, &org_lat_e7, &org_lon_e7) == 0u)
+    {
+        Motor_UI_DrawCenteredTextBlock(u8g2, v, (int16_t)((v->h / 2) - 10),
+                                       "TRACK EMPTY", "No position history yet", "Move to start trail");
+        return;
+    }
+
+    cx = (int16_t)(v->x + (v->w / 2));
+    cy = (int16_t)(v->y + (v->h / 2));
+    m_per_px = ((float)Motor_UI_Breadcrumb_GetScaleMeters()) / ((half_w < half_h) ? half_w : half_h);
+    start_idx = (uint16_t)((state->breadcrumb.head + MOTOR_BREADCRUMB_POINT_COUNT - state->breadcrumb.count) %
+                           MOTOR_BREADCRUMB_POINT_COUNT);
+    u8g2_SetClipWindow(u8g2,
+                       (u8g2_uint_t)v->x,
+                       (u8g2_uint_t)v->y,
+                       (u8g2_uint_t)(v->x + v->w),
+                       (u8g2_uint_t)(v->y + v->h));
+
+    for (i = 0u; i < state->breadcrumb.count; ++i)
+    {
+        uint16_t idx = (uint16_t)((start_idx + i) % MOTOR_BREADCRUMB_POINT_COUNT);
+        const motor_breadcrumb_point_t *p = &state->breadcrumb.points[idx];
+        int16_t px;
+        int16_t py;
+
+        if (p->valid == 0u) continue;
+        (void)motor_breadcrumb_project(org_lat_e7, org_lon_e7, p->lat_e7, p->lon_e7,
+                                       Motor_UI_Breadcrumb_IsHeadingUpMode(), heading_deg,
+                                       cx, cy, m_per_px, &px, &py);
+        if (have_prev != 0u) u8g2_DrawLine(u8g2, prev_x, prev_y, px, py);
+        else u8g2_DrawPixel(u8g2, px, py);
+        prev_x = px;
+        prev_y = py;
+        have_prev = 1u;
+    }
+
+    if (state->breadcrumb.home_valid != 0u)
+    {
+        int16_t hx;
+        int16_t hy;
+        (void)motor_breadcrumb_project(org_lat_e7, org_lon_e7,
+                                       state->breadcrumb.home_lat_e7, state->breadcrumb.home_lon_e7,
+                                       Motor_UI_Breadcrumb_IsHeadingUpMode(), heading_deg,
+                                       cx, cy, m_per_px, &hx, &hy);
+        u8g2_DrawLine(u8g2, (int16_t)(hx - 3), hy, (int16_t)(hx + 3), hy);
+        u8g2_DrawLine(u8g2, hx, (int16_t)(hy - 3), hx, (int16_t)(hy + 3));
+    }
+
+    motor_breadcrumb_draw_arrow(u8g2, cx, cy,
+                                (Motor_UI_Breadcrumb_IsHeadingUpMode() != 0u) ? 0.0f : heading_deg);
+    u8g2_SetMaxClipWindow(u8g2);
+}
+
+void Motor_UI_DrawScreen_Breadcrumb(u8g2_t *u8g2, const ui_rect_t *viewport, const motor_state_t *state)
+{
+    ui_rect_t left_v;
+    ui_rect_t right_v;
+    ui_rect_t trail_v;
+
+    if ((u8g2 == 0) || (viewport == 0) || (state == 0))
+    {
+        return;
+    }
+
+    motor_breadcrumb_init();
+    left_v.x = viewport->x;
+    left_v.y = viewport->y;
+    left_v.w = MOTOR_BREADCRUMB_SIDE_BAR_W;
+    left_v.h = viewport->h;
+    right_v.x = (int16_t)(viewport->x + viewport->w - MOTOR_BREADCRUMB_SIDE_BAR_W);
+    right_v.y = viewport->y;
+    right_v.w = MOTOR_BREADCRUMB_SIDE_BAR_W;
+    right_v.h = viewport->h;
+
+    motor_breadcrumb_draw_top_angle(u8g2, viewport, state, &trail_v);
+    motor_breadcrumb_draw_trail(u8g2, &trail_v, state);
+    motor_breadcrumb_draw_left_bar(u8g2, &left_v, state);
+    motor_breadcrumb_draw_right_bar(u8g2, &right_v, state);
+}
